@@ -116,19 +116,26 @@ async def _tmux_relay_osascript(script: str, timeout: float = 30.0) -> tuple[boo
     return False, "tmux relay timed out"
 
 
-async def _tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool, str]:
+async def tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool, str]:
     """Run a bash command via tmux new-window to inherit Terminal.app's FDA.
 
     launchd-spawned children do not inherit Full Disk Access, so accessing
     protected paths like `~/Library/Group Containers/...` or `~/Library/Messages`
     fails silently. Routing through a tmux session that was started from
     Terminal.app (which has FDA) gives the command full access.
+
+    WARNING: shell_cmd is executed by bash inside the relay session; caller
+    is responsible for quoting untrusted input. Do NOT pass user-controlled
+    strings without escaping — this function intentionally supports shell
+    features (pipes, redirects, globs) and makes no attempt to sandbox.
     """
     tag = uuid.uuid4().hex[:8]
     result_file = Path(f"/tmp/shellrelay-{tag}.out")
 
     target = None
+    checked = []
     for sess in _RELAY_SESSIONS:
+        checked.append(sess)
         ret = subprocess.run([_TMUX, "has-session", "-t", sess],
                              capture_output=True, timeout=3)
         if ret.returncode == 0:
@@ -136,7 +143,16 @@ async def _tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool
             break
 
     if not target:
-        return False, "no tmux session for relay"
+        # launchd-spawned tmux cannot inherit FDA on its own, so auto-creating
+        # a fresh session would be useless for the TCC-protected paths this
+        # helper exists to reach. Warn loudly and bail.
+        detail = (
+            f"no tmux session for relay (checked: {', '.join(checked)}). "
+            f"Start a tmux session from Terminal.app named 'claude' or 'main' "
+            f"so FDA is inherited by the relay."
+        )
+        print(f"[tmux_relay_shell] WARNING: {detail}", flush=True)
+        return False, detail
 
     bash_cmd = f"({shell_cmd}) > {result_file} 2>&1; exit 0"
     proc = await asyncio.create_subprocess_exec(
@@ -145,7 +161,17 @@ async def _tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await proc.communicate()
+    _stdout, _stderr = await proc.communicate()
+
+    if proc.returncode != 0:
+        print(
+            f"[tmux_relay_shell] new-window failed rc={proc.returncode} "
+            f"session={target} cmd={shell_cmd[:100]!r} "
+            f"stderr={_stderr.decode(errors='replace').strip()[:200]}",
+            flush=True,
+        )
+        result_file.unlink(missing_ok=True)
+        return False, f"tmux new-window returned {proc.returncode}"
 
     for _ in range(int(timeout * 5)):
         if result_file.exists():
@@ -154,8 +180,35 @@ async def _tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool
             return True, output
         await asyncio.sleep(0.2)
 
+    print(
+        f"[tmux_relay_shell] result file never appeared "
+        f"session={target} cmd={shell_cmd[:100]!r} timeout={timeout}s",
+        flush=True,
+    )
     result_file.unlink(missing_ok=True)
     return False, "tmux shell relay timed out"
+
+
+async def tmux_relay_healthy() -> tuple[bool, str]:
+    """Probe whether the tmux relay can reach TCC-protected paths.
+
+    Runs `ls ~/Library/Messages/chat.db` through the relay. Returns
+    (True, reason) if the chat.db path comes back without a TCC or
+    missing-file error, else (False, diagnostic).
+    """
+    ok, output = await tmux_relay_shell(
+        "ls ~/Library/Messages/chat.db 2>&1", timeout=10.0
+    )
+    if not ok:
+        return False, f"relay unavailable: {output}"
+    out = output.strip()
+    if "Operation not permitted" in out:
+        return False, f"relay lacks FDA: {out}"
+    if "No such file" in out:
+        return False, f"chat.db missing from relay view: {out}"
+    if "chat.db" in out:
+        return True, "relay has FDA"
+    return False, f"unexpected probe output: {out[:200]}"
 
 
 async def send_imessage_reliable(buddy: str, message: str) -> tuple[bool, str]:

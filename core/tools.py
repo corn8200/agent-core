@@ -74,14 +74,27 @@ async def _tmux_relay_osascript(script: str, timeout: float = 30.0) -> tuple[boo
     result_file = Path(f"/tmp/imsg-{tag}.result")
     script_file.write_text(script)
 
-    # Find a live tmux session
+    # Find a live tmux session. Use async subprocess with wait_for so a
+    # wedged tmux server (hung has-session call) cannot block the event loop.
     target = None
     for sess in _RELAY_SESSIONS:
-        ret = subprocess.run([_TMUX, "has-session", "-t", sess],
-                             capture_output=True, timeout=3)
-        if ret.returncode == 0:
-            target = sess
-            break
+        try:
+            p = await asyncio.create_subprocess_exec(
+                _TMUX, "has-session", "-t", sess,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                rc = await asyncio.wait_for(p.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                p.kill()
+                await p.wait()
+                rc = 1
+            if rc == 0:
+                target = sess
+                break
+        except Exception:
+            continue
 
     if not target:
         script_file.unlink(missing_ok=True)
@@ -136,11 +149,23 @@ async def tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool,
     checked = []
     for sess in _RELAY_SESSIONS:
         checked.append(sess)
-        ret = subprocess.run([_TMUX, "has-session", "-t", sess],
-                             capture_output=True, timeout=3)
-        if ret.returncode == 0:
-            target = sess
-            break
+        try:
+            p = await asyncio.create_subprocess_exec(
+                _TMUX, "has-session", "-t", sess,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            try:
+                rc = await asyncio.wait_for(p.wait(), timeout=2)
+            except asyncio.TimeoutError:
+                p.kill()
+                await p.wait()
+                rc = 1
+            if rc == 0:
+                target = sess
+                break
+        except Exception:
+            continue
 
     if not target:
         # launchd-spawned tmux cannot inherit FDA on its own, so auto-creating

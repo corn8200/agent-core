@@ -116,6 +116,48 @@ async def _tmux_relay_osascript(script: str, timeout: float = 30.0) -> tuple[boo
     return False, "tmux relay timed out"
 
 
+async def _tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool, str]:
+    """Run a bash command via tmux new-window to inherit Terminal.app's FDA.
+
+    launchd-spawned children do not inherit Full Disk Access, so accessing
+    protected paths like `~/Library/Group Containers/...` or `~/Library/Messages`
+    fails silently. Routing through a tmux session that was started from
+    Terminal.app (which has FDA) gives the command full access.
+    """
+    tag = uuid.uuid4().hex[:8]
+    result_file = Path(f"/tmp/shellrelay-{tag}.out")
+
+    target = None
+    for sess in _RELAY_SESSIONS:
+        ret = subprocess.run([_TMUX, "has-session", "-t", sess],
+                             capture_output=True, timeout=3)
+        if ret.returncode == 0:
+            target = sess
+            break
+
+    if not target:
+        return False, "no tmux session for relay"
+
+    bash_cmd = f"({shell_cmd}) > {result_file} 2>&1; exit 0"
+    proc = await asyncio.create_subprocess_exec(
+        _TMUX, "new-window", "-a", "-d", "-t", f"{target}:", "-n", f"shrelay-{tag}",
+        "bash", "-c", bash_cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await proc.communicate()
+
+    for _ in range(int(timeout * 5)):
+        if result_file.exists():
+            output = result_file.read_text()
+            result_file.unlink(missing_ok=True)
+            return True, output
+        await asyncio.sleep(0.2)
+
+    result_file.unlink(missing_ok=True)
+    return False, "tmux shell relay timed out"
+
+
 async def send_imessage_reliable(buddy: str, message: str) -> tuple[bool, str]:
     """Send iMessage via tmux relay (works from LaunchAgents). Falls back to Pushover."""
     # Pre-warm Messages.app so the first send doesn't cold-start inside the 30s window

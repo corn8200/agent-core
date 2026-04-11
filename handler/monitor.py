@@ -236,6 +236,7 @@ async def diagnose_anomalies(anomalies: list[dict], data: dict) -> str:
     from claude_agent_sdk import query, ClaudeAgentOptions
     from core.tools import create_core_server
     from core.hooks import AGENT_HOOKS
+    from core.thinking import STANDARD
 
     prompt = f"""You are a systems handler for John's infrastructure. Anomalies detected:
 
@@ -263,6 +264,8 @@ Be concise. This goes to a push notification."""
                 cwd=str(HOME),
                 mcp_servers={"core": create_core_server()},
                 hooks=AGENT_HOOKS,
+                thinking=STANDARD,
+                effort="max",
             ),
         ):
             if hasattr(msg, "content"):
@@ -356,6 +359,7 @@ async def full_handler():
     from claude_agent_sdk import query, ClaudeAgentOptions
     from core.tools import create_core_server
     from core.hooks import AGENT_HOOKS
+    from core.thinking import HEAVY
 
     print(f"[{datetime.now():%H:%M:%S}] Full handler run...")
     data = await gather_all(force=True)
@@ -388,6 +392,8 @@ Keep it under 300 words. No fluff."""
             cwd=str(HOME),
             mcp_servers={"core": create_core_server()},
             hooks=AGENT_HOOKS,
+            thinking=HEAVY,
+            effort="max",
         ),
     ):
         if hasattr(msg, "content"):

@@ -13,7 +13,8 @@ Claude Agent SDK integration hub. All automation imports from here. Built 2026-0
 core/
   tools.py         — 5 MCP tools: ssh_command, send_imessage, send_business_email, osascript_run, moshi_push
   hooks.py         — guard_hook (blocks destructive cmds) + audit_hook (logs to ~/logs/agent-audit.jsonl)
-  agents.py        — 6 AgentDefinitions: Scout, Forge, Wrench, Dispatch, Ledger, Toolsmith
+  thinking.py      — Extended thinking presets: HEAVY / STANDARD / LIGHT / ADAPTIVE / OFF
+  agents.py        — 9 AgentDefinitions: Scout, Forge, Wrench, Dispatch, Ledger, Toolsmith, Titan, Anvil, Critic
   gather.py        — Parallel data gathering (30-min cache at /tmp/claude-gather.json)
   constants.py     — HOME, PERSONAL_EMAIL, VPS_SSH, IPs
 briefs/
@@ -47,5 +48,10 @@ swarm/
 ## Rules
 - All automated agents: `permission_mode="bypassPermissions"`, always set `max_turns` + `max_budget_usd`
 - Always include `hooks=AGENT_HOOKS` on SDK calls
+- Always pass `thinking=<preset>` + `effort="max"` — pick the preset per task:
+  - `HEAVY` (12k) → synthesis, tailoring, proposal drafting, job-fit judgment, merging multi-agent output
+  - `STANDARD` (6k) → diagnosis, single swarm agent, general reasoning
+  - `LIGHT` (3k) → structured extraction, template filling, straightforward classification
+  - `ADAPTIVE` → when budget is unknown / let Claude decide
 - VPS SSH hostname is `vps`, NOT jcornelius.net
 - NEVER use Gmail MCP drafts for sending email

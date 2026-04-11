@@ -74,6 +74,7 @@ async def synthesize(data: dict) -> str:
     """Use SDK to write the brief from gathered data."""
     from claude_agent_sdk import query, ClaudeAgentOptions
     from core.hooks import AGENT_HOOKS
+    from core.thinking import HEAVY
 
     now = datetime.now()
     prompt = SYNTHESIS_PROMPT.format(
@@ -93,6 +94,8 @@ async def synthesize(data: dict) -> str:
                 max_budget_usd=0.15,
                 cwd=str(HOME),
                 hooks=AGENT_HOOKS,
+                thinking=HEAVY,
+                effort="max",
             ),
         ):
             if hasattr(msg, "content"):

@@ -43,6 +43,7 @@ from claude_agent_sdk import query, ClaudeAgentOptions
 from core.agents import ALL_AGENTS
 from core.tools import create_core_server, SwarmContext, set_active_context
 from core.hooks import AGENT_HOOKS
+from core.thinking import STANDARD
 
 HANDOFF_DIR = Path("/tmp/handoff")
 LOG_PATH = Path.home() / ".claude/projects/-Users-johncornelius/memory/agent_performance.json"
@@ -151,6 +152,8 @@ class Swarm:
                         session_id=session_id,
                         mcp_servers={"core": create_core_server()},
                         hooks=AGENT_HOOKS,
+                        thinking=STANDARD,
+                        effort="max",
                     ),
                 ):
                     if hasattr(msg, "content"):

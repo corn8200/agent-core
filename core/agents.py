@@ -86,6 +86,39 @@ toolsmith = AgentDefinition(
     memory="project",
 )
 
+titan = AgentDefinition(
+    description="Max-firepower problem solver — parallel sub-agent swarms, extended thinking, no rationing.",
+    prompt=_load_prompt("titan"),
+    model="opus",
+    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "Agent", "TodoWrite"],
+    maxTurns=60,
+    permissionMode="bypassPermissions",
+    effort="max",
+    memory="project",
+)
+
+anvil = AgentDefinition(
+    description="Code builder — worktree-first, test-driven, verifies its own work.",
+    prompt=_load_prompt("anvil"),
+    model="opus",
+    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "TodoWrite"],
+    maxTurns=40,
+    permissionMode="bypassPermissions",
+    effort="max",
+    memory="project",
+)
+
+critic = AgentDefinition(
+    description="Adversarial reviewer — read-only second opinion before merges/ops.",
+    prompt=_load_prompt("critic"),
+    model="opus",
+    tools=["Read", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
+    maxTurns=25,
+    permissionMode="bypassPermissions",
+    effort="max",
+    memory="project",
+)
+
 # Convenience dict for lookups by name
 ALL_AGENTS = {
     "scout": scout,
@@ -94,4 +127,7 @@ ALL_AGENTS = {
     "dispatch": dispatch,
     "ledger": ledger,
     "toolsmith": toolsmith,
+    "titan": titan,
+    "anvil": anvil,
+    "critic": critic,
 }

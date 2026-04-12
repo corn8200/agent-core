@@ -148,8 +148,26 @@ def _parse_apple_date(s: str) -> Optional[datetime]:
 
 # --- Core API ---
 
+async def _ensure_calendar_running():
+    """Ensure Calendar.app is running (headless, no window). Idempotent."""
+    proc = await asyncio.create_subprocess_exec(
+        "pgrep", "-xq", "Calendar",
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    if await proc.wait() == 0:
+        return
+    proc = await asyncio.create_subprocess_exec(
+        "open", "-gj", "/System/Applications/Calendar.app",
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+    # Give it a moment to register with AppleEvents
+    await asyncio.sleep(2)
+
+
 async def get_events(start: datetime, end: datetime) -> list[CalendarEvent]:
     """Get calendar events in a date range from Apple Calendar."""
+    await _ensure_calendar_running()
     # AppleScript date format for setting dates
     start_str = start.strftime("%B %d, %Y")
     end_str = end.strftime("%B %d, %Y")

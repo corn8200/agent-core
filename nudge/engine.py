@@ -22,6 +22,33 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.calendar import get_events, get_week_view, SKIP_CALENDARS
 from core.constants import PERSONAL_EMAIL
+from core.gather import gather_reminders
+
+
+def _reminder_lines(reminders: dict, include_week: bool = False) -> list[str]:
+    """Format overdue/today (+optional this_week) reminder counts + sample names."""
+    if not reminders:
+        return []
+    overdue = reminders.get("overdue", []) or []
+    today = reminders.get("today", []) or []
+    this_week = reminders.get("this_week", []) or [] if include_week else []
+    if not (overdue or today or this_week):
+        return []
+    bits = []
+    if overdue:
+        bits.append(f"{len(overdue)} overdue")
+    if today:
+        bits.append(f"{len(today)} today")
+    if include_week and this_week:
+        bits.append(f"{len(this_week)} this week")
+    out = ["Reminders: " + ", ".join(bits)]
+    # Show up to 4 names, overdue first (most urgent)
+    samples = (overdue + today + this_week)[:4]
+    for r in samples:
+        name = r.get("name") if isinstance(r, dict) else str(r)
+        if name:
+            out.append(f"  • {name[:60]}")
+    return out
 
 NUDGE_DB = Path.home() / "logs" / "nudge-state.db"
 
@@ -104,6 +131,8 @@ async def run_nudges(dry_run: bool = False):
                     parts.append("Key:")
                     for ke in week.key_events[:5]:
                         parts.append(f"  {ke['day']} {ke['time']} — {ke['summary']}")
+                reminders = await gather_reminders()
+                parts.extend(_reminder_lines(reminders, include_week=True))
                 msg = "\n".join(parts)
                 print(f"[nudge] week_ahead: {msg[:100]}")
                 await _send_nudge(msg, dry_run)
@@ -118,10 +147,16 @@ async def run_nudges(dry_run: bool = False):
         schedulable = [e for e in events if not _should_skip(e)]
 
         day_key = f"day-{tomorrow.isoformat()}"
-        if schedulable and not already_sent(day_key, "day_before"):
+        reminders = await gather_reminders() if not already_sent(day_key, "day_before") else {}
+        has_reminder_signal = bool(
+            reminders and (reminders.get("overdue") or reminders.get("today"))
+        )
+        # Fire if there are events OR any overdue/today reminders to surface
+        if (schedulable or has_reminder_signal) and not already_sent(day_key, "day_before"):
             parts = [f"Tomorrow ({tomorrow.strftime('%A')}): {len(schedulable)} events"]
             for e in schedulable[:8]:
                 parts.append(f"  {e.start.strftime('%-I:%M %p')} — {e.summary}")
+            parts.extend(_reminder_lines(reminders, include_week=False))
             msg = "\n".join(parts)
             print(f"[nudge] day_before: {msg[:100]}")
             await _send_nudge(msg, dry_run)

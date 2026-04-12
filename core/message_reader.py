@@ -1,0 +1,234 @@
+"""Unified inbound iMessage reader — polls chat.db via tmux relay.
+
+One reader, multiple subscribers. Replaces research-chain/main.py as the
+single listener process. Uses tmux_relay_shell for FDA-protected chat.db access.
+"""
+
+import asyncio
+import re
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Awaitable, Callable
+
+from core.message_db import log_inbound
+from core.tools import tmux_relay_shell
+
+
+STATE_FILE = Path.home() / ".imessage_bus_state"
+LEGACY_STATE = Path.home() / ".research_chain_state"
+SELF_CHATS = ("corn82@icloud.com", "+13042684985")
+DB_PATH = "~/Library/Messages/chat.db"
+
+
+@dataclass
+class InboundMessage:
+    rowid: int
+    chat_identifier: str
+    text: str
+    timestamp: str
+    is_from_me: bool
+
+
+def extract_text_from_attributed_body(hex_str: str) -> str | None:
+    """Extract plain text from hex-encoded attributedBody (typedstream format).
+
+    Ported from research-chain/main.py — proven extraction logic.
+    """
+    if not hex_str:
+        return None
+    try:
+        blob = bytes.fromhex(hex_str)
+        runs = []
+        current = bytearray()
+        for b in blob:
+            if (0x20 <= b <= 0x7E) or b in (0x0A, 0x0D, 0x09):
+                current.append(b)
+            else:
+                if len(current) > 1:
+                    runs.append(bytes(current).decode("ascii"))
+                current = bytearray()
+        if len(current) > 1:
+            runs.append(bytes(current).decode("ascii"))
+
+        skip = {
+            "streamtyped", "NSAttributedString", "NSMutableAttributedString",
+            "NSObject", "NSString", "NSMutableString", "NSDictionary",
+            "NSMutableDictionary", "NSParagraphStyle", "NSMutableParagraphStyle",
+            "NSFont", "NSColor", "NSNumber", "NSValue", "NSUUID",
+        }
+        for run in runs:
+            cleaned = run.strip("+").strip()
+            if (cleaned and len(cleaned) > 3
+                    and cleaned not in skip
+                    and not cleaned.startswith("__kIM")
+                    and not cleaned.startswith("$")):
+                return cleaned
+        return None
+    except Exception:
+        return None
+
+
+class MessageReader:
+    """Polls chat.db via tmux_relay_shell, publishes new messages to subscribers."""
+
+    def __init__(self, poll_interval: int = 5):
+        self._subscribers: list[Callable[[InboundMessage], Awaitable[None]]] = []
+        self._poll_interval = poll_interval
+        self._monitored_chats = set(SELF_CHATS)
+
+    def subscribe(self, callback: Callable[[InboundMessage], Awaitable[None]]):
+        """Register a handler for inbound messages."""
+        self._subscribers.append(callback)
+
+    def _get_last_rowid(self) -> int:
+        # Migration: if our state file doesn't exist but legacy does, copy it
+        if not STATE_FILE.exists() and LEGACY_STATE.exists():
+            try:
+                val = LEGACY_STATE.read_text().strip()
+                STATE_FILE.write_text(val)
+                print(f"[reader] Migrated state from {LEGACY_STATE}: rowid={val}")
+            except Exception:
+                pass
+        try:
+            return int(STATE_FILE.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            return 0
+
+    def _save_rowid(self, rowid: int):
+        STATE_FILE.write_text(str(rowid))
+
+    async def _poll_once(self) -> list[InboundMessage]:
+        """Query chat.db for new messages via tmux relay."""
+        last = self._get_last_rowid()
+        chat_list = ", ".join(f"'{c}'" for c in self._monitored_chats)
+
+        query = (
+            f"SELECT m.ROWID, m.text, "
+            f"CASE WHEN m.text IS NULL OR length(m.text) = 0 THEN hex(m.attributedBody) ELSE '' END, "
+            f"m.is_from_me, "
+            f"c.chat_identifier, "
+            f"datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') "
+            f"FROM message m "
+            f"JOIN chat_message_join cmj ON m.ROWID = cmj.message_id "
+            f"JOIN chat c ON cmj.chat_id = c.ROWID "
+            f"WHERE m.ROWID > {last} AND m.is_from_me = 1 "
+            f"AND c.chat_identifier IN ({chat_list}) "
+            f"ORDER BY m.ROWID ASC;"
+        )
+
+        ok, output = await tmux_relay_shell(
+            f'sqlite3 -separator "|||" {DB_PATH} \'{query}\'',
+            timeout=10.0,
+        )
+
+        if not ok:
+            return []
+
+        messages = []
+        for line in output.strip().split("\n"):
+            if "|||" not in line:
+                continue
+            parts = line.split("|||", 5)
+            if len(parts) < 4:
+                continue
+
+            rowid = int(parts[0])
+            text = parts[1] if len(parts) > 1 else ""
+            hex_body = parts[2] if len(parts) > 2 else ""
+            is_from_me = parts[3] == "1" if len(parts) > 3 else True
+            chat_id = parts[4] if len(parts) > 4 else ""
+            timestamp = parts[5] if len(parts) > 5 else datetime.now().isoformat()
+
+            # Extract text from attributedBody if needed
+            if not text and hex_body:
+                text = extract_text_from_attributed_body(hex_body)
+
+            if not text:
+                # Save rowid to skip empty messages
+                self._save_rowid(rowid)
+                continue
+
+            messages.append(InboundMessage(
+                rowid=rowid,
+                chat_identifier=chat_id,
+                text=text,
+                timestamp=timestamp,
+                is_from_me=is_from_me,
+            ))
+
+        return messages
+
+    async def poll_loop(self):
+        """Main loop. Reads chat.db via tmux relay, fans out to subscribers."""
+        print(f"[reader] Started — polling every {self._poll_interval}s")
+        print(f"[reader] Monitoring: {', '.join(self._monitored_chats)}")
+        print(f"[reader] State file: {STATE_FILE}")
+
+        poll_count = 0
+        while True:
+            try:
+                messages = await self._poll_once()
+                poll_count += 1
+
+                if poll_count <= 3 or messages:
+                    print(f"[reader] Poll #{poll_count}: {len(messages)} messages")
+
+                for msg in messages:
+                    print(f"[reader] ROWID {msg.rowid}: {msg.text[:80]}")
+
+                    # Log to bus DB
+                    log_inbound(
+                        chat_db_rowid=msg.rowid,
+                        chat_identifier=msg.chat_identifier,
+                        text=msg.text,
+                        received_at=msg.timestamp,
+                    )
+
+                    # Fan out to subscribers
+                    for callback in self._subscribers:
+                        try:
+                            await callback(msg)
+                        except Exception as e:
+                            print(f"[reader] Subscriber error: {e}")
+
+                    # Save after processing each message
+                    self._save_rowid(msg.rowid)
+
+            except Exception as e:
+                print(f"[reader] Error: {e}")
+
+            await asyncio.sleep(self._poll_interval)
+
+
+async def get_recent_messages(chat_identifier: str, limit: int = 5) -> list[dict]:
+    """Get recent messages from a chat for context injection into the router."""
+    query = (
+        f"SELECT m.ROWID, m.text, m.is_from_me, "
+        f"datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') as ts "
+        f"FROM message m "
+        f"JOIN chat_message_join cmj ON m.ROWID = cmj.message_id "
+        f"JOIN chat c ON cmj.chat_id = c.ROWID "
+        f"WHERE c.chat_identifier = '{chat_identifier}' "
+        f"ORDER BY m.ROWID DESC LIMIT {limit};"
+    )
+    ok, output = await tmux_relay_shell(
+        f'sqlite3 -separator "|||" {DB_PATH} \'{query}\'',
+        timeout=10.0,
+    )
+    if not ok:
+        return []
+
+    messages = []
+    for line in output.strip().split("\n"):
+        if "|||" not in line:
+            continue
+        parts = line.split("|||", 3)
+        if len(parts) >= 3:
+            messages.append({
+                "text": parts[1],
+                "from_me": parts[2] == "1",
+                "timestamp": parts[3] if len(parts) > 3 else "",
+            })
+    messages.reverse()  # chronological order
+    return messages

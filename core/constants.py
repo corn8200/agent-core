@@ -27,6 +27,13 @@ NOTIFY_EMAIL = "Cornelius Family <notify@jcornelius.net>"
 PUSHOVER_USER = "ur9bv8fhxgtkfmwxvnho2v77wi4qhj"
 PUSHOVER_TOKEN = "azyfddsu352o62r15jccgvdvp9ewtt"
 
+# --- Databases ---
+MESSAGE_BUS_DB = HOME / "logs" / "message_bus.db"
+NUDGE_DB = HOME / "logs" / "nudge-state.db"
+
+# --- Calendar ---
+SKIP_CALENDARS = {"Siri Suggestions", "US Holidays", "Birthdays"}
+
 # --- Misc ---
 GATHER_TTL_SECONDS = 1800  # 30 min cache
 WATCH_SECRET = "wc-corn82"

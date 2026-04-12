@@ -221,6 +221,34 @@ async def gather_mail_unread() -> int:
         return -1
 
 
+# --- Schedule (unified calendar + reminders + free slots) ---
+
+async def gather_schedule() -> dict:
+    """Rich schedule view for briefs, agents, and router context injection."""
+    try:
+        from core.calendar import get_schedule_view, get_week_view
+        view, week = await asyncio.gather(
+            get_schedule_view(),
+            get_week_view(),
+        )
+        return {
+            "today": [e.to_dict() for e in view.events_today],
+            "tomorrow": [e.to_dict() for e in view.events_tomorrow],
+            "free_slots_today": [s.to_dict() for s in view.free_slots_today],
+            "next_event": view.next_event.to_dict() if view.next_event else None,
+            "minutes_until_next": view.minutes_until_next,
+            "current_status": view.current_status,
+            "reminders": view.reminders,
+            "week_summary": week.summary,
+            "week_key_events": week.key_events,
+            "week_total_free_hours": week.total_free_hours,
+            "week_busiest_day": week.busiest_day,
+            "week_lightest_day": week.lightest_day,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
 # --- VPS Data ---
 
 async def gather_vps_full() -> dict:
@@ -291,13 +319,14 @@ async def gather_all(force: bool = False) -> dict:
 
     # Parallel gather
     (
-        calendar, reminders, mail_unread,
+        calendar, reminders, mail_unread, schedule,
         vps_full, weather, weather_hf, weather_fred,
         pi_health, mac_health,
     ) = await asyncio.gather(
         gather_calendar(),
         gather_reminders(),
         gather_mail_unread(),
+        gather_schedule(),
         gather_vps_full(),
         gather_weather(),
         _run("curl -s 'wttr.in/Harpers+Ferry+WV?format=%l:+%c+%t+%h+humidity,+wind+%w.+Feels+like+%f.' 2>/dev/null"),
@@ -313,6 +342,7 @@ async def gather_all(force: bool = False) -> dict:
             "reminders": reminders,
             "mail_unread": mail_unread,
         },
+        "schedule": schedule,
         "vps": vps_full,
         "pi": pi_health,
         "mac": mac_health,

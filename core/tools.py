@@ -294,11 +294,19 @@ async def ssh_command(args: dict[str, Any]) -> dict:
 
 @tool(
     "send_imessage",
-    "Send an iMessage via tmux relay (works from any context). Falls back to Pushover.",
-    {"buddy": str, "message": str},
+    "Send an iMessage through the unified message bus. Supports delivery tiers and agent attribution.",
+    {"buddy": str, "message": str, "agent": str, "tier": str},
 )
 async def send_imessage(args: dict[str, Any]) -> dict:
-    ok, result = await send_imessage_reliable(args["buddy"], args["message"])
+    agent = args.get("agent", "unknown")
+    tier = args.get("tier", "normal")
+    from core.message_bus import send_message
+    ok, result = await send_message(
+        message=args["message"],
+        agent=agent,
+        recipient=args["buddy"],
+        tier=tier,
+    )
     return {"content": [{"type": "text", "text": result}]}
 
 
@@ -407,17 +415,86 @@ async def swarm_context_list(args: dict[str, Any]) -> dict:
     return {"content": [{"type": "text", "text": "Keys: " + ", ".join(keys)}]}
 
 
+@tool(
+    "get_schedule",
+    "Get today's schedule with events, reminders, free slots, and current status.",
+    {},
+)
+async def get_schedule(args: dict[str, Any]) -> dict:
+    from core.calendar import get_schedule_view
+    view = await get_schedule_view()
+    return {"content": [{"type": "text", "text": json.dumps(view.to_dict(), indent=2)}]}
+
+
+@tool(
+    "get_week_view",
+    "Get 7-day calendar lookahead with per-day summaries, free hours, and key events.",
+    {},
+)
+async def get_week_view_tool(args: dict[str, Any]) -> dict:
+    from core.calendar import get_week_view
+    view = await get_week_view()
+    return {"content": [{"type": "text", "text": json.dumps(view.to_dict(), indent=2)}]}
+
+
+@tool(
+    "check_calendar",
+    "Check calendar availability for a time range. Returns free slots and conflicts.",
+    {"start": str, "end": str},
+)
+async def check_calendar(args: dict[str, Any]) -> dict:
+    from datetime import datetime as dt
+    from core.calendar import check_availability, detect_conflicts
+    start = dt.fromisoformat(args["start"])
+    end = dt.fromisoformat(args["end"])
+    free, conflicts = await asyncio.gather(
+        check_availability(start, end),
+        detect_conflicts(start, end),
+    )
+    result = {
+        "free_slots": [s.to_dict() for s in free],
+        "conflicts": [e.to_dict() for e in conflicts],
+    }
+    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+
+
+@tool(
+    "create_calendar_event",
+    "Create a new calendar event. Defaults to Google CalDAV calendar for sync.",
+    {"summary": str, "start": str, "end": str, "calendar": str, "location": str, "notes": str},
+)
+async def create_calendar_event(args: dict[str, Any]) -> dict:
+    from datetime import datetime as dt
+    from core.calendar import create_event
+    start = dt.fromisoformat(args["start"])
+    end = dt.fromisoformat(args["end"])
+    ok = await create_event(
+        summary=args["summary"],
+        start=start,
+        end=end,
+        calendar=args.get("calendar", "notify@jcornelius.net"),
+        location=args.get("location", ""),
+        notes=args.get("notes", ""),
+    )
+    status = "Event created" if ok else "Failed to create event"
+    return {"content": [{"type": "text", "text": status}]}
+
+
 def create_core_server():
     """Create the in-process MCP server with all core tools + swarm context."""
     return create_sdk_mcp_server(
         name="core-tools",
-        version="1.1.0",
+        version="1.2.0",
         tools=[
             ssh_command,
             send_imessage,
             send_business_email,
             osascript_run,
             moshi_push,
+            get_schedule,
+            get_week_view_tool,
+            check_calendar,
+            create_calendar_event,
             swarm_context_write,
             swarm_context_read,
             swarm_context_list,

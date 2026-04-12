@@ -16,6 +16,18 @@ from core.message_db import log_inbound
 from core.tools import tmux_relay_shell
 
 
+# Leading-garbage-tolerant match for bus attribution: "[AgentName]".
+# The attributedBody hex extractor sometimes pastes a junk char before the
+# real text, so we allow any non-letter prefix followed by "[Word]".
+_BOT_ATTRIBUTION_RE = re.compile(r"^[^A-Za-z0-9]?\[[A-Z][A-Za-z0-9 _-]{1,30}\]")
+
+
+def _looks_like_bot_attribution(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_BOT_ATTRIBUTION_RE.match(text.lstrip()))
+
+
 def _sqlite_via_relay_cmd(sql: str, db_path: str = "~/Library/Messages/chat.db") -> str:
     """Build a shell command that pipes base64-encoded SQL into sqlite3.
 
@@ -164,6 +176,14 @@ class MessageReader:
 
             if not text:
                 # Save rowid to skip empty messages
+                self._save_rowid(rowid)
+                continue
+
+            # Drop the bot's own outbound messages. The message bus prepends
+            # an [AgentName] attribution tag — if we see one in a
+            # from-me message in a self-chat, it's a reply we just sent and
+            # must not be re-routed (feedback loop).
+            if is_from_me and _looks_like_bot_attribution(text):
                 self._save_rowid(rowid)
                 continue
 

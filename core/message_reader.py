@@ -5,6 +5,7 @@ single listener process. Uses tmux_relay_shell for FDA-protected chat.db access.
 """
 
 import asyncio
+import base64
 import re
 from dataclasses import dataclass
 from datetime import datetime
@@ -13,6 +14,16 @@ from typing import Awaitable, Callable
 
 from core.message_db import log_inbound
 from core.tools import tmux_relay_shell
+
+
+def _sqlite_via_relay_cmd(sql: str, db_path: str = "~/Library/Messages/chat.db") -> str:
+    """Build a shell command that pipes base64-encoded SQL into sqlite3.
+
+    Avoids shell quoting pitfalls — SQL can contain arbitrary single/double
+    quotes without escaping. The relay runs the result under bash.
+    """
+    encoded = base64.b64encode(sql.encode("utf-8")).decode("ascii")
+    return f'echo {encoded} | base64 -d | sqlite3 -separator "|||" {db_path}'
 
 
 STATE_FILE = Path.home() / ".imessage_bus_state"
@@ -103,26 +114,33 @@ class MessageReader:
         last = self._get_last_rowid()
         chat_list = ", ".join(f"'{c}'" for c in self._monitored_chats)
 
+        # Self-chats: accept BOTH directions. When you text yourself from
+        # another device (iPhone/Watch), on this Mac the message arrives as
+        # is_from_me=0 — filtering on is_from_me=1 would lose those commands.
         query = (
-            f"SELECT m.ROWID, m.text, "
-            f"CASE WHEN m.text IS NULL OR length(m.text) = 0 THEN hex(m.attributedBody) ELSE '' END, "
-            f"m.is_from_me, "
+            f"SELECT m.ROWID, m.text, hex(m.attributedBody), m.is_from_me, "
             f"c.chat_identifier, "
             f"datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') "
             f"FROM message m "
             f"JOIN chat_message_join cmj ON m.ROWID = cmj.message_id "
             f"JOIN chat c ON cmj.chat_id = c.ROWID "
-            f"WHERE m.ROWID > {last} AND m.is_from_me = 1 "
+            f"WHERE m.ROWID > {last} "
             f"AND c.chat_identifier IN ({chat_list}) "
             f"ORDER BY m.ROWID ASC;"
         )
 
         ok, output = await tmux_relay_shell(
-            f'sqlite3 -separator "|||" {DB_PATH} \'{query}\'',
+            _sqlite_via_relay_cmd(query),
             timeout=10.0,
         )
 
         if not ok:
+            print(f"[reader] relay failed: {output[:200]}")
+            return []
+
+        # sqlite3 writes parse errors to stdout with exit 0 — catch them.
+        if output.startswith("Error:") or "\nError:" in output:
+            print(f"[reader] sqlite error: {output[:200]}")
             return []
 
         messages = []
@@ -203,17 +221,18 @@ class MessageReader:
 
 async def get_recent_messages(chat_identifier: str, limit: int = 5) -> list[dict]:
     """Get recent messages from a chat for context injection into the router."""
+    safe_chat = chat_identifier.replace("'", "''")
     query = (
         f"SELECT m.ROWID, m.text, m.is_from_me, "
         f"datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') as ts "
         f"FROM message m "
         f"JOIN chat_message_join cmj ON m.ROWID = cmj.message_id "
         f"JOIN chat c ON cmj.chat_id = c.ROWID "
-        f"WHERE c.chat_identifier = '{chat_identifier}' "
+        f"WHERE c.chat_identifier = '{safe_chat}' "
         f"ORDER BY m.ROWID DESC LIMIT {limit};"
     )
     ok, output = await tmux_relay_shell(
-        f'sqlite3 -separator "|||" {DB_PATH} \'{query}\'',
+        _sqlite_via_relay_cmd(query),
         timeout=10.0,
     )
     if not ok:

@@ -5,6 +5,7 @@ Tables: inbound (messages read from chat.db), outbound (messages sent by agents)
 """
 
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -46,13 +47,26 @@ CREATE INDEX IF NOT EXISTS idx_outbound_agent
 """
 
 
-def _connect() -> sqlite3.Connection:
+@contextmanager
+def _connect():
+    """Yield a sqlite3 connection that is guaranteed to close.
+
+    Plain `with sqlite3.connect(...) as conn` only manages the transaction —
+    it does NOT close the connection, which leaks fds. This wrapper closes.
+    """
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(DB_PATH), timeout=5)
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA busy_timeout=3000")
-    conn.row_factory = sqlite3.Row
-    return conn
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=3000")
+        conn.row_factory = sqlite3.Row
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 def init_db():

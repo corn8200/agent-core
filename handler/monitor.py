@@ -129,17 +129,6 @@ def detect_anomalies(data: dict) -> list[dict]:
             "message": f"Pi unreachable: {pi['error'][:100]}",
         })
 
-    # Hot leads (3+ clicks, recent)
-    if "--- RECENT_CLICKS ---" in vps_raw:
-        clicks_block = vps_raw.split("--- RECENT_CLICKS ---")[1].split("---")[0].strip()
-        click_lines = [l for l in clicks_block.splitlines() if l.strip()]
-        if len(click_lines) >= 3:
-            anomalies.append({
-                "severity": "medium",
-                "source": "business",
-                "message": f"{len(click_lines)} hot leads with recent clicks — follow up",
-            })
-
     # Unread business email pileup
     mail_unread = data.get("apple", {}).get("mail_unread", 0)
     if isinstance(mail_unread, int) and mail_unread > 20:

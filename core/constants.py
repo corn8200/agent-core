@@ -1,5 +1,6 @@
 """Shared constants across all agent-core modules."""
 
+import os
 from pathlib import Path
 
 # --- Paths ---
@@ -24,8 +25,8 @@ WIFE_EMAIL = "cornash89@gmail.com"
 NOTIFY_EMAIL = "Cornelius Family <notify@jcornelius.net>"
 
 # --- Pushover ---
-PUSHOVER_USER = "ur9bv8fhxgtkfmwxvnho2v77wi4qhj"
-PUSHOVER_TOKEN = "azyfddsu352o62r15jccgvdvp9ewtt"
+PUSHOVER_USER = os.environ.get("PUSHOVER_USER_KEY", "ur9bv8fhxgtkfmwxvnho2v77wi4qhj")
+PUSHOVER_TOKEN = os.environ.get("PUSHOVER_APP_TOKEN", "azyfddsu352o62r15jccgvdvp9ewtt")
 
 # --- Databases ---
 MESSAGE_BUS_DB = HOME / "logs" / "message_bus.db"

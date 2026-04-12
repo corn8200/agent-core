@@ -283,9 +283,9 @@ async def gather_weather() -> str:
 async def gather_pi_health() -> dict:
     """Basic Pi health."""
     try:
-        uptime = await _run(f"ssh {PI_SSH_USER}@{PI_IP} uptime")
+        uptime = await _run(f"ssh -o ConnectTimeout=10 {PI_SSH_USER}@{PI_IP} uptime")
         docker = await _run(
-            f"ssh {PI_SSH_USER}@{PI_IP} 'cd /opt/home-stack && docker compose ps --format json 2>/dev/null | head -20'"
+            f"ssh -o ConnectTimeout=10 {PI_SSH_USER}@{PI_IP} 'cd /opt/home-stack && docker compose ps --format json 2>/dev/null | head -20'"
         )
         return {"uptime": uptime.strip(), "docker": docker.strip()[:500]}
     except Exception as e:

@@ -7,6 +7,7 @@ Includes:
 
 import asyncio
 import json
+import shlex
 import subprocess
 import uuid
 from pathlib import Path
@@ -281,11 +282,16 @@ async def ssh_command(args: dict[str, Any]) -> dict:
     host = args["host"]
     cmd = args["command"]
     proc = await asyncio.create_subprocess_exec(
-        "ssh", host, cmd,
+        "ssh", "-o", "ConnectTimeout=10", host, cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    stdout, stderr = await proc.communicate()
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+    except asyncio.TimeoutError:
+        proc.kill()
+        await proc.wait()
+        return {"content": [{"type": "text", "text": f"SSH command timed out after 60s on {host}"}]}
     output = stdout.decode().strip()
     if proc.returncode != 0:
         output += f"\n[STDERR] {stderr.decode().strip()}"
@@ -364,12 +370,12 @@ async def osascript_run(args: dict[str, Any]) -> dict:
     {"title": str, "message": str},
 )
 async def moshi_push(args: dict[str, Any]) -> dict:
-    title = args["title"]
-    message = args["message"]
+    title = shlex.quote(args["title"])
+    message = shlex.quote(args["message"])
     # Uses the notify-moshi.sh script if available, otherwise curl
     proc = await asyncio.create_subprocess_exec(
         "bash", "-c",
-        f'if [ -x ~/bin/notify-moshi.sh ]; then ~/bin/notify-moshi.sh "{title}" "{message}"; '
+        f'if [ -x ~/bin/notify-moshi.sh ]; then ~/bin/notify-moshi.sh {title} {message}; '
         f'else echo "notify-moshi.sh not found"; fi',
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,

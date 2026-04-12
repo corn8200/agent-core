@@ -231,21 +231,24 @@ print("sent")
 
 # --- SDK Diagnosis ---
 
-async def diagnose_anomalies(anomalies: list[dict], data: dict) -> str:
+async def diagnose_anomalies(anomalies: list[dict], data: dict, heal_context: str = "") -> str:
     """Use SDK to diagnose anomalies and suggest fixes."""
     from claude_agent_sdk import query, ClaudeAgentOptions
     from core.tools import create_core_server
     from core.hooks import AGENT_HOOKS
     from core.thinking import STANDARD
 
+    heal_section = f"\n\nAuto-remediation results:\n{heal_context}" if heal_context else ""
+
     prompt = f"""You are a systems handler for John's infrastructure. Anomalies detected:
 
 {json.dumps(anomalies, indent=2)}
+{heal_section}
 
 Raw system data:
 {json.dumps(data, indent=2, default=str)[:8000]}
 
-For each anomaly:
+For each remaining anomaly (skip auto-healed ones):
 1. What's likely wrong
 2. Severity assessment (can it wait until morning?)
 3. Suggested fix (specific commands if applicable)
@@ -307,6 +310,27 @@ async def quick_check(dry_run: bool = False):
         print(f"[{datetime.now():%H:%M:%S}] Low severity only, skipping alert.")
         return
 
+    # --- Auto-Remediation ---
+    from handler.playbooks import attempt_remediation
+    print(f"[{datetime.now():%H:%M:%S}] Attempting auto-remediation...")
+    remediation_results = await attempt_remediation(actionable)
+
+    healed = [r for r in remediation_results if r.success]
+    failed = [r for r in remediation_results if not r.success and r.tier != "red"]
+    escalated = [r for r in remediation_results if r.tier == "red"]
+
+    if healed:
+        print(f"[{datetime.now():%H:%M:%S}] Auto-healed {len(healed)}: {', '.join(r.action for r in healed)}")
+
+    # Remove successfully healed anomalies from the alert pipeline
+    healed_msgs = {r.anomaly.get("message") for r in healed}
+    actionable = [a for a in actionable if a["message"] not in healed_msgs]
+    high = [a for a in actionable if a["severity"] == "high"]
+
+    if not actionable and not escalated:
+        print(f"[{datetime.now():%H:%M:%S}] All issues auto-healed. No alert needed.")
+        return
+
     # --- Deduplication ---
     state = load_state()
     fingerprint = anomaly_fingerprint(actionable)
@@ -328,11 +352,24 @@ async def quick_check(dry_run: bool = False):
         should_email = False
         skip_reason = f"quiet hours ({QUIET_HOURS[0]}:00-{QUIET_HOURS[1]}:00)"
 
+    # Build remediation context for diagnosis
+    heal_context = ""
+    if healed:
+        heal_context += "\nAuto-healed (no action needed):\n" + "\n".join(
+            f"  ✓ {r.playbook}: {r.action} — {r.detail}" for r in healed)
+    if failed:
+        heal_context += "\nAuto-fix attempted but failed:\n" + "\n".join(
+            f"  ✗ {r.playbook}: {r.action} — {r.detail}" for r in failed)
+    if escalated:
+        heal_context += "\nEscalated (needs manual intervention):\n" + "\n".join(
+            f"  ⚠ {r.playbook}: {r.detail}" for r in escalated)
+
     print(f"[{now:%H:%M:%S}] Diagnosing...")
-    diagnosis = await diagnose_anomalies(actionable, data)
+    diagnosis = await diagnose_anomalies(actionable, data, heal_context)
 
     # Push notification always fires (cheap, silent on phone at night)
-    title = f"Handler: {len(actionable)} issue{'s' if len(actionable)>1 else ''}"
+    heal_prefix = f"[{len(healed)} auto-healed] " if healed else ""
+    title = f"Handler: {heal_prefix}{len(actionable)} issue{'s' if len(actionable)>1 else ''}"
     push_msg = diagnosis[:400] if diagnosis else "; ".join(a["message"] for a in actionable)[:400]
     await send_pushover(title, push_msg)
 

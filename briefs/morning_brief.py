@@ -15,10 +15,21 @@ Usage:
 
 import asyncio
 import json
+import os
 import sys
 import subprocess
 from datetime import datetime
 from pathlib import Path
+
+# ⚠️ Scrub API billing vars BEFORE importing claude_agent_sdk.
+# The SDK spawns the `claude` CLI subprocess and inherits our env — if any of
+# these are set, the CLI silently bills pay-as-you-go instead of Max. See
+# https://github.com/anthropics/claude-code/issues/42680 and the 2026-04-12
+# ralph incident. secrets.env no longer exports these under the canonical names,
+# but scrub defensively in case any parent (LaunchAgent, shell, subprocess) did.
+for _leak_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                  "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"):
+    os.environ.pop(_leak_var, None)
 
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))

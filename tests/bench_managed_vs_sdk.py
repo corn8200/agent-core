@@ -20,7 +20,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from dotenv import load_dotenv
 load_dotenv("/Users/johncornelius/Projects/job-agent/.env")
-assert os.environ.get("ANTHROPIC_API_KEY"), "need ANTHROPIC_API_KEY for managed path"
+# Managed Agents path needs raw API billing — read the renamed var from secrets.env.
+# ANTHROPIC_API_KEY was renamed to ANTHROPIC_CONSOLE_KEY on 2026-04-12 to stop
+# silent API billing leaks (see ~/.config/secrets.env). Set it here ONLY for this
+# explicit test — do not export it globally.
+_console_key = os.environ.get("ANTHROPIC_CONSOLE_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+assert _console_key, "need ANTHROPIC_CONSOLE_KEY in ~/.config/secrets.env for managed path"
+os.environ["ANTHROPIC_API_KEY"] = _console_key
 
 from core.managed import managed_query  # noqa: E402
 from claude_agent_sdk import query, ClaudeAgentOptions  # noqa: E402

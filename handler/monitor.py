@@ -15,10 +15,17 @@ Usage:
 import asyncio
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+
+# ⚠️ Scrub API billing vars before importing claude_agent_sdk. See morning_brief.py
+# for full rationale. Prevents silent pay-as-you-go billing when Max is intended.
+for _leak_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
+                  "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"):
+    os.environ.pop(_leak_var, None)
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

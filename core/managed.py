@@ -36,7 +36,17 @@ _MODEL_ALIASES = {
 
 
 def _client() -> anthropic.Anthropic:
-    return anthropic.Anthropic()
+    # Managed Agents path is intentionally API-billed. ANTHROPIC_API_KEY is no
+    # longer exported by secrets.env (renamed to ANTHROPIC_CONSOLE_KEY on
+    # 2026-04-12 to stop silent CLI/SDK billing leaks). Read the renamed var
+    # and pass it explicitly so the anthropic client doesn't need env leakage.
+    key = (os.environ.get("ANTHROPIC_API_KEY")
+           or os.environ.get("ANTHROPIC_CONSOLE_KEY"))
+    if not key:
+        raise RuntimeError(
+            "Managed Agents requires ANTHROPIC_CONSOLE_KEY in ~/.config/secrets.env"
+        )
+    return anthropic.Anthropic(api_key=key)
 
 
 def _ensure_environment(client: anthropic.Anthropic, name: str = "agent-core-default") -> str:
@@ -155,7 +165,8 @@ async def managed_query(
 
     Returns the assistant's text response. Raises on API errors.
     """
-    assert os.environ.get("ANTHROPIC_API_KEY"), "ANTHROPIC_API_KEY not set"
+    assert (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_CONSOLE_KEY")), \
+        "ANTHROPIC_CONSOLE_KEY not set (Managed Agents requires raw API billing)"
 
     def _work() -> str:
         client = _client()
@@ -177,7 +188,8 @@ async def managed_query_verbose(
     title: Optional[str] = None,
 ) -> tuple[str, dict]:
     """Same as managed_query but also returns stats dict (events, session_id)."""
-    assert os.environ.get("ANTHROPIC_API_KEY"), "ANTHROPIC_API_KEY not set"
+    assert (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_CONSOLE_KEY")), \
+        "ANTHROPIC_CONSOLE_KEY not set (Managed Agents requires raw API billing)"
 
     def _work() -> tuple[str, dict]:
         client = _client()

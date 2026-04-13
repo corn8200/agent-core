@@ -268,7 +268,7 @@ async def _get_calendar_context() -> dict:
 async def _get_reminder_context() -> dict:
     """Pull reminder context from gather."""
     try:
-        from core.gather import gather_reminders
+        from home_ops.gather import gather_reminders
         reminders = await gather_reminders()
         return {
             "overdue_count": len(reminders.get("overdue", [])),

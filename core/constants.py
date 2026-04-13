@@ -36,5 +36,5 @@ NUDGE_DB = HOME / "logs" / "nudge-state.db"
 SKIP_CALENDARS = {"Siri Suggestions", "US Holidays", "Birthdays"}
 
 # --- Misc ---
-GATHER_TTL_SECONDS = 1800  # 30 min cache
+GATHER_TTL_SECONDS = 2700  # 45 min cache
 WATCH_SECRET = "wc-corn82"

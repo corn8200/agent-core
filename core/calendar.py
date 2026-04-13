@@ -598,7 +598,7 @@ async def get_schedule_view(target_date: date | None = None) -> ScheduleView:
     # Reminders — import from gather to avoid duplication
     reminders = {}
     try:
-        from core.gather import gather_reminders
+        from home_ops.gather import gather_reminders
         reminders = await gather_reminders()
     except Exception:
         pass

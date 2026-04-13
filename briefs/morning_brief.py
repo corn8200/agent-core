@@ -34,7 +34,7 @@ for _leak_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_U
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.gather import gather_all
+from home_ops.gather import gather_all
 from core.constants import HOME, PERSONAL_EMAIL, VPS_SSH
 try:
     import core.agent_cp_client as cp

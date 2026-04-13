@@ -25,7 +25,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.calendar import get_events
-from core.constants import VPS_SSH
+from core.constants import (
+    GATHER_CACHE,
+    GATHER_TTL_SECONDS,
+    PI_IP,
+    PI_SSH_USER,
+    VPS_SSH,
+)
+
+import time
 
 # --- Helpers ---
 
@@ -111,12 +119,199 @@ async def gather_calendar_7d() -> list[dict]:
     return out
 
 
-# --- Reminders ---
+# --- Reminders (canonical, bucketed) ---
+
+async def gather_reminders() -> dict:
+    """Get incomplete reminders from Apple Reminders, bucketed by urgency.
+
+    Returns:
+        {
+            "count": int,
+            "overdue": [...],
+            "today": [...],
+            "this_week": [...],
+            "later": [...],
+            "undated": [...],
+        }
+    Each item is {name, list, due} where due is a string or None.
+    """
+    script = r'''
+    set FS to (ASCII character 31)
+    set RS to (ASCII character 30)
+    tell application "Reminders"
+        set output to ""
+        repeat with reminderList in lists
+            try
+                set incompleteReminders to (every reminder of reminderList whose completed is false)
+                repeat with r in incompleteReminders
+                    set rName to name of r
+                    set listName to name of reminderList
+                    set dueStr to ""
+                    try
+                        set d to due date of r
+                        if d is not missing value then set dueStr to (d as string)
+                    end try
+                    set output to output & rName & FS & listName & FS & dueStr & RS
+                end repeat
+            end try
+        end repeat
+        return output
+    end tell
+    '''
+    try:
+        import re
+        result, _ = await _osascript(script, timeout=30)
+        if not result:
+            return {"count": 0, "overdue": [], "today": [], "this_week": [], "later": [], "undated": []}
+
+        now = datetime.now()
+        today_date = now.date()
+        week_end = today_date + timedelta(days=7)
+
+        buckets = {"overdue": [], "today": [], "this_week": [], "later": [], "undated": []}
+
+        def parse_apple_date(s: str):
+            if not s:
+                return None
+            s2 = re.sub(r"^\w+,\s*", "", s)
+            for fmt in (
+                "%B %d, %Y at %H:%M:%S",
+                "%B %d, %Y at %I:%M:%S %p",
+                "%B %d, %Y",
+            ):
+                try:
+                    return datetime.strptime(s2, fmt)
+                except ValueError:
+                    continue
+            return None
+
+        total = 0
+        for raw in result.split("\x1e"):
+            raw = raw.strip("\r\n ")
+            if not raw:
+                continue
+            parts = raw.split("\x1f")
+            if len(parts) < 2:
+                continue
+            name = parts[0].strip()
+            list_name = parts[1].strip() if len(parts) > 1 else ""
+            due_raw = parts[2].strip() if len(parts) > 2 else ""
+
+            if name and name[0] in "📅📋🔖🗓📌🔹▪•🔮⭐✨":
+                continue
+            if not name:
+                continue
+
+            total += 1
+            due_dt = parse_apple_date(due_raw) if due_raw else None
+            entry = {"name": name, "list": list_name, "due": due_raw or None}
+            if due_dt is None:
+                buckets["undated"].append(entry)
+            elif due_dt.date() < today_date:
+                buckets["overdue"].append(entry)
+            elif due_dt.date() == today_date:
+                buckets["today"].append(entry)
+            elif due_dt.date() <= week_end:
+                buckets["this_week"].append(entry)
+            else:
+                buckets["later"].append(entry)
+
+        return {
+            "count": total,
+            "overdue": buckets["overdue"],
+            "today": buckets["today"],
+            "this_week": buckets["this_week"],
+            "later": buckets["later"][:10],
+            "undated": buckets["undated"][:15],
+        }
+    except Exception as e:
+        return {"count": 0, "error": str(e), "overdue": [], "today": [], "this_week": [], "later": [], "undated": []}
+
 
 async def gather_reminders_full() -> dict:
-    """Use core.gather.gather_reminders — already bucketed."""
-    from core.gather import gather_reminders
+    """Back-compat alias; use gather_reminders()."""
     return await gather_reminders()
+
+
+# --- Mac / VPS / Pi infra ---
+
+async def gather_mail_unread() -> int:
+    """Count unread messages in Mail.app."""
+    script = 'tell application "Mail" to return unread count of inbox'
+    try:
+        result, _ = await _osascript(script, timeout=15)
+        return int(result) if result.isdigit() else 0
+    except Exception:
+        return -1
+
+
+async def gather_vps_full() -> dict:
+    """Comprehensive VPS data via script file. Also pulls auth-watcher state in the same SSH session."""
+    script_path = Path(__file__).resolve().parent.parent / "core" / "vps_gather.sh"
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "scp", str(script_path), f"{VPS_SSH}:/tmp/agent_gather.sh",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        # Single SSH call: run gather script + auth-watcher state. Delimiter for split.
+        combined_cmd = (
+            f"ssh -o ConnectTimeout=10 {VPS_SSH} "
+            f"'bash /tmp/agent_gather.sh; echo \"=== AUTH_WATCHER ===\"; "
+            f"cat /srv/apps/auth-watcher/state.json 2>/dev/null || echo {{}}'"
+        )
+        result = await _run(combined_cmd, timeout=30)
+        raw, _, auth_raw = result.partition("=== AUTH_WATCHER ===")
+        auth_state = {}
+        try:
+            auth_state = json.loads(auth_raw.strip()) if auth_raw.strip() else {}
+        except Exception:
+            auth_state = {}
+        return {"raw": raw[:5000], "auth": auth_state}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def gather_pi_health() -> dict:
+    """Basic Pi health."""
+    try:
+        uptime = await _run(f"ssh -o ConnectTimeout=10 {PI_SSH_USER}@{PI_IP} uptime")
+        docker = await _run(
+            f"ssh -o ConnectTimeout=10 {PI_SSH_USER}@{PI_IP} 'cd /opt/home-stack && docker compose ps --format json 2>/dev/null | head -20'"
+        )
+        return {"uptime": uptime.strip(), "docker": docker.strip()[:500]}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+async def gather_mac_health() -> dict:
+    """Local Mac Mini health."""
+    try:
+        uptime = await _run("uptime")
+        disk = await _run("df -h / | tail -1 | awk '{print $5}'")
+        return {"uptime": uptime.strip(), "disk_pct": disk.strip()}
+    except Exception as e:
+        return {"error": str(e)}
+
+
+# --- Simple calendar (today + tomorrow only, used by core/handler consumers) ---
+
+async def gather_calendar_simple() -> list[dict]:
+    """Light 'today + tomorrow' calendar view. Wraps gather_calendar_7d and filters."""
+    full = await gather_calendar_7d()
+    return [e for e in full if e.get("bucket") in ("today", "tomorrow")]
+
+
+# --- wttr.in weather (consolidated single call) ---
+
+async def gather_wttr_summary() -> dict:
+    """Single wttr.in call, parsed into all fields previously fetched separately."""
+    fmt = "%l:+%c+%t+%h+humidity,+wind+%w.+Feels+like+%f."
+    try:
+        hf = await _run(f"curl -s 'wttr.in/Harpers+Ferry+WV?format={fmt}' 2>/dev/null", timeout=10)
+        return {"harpers_ferry": hf.strip()[:300], "summary": hf.strip()[:200]}
+    except Exception:
+        return {"harpers_ferry": "", "summary": "weather unavailable"}
 
 
 # --- Contacts (family + key people) ---
@@ -337,7 +532,8 @@ async def gather_mail_recent(days: int = 7) -> list[dict]:
         "category, urgency_score, substr(body_preview,1,400) AS preview "
         "FROM messages "
         f"WHERE date_received > datetime('now','-{days} days') "
-        "ORDER BY date_received DESC LIMIT 200;"
+        "AND (urgency_score >= 3 OR category IN ('action','personal')) "
+        "ORDER BY date_received DESC LIMIT 30;"
     )
     sql_b64 = base64.b64encode(sql.encode()).decode()
     cmd = (
@@ -418,54 +614,148 @@ async def gather_weather() -> dict:
 
 # --- Top-level gather ---
 
-async def gather_all() -> dict:
-    """Run every collector in parallel. Return one dict the prompt can eat."""
+async def gather_all(force: bool = False) -> dict:
+    """Canonical gather for both home_ops briefs and infra handler.
+
+    Returns a unified dict with BOTH home_ops keys (calendar_7d, imessages_7d,
+    mail_7d, contacts, weather.pirate) AND legacy core-shaped keys
+    (apple.mail_unread, apple.reminders, apple.calendar, vps.raw, vps.auth,
+    mac, pi). Cached at GATHER_CACHE for GATHER_TTL_SECONDS.
+    """
+    if not force and GATHER_CACHE.exists():
+        mtime = GATHER_CACHE.stat().st_mtime
+        if time.time() - mtime < GATHER_TTL_SECONDS:
+            try:
+                return json.loads(GATHER_CACHE.read_text())
+            except Exception:
+                pass
+
     started = datetime.now()
-    cal, rem, contacts, msgs, mail, wx = await asyncio.gather(
+    (
+        cal_7d, rem, contacts, msgs, mail_recent, pirate_wx,
+        mail_unread, vps_full, mac_health, pi_health, wttr_wx,
+    ) = await asyncio.gather(
         gather_calendar_7d(),
-        gather_reminders_full(),
+        gather_reminders(),
         gather_contacts(),
         gather_imessages(7),
         gather_mail_recent(7),
         gather_weather(),
+        gather_mail_unread(),
+        gather_vps_full(),
+        gather_mac_health(),
+        gather_pi_health(),
+        gather_wttr_summary(),
         return_exceptions=True,
     )
 
     def _ok(x, default):
         return default if isinstance(x, BaseException) else x
 
-    return {
+    cal_7d = _ok(cal_7d, [])
+    rem = _ok(rem, {})
+    mail_unread = _ok(mail_unread, -1)
+    vps_full = _ok(vps_full, {})
+    wttr = _ok(wttr_wx, {})
+
+    calendar_today_tomorrow = [e for e in cal_7d if e.get("bucket") in ("today", "tomorrow")]
+
+    data = {
+        "timestamp": started.isoformat(),
         "now": started.isoformat(),
         "today": started.strftime("%A, %B %d, %Y"),
         "tomorrow": (started + timedelta(days=1)).strftime("%A, %B %d"),
-        "calendar_7d": _ok(cal, []),
-        "reminders": _ok(rem, {}),
+        "calendar_7d": cal_7d,
+        "reminders": rem,
         "contacts": _ok(contacts, []),
         "imessages_7d": _ok(msgs, []),
-        "mail_7d": _ok(mail, []),
-        "weather": _ok(wx, {}),
+        "mail_7d": _ok(mail_recent, []),
+        "apple": {
+            "calendar": calendar_today_tomorrow,
+            "reminders": rem,
+            "mail_unread": mail_unread,
+        },
+        "vps": vps_full,
+        "vps_auth": vps_full.get("auth", {}) if isinstance(vps_full, dict) else {},
+        "pi": _ok(pi_health, {}),
+        "mac": _ok(mac_health, {}),
+        "weather": {
+            "summary": wttr.get("summary", ""),
+            "harpers_ferry": wttr.get("harpers_ferry", ""),
+            "pirate": _ok(pirate_wx, {}),
+        },
         "errors": {
-            "calendar": str(cal) if isinstance(cal, BaseException) else None,
+            "calendar": str(cal_7d) if isinstance(cal_7d, BaseException) else None,
             "reminders": str(rem) if isinstance(rem, BaseException) else None,
             "contacts": str(contacts) if isinstance(contacts, BaseException) else None,
             "imessages": str(msgs) if isinstance(msgs, BaseException) else None,
-            "mail": str(mail) if isinstance(mail, BaseException) else None,
-            "weather": str(wx) if isinstance(wx, BaseException) else None,
+            "mail": str(mail_recent) if isinstance(mail_recent, BaseException) else None,
+            "weather": str(pirate_wx) if isinstance(pirate_wx, BaseException) else None,
         },
+    }
+
+    try:
+        GATHER_CACHE.write_text(json.dumps(data, indent=2, default=str))
+    except Exception:
+        pass
+    return data
+
+
+async def quick_gather(force: bool = False) -> dict:
+    """Lean gather for handler quick_check: mail_unread, reminders, today's calendar.
+
+    Skips weather, VPS SSH, Pi SSH, contacts, imessages, mail DB — the slow and
+    network-bound collectors. Reuses GATHER_CACHE if fresh.
+    """
+    if not force and GATHER_CACHE.exists():
+        mtime = GATHER_CACHE.stat().st_mtime
+        if time.time() - mtime < GATHER_TTL_SECONDS:
+            try:
+                return json.loads(GATHER_CACHE.read_text())
+            except Exception:
+                pass
+
+    started = datetime.now()
+    mail_unread, rem, cal_7d, mac_health = await asyncio.gather(
+        gather_mail_unread(),
+        gather_reminders(),
+        gather_calendar_7d(),
+        gather_mac_health(),
+        return_exceptions=True,
+    )
+
+    def _ok(x, default):
+        return default if isinstance(x, BaseException) else x
+
+    cal_7d = _ok(cal_7d, [])
+    calendar_today_tomorrow = [e for e in cal_7d if e.get("bucket") in ("today", "tomorrow")]
+
+    return {
+        "timestamp": started.isoformat(),
+        "apple": {
+            "calendar": calendar_today_tomorrow,
+            "reminders": _ok(rem, {}),
+            "mail_unread": _ok(mail_unread, -1),
+        },
+        "mac": _ok(mac_health, {}),
+        "vps": {},
+        "pi": {},
+        "weather": {},
     }
 
 
 if __name__ == "__main__":
     async def _main():
-        data = await gather_all()
-        # Print summary
+        data = await gather_all(force=True)
         print(f"calendar_7d: {len(data['calendar_7d'])}")
-        print(f"reminders: overdue={len(data['reminders'].get('overdue',[]))} today={len(data['reminders'].get('today',[]))} this_week={len(data['reminders'].get('this_week',[]))}")
-        print(f"contacts: {len(data['contacts'])}")
-        print(f"imessages_7d: {len(data['imessages_7d'])}")
-        print(f"mail_7d: {len(data['mail_7d'])}")
-        print(f"weather: {data['weather'].get('currently','?')}")
-        print(f"errors: {[k for k,v in data['errors'].items() if v]}")
+        rem = data.get("reminders", {})
+        print(f"reminders: overdue={len(rem.get('overdue',[]))} today={len(rem.get('today',[]))} this_week={len(rem.get('this_week',[]))}")
+        print(f"contacts: {len(data.get('contacts', []))}")
+        print(f"imessages_7d: {len(data.get('imessages_7d', []))}")
+        print(f"mail_7d: {len(data.get('mail_7d', []))}")
+        print(f"mail_unread: {data.get('apple', {}).get('mail_unread')}")
+        print(f"weather: {data.get('weather', {}).get('pirate', {}).get('currently','?')}")
+        print(f"errors: {[k for k,v in data.get('errors', {}).items() if v]}")
         Path("/tmp/home-ops-gather.json").write_text(json.dumps(data, indent=2, default=str))
         print("→ /tmp/home-ops-gather.json")
 

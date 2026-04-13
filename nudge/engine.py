@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.calendar import get_events, get_week_view, SKIP_CALENDARS
 from core.constants import PERSONAL_EMAIL
-from core.gather import gather_reminders
+from home_ops.gather import gather_reminders
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 import agent_cp_client as cp  # noqa: E402
 CP_AGENT = "nudge-engine"

@@ -165,16 +165,93 @@ async def _ensure_calendar_running():
     await asyncio.sleep(2)
 
 
+async def _get_events_swift(start: datetime, end: datetime) -> Optional[list[CalendarEvent]]:
+    """Fast path via core/calendar_fetch.swift. Returns None on failure."""
+    import os
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calendar_fetch.swift")
+    if not os.path.exists(script_path):
+        return None
+    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    days_back = max(0, (today - start).days)
+    days_fwd = max(1, (end - today).days)
+    proc = await asyncio.create_subprocess_exec(
+        "swift", script_path, str(days_back), str(days_fwd),
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return None
+    if proc.returncode != 0:
+        err = stderr.decode(errors="replace").strip()
+        print(f"[calendar] swift returned {proc.returncode}: {err[:200]}")
+        return None
+
+    raw = stdout.decode(errors="replace")
+    events: list[CalendarEvent] = []
+    for rec in raw.split("\x1e"):
+        rec = rec.strip(" \t\n\r")
+        if not rec:
+            continue
+        parts = rec.split("\x1f")
+        if len(parts) < 8:
+            continue
+        title, s_iso, e_iso, cal_name, loc, notes, uid, all_day_flag = parts[:8]
+        try:
+            s_dt = datetime.fromisoformat(s_iso.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+            e_dt = datetime.fromisoformat(e_iso.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+        except ValueError:
+            continue
+        # Client-side window clamp (Swift already filters but be safe)
+        if e_dt < start or s_dt >= end:
+            continue
+        events.append(CalendarEvent(
+            summary=title.strip(),
+            start=s_dt,
+            end=e_dt,
+            calendar=cal_name.strip(),
+            location=loc.strip(),
+            notes=notes.strip()[:500],
+            all_day=(all_day_flag.strip() == "1"),
+            uid=uid.strip(),
+        ))
+    events.sort(key=lambda x: x.start)
+    return events
+
+
 async def get_events(start: datetime, end: datetime) -> list[CalendarEvent]:
-    """Get calendar events in a date range from Apple Calendar."""
+    """Get calendar events in a date range.
+
+    Uses a Swift/EventKit helper (`core/calendar_fetch.swift`) because
+    AppleScript's `whose start date >= X` does NOT expand recurring instances
+    (misses weekly/monthly events whose master is older than the window) and
+    is 30-50x slower per calendar scan. EventKit natively expands recurrences.
+    Falls back to the legacy AppleScript path if Swift/EventKit fails.
+    """
+    # Fast path: Swift EventKit
+    try:
+        ev = await _get_events_swift(start, end)
+        if ev is not None:
+            return ev
+    except Exception as e:
+        print(f"[calendar] swift fetch failed, falling back to AppleScript: {e}")
+
     await _ensure_calendar_running()
-    # AppleScript date format for setting dates
     start_str = start.strftime("%B %d, %Y")
     end_str = end.strftime("%B %d, %Y")
+    # Floor for recurring master scan — scanning every calendar's full history
+    # with an unbounded `whose recurrence is not ""` filter takes minutes.
+    # 2 years covers essentially all live weekly/monthly recurrences.
+    rec_floor = start - timedelta(days=730)
+    rec_floor_str = rec_floor.strftime("%B %d, %Y")
 
-    script = f'''
+    # Pass 1: non-recurring events in window. Skip noisy calendars at the
+    # AppleScript level — iterating Birthdays/US Holidays is slow.
+    script_non_recurring = f'''
     set FS to (ASCII character 31)
     set RS to (ASCII character 30)
+    set skipCals to {{"Siri Suggestions", "US Holidays", "Birthdays"}}
     tell application "Calendar"
         set startDate to date "{start_str}"
         set time of startDate to {start.hour * 3600 + start.minute * 60}
@@ -182,46 +259,99 @@ async def get_events(start: datetime, end: datetime) -> list[CalendarEvent]:
         set time of endDate to {end.hour * 3600 + end.minute * 60 + 86399}
         set output to ""
         repeat with cal in calendars
-            try
-                set evts to (every event of cal whose start date >= startDate and start date < endDate)
-                repeat with e in evts
-                    set sd to start date of e
-                    set ed to end date of e
-                    set loc to ""
-                    try
-                        set loc to location of e
-                        if loc is missing value then set loc to ""
-                    end try
-                    set nt to ""
-                    try
-                        set nt to description of e
-                        if nt is missing value then set nt to ""
-                    end try
-                    set eid to ""
-                    try
-                        set eid to uid of e
-                    end try
-                    set output to output & (summary of e) & FS & (sd as string) & FS & (ed as string) & FS & (name of cal) & FS & loc & FS & nt & FS & eid & RS
-                end repeat
-            end try
+            set cname to name of cal
+            if cname is not in skipCals then
+                try
+                    set evts to (every event of cal whose start date >= startDate and start date < endDate and recurrence is "")
+                    repeat with e in evts
+                        set sd to start date of e
+                        set ed to end date of e
+                        set loc to ""
+                        try
+                            set loc to location of e
+                            if loc is missing value then set loc to ""
+                        end try
+                        set nt to ""
+                        try
+                            set nt to description of e
+                            if nt is missing value then set nt to ""
+                        end try
+                        set eid to ""
+                        try
+                            set eid to uid of e
+                        end try
+                        set output to output & (summary of e) & FS & (sd as string) & FS & (ed as string) & FS & cname & FS & loc & FS & nt & FS & eid & RS
+                    end repeat
+                end try
+            end if
         end repeat
         return output
     end tell
     '''
-    try:
-        result = await _run_osascript(script)
-        if not result:
-            return []
 
-        events = []
+    # Pass 2: recurring masters bounded by floorDate (2y back) to endDate.
+    script_recurring = f'''
+    set FS to (ASCII character 31)
+    set RS to (ASCII character 30)
+    set skipCals to {{"Siri Suggestions", "US Holidays", "Birthdays"}}
+    tell application "Calendar"
+        set endDate to date "{end_str}"
+        set time of endDate to {end.hour * 3600 + end.minute * 60 + 86399}
+        set floorDate to date "{rec_floor_str}"
+        set output to ""
+        repeat with cal in calendars
+            set cname to name of cal
+            if cname is not in skipCals then
+                try
+                    set evts to (every event of cal whose start date >= floorDate and start date < endDate and recurrence is not "")
+                    repeat with e in evts
+                        set sd to start date of e
+                        set ed to end date of e
+                        set rec to ""
+                        try
+                            set rec to recurrence of e
+                            if rec is missing value then set rec to ""
+                        end try
+                        set loc to ""
+                        try
+                            set loc to location of e
+                            if loc is missing value then set loc to ""
+                        end try
+                        set nt to ""
+                        try
+                            set nt to description of e
+                            if nt is missing value then set nt to ""
+                        end try
+                        set eid to ""
+                        try
+                            set eid to uid of e
+                        end try
+                        set exStr to ""
+                        try
+                            repeat with ed2 in (excluded dates of e)
+                                set exStr to exStr & (ed2 as string) & "|"
+                            end repeat
+                        end try
+                        set output to output & (summary of e) & FS & (sd as string) & FS & (ed as string) & FS & cname & FS & loc & FS & nt & FS & eid & FS & rec & FS & exStr & RS
+                    end repeat
+                end try
+            end if
+        end repeat
+        return output
+    end tell
+    '''
+
+    events: list[CalendarEvent] = []
+    try:
+        # Pass 1
+        result = await _run_osascript(script_non_recurring)
         for raw in result.split("\x1e"):
-            raw = raw.strip()
+            raw = raw.strip(" \t\n\r")
             if not raw:
                 continue
             parts = raw.split("\x1f")
             if len(parts) < 4:
                 continue
-
             summary = parts[0].strip()
             start_dt = _parse_apple_date(parts[1].strip())
             end_dt = _parse_apple_date(parts[2].strip())
@@ -229,29 +359,110 @@ async def get_events(start: datetime, end: datetime) -> list[CalendarEvent]:
             location = parts[4].strip() if len(parts) > 4 else ""
             notes = parts[5].strip() if len(parts) > 5 else ""
             uid = parts[6].strip() if len(parts) > 6 else ""
-
             if not start_dt or not end_dt:
                 continue
-
-            # Detect all-day events (24h or longer duration)
             all_day = (end_dt - start_dt).total_seconds() >= 86400
-
             events.append(CalendarEvent(
-                summary=summary,
-                start=start_dt,
-                end=end_dt,
-                calendar=cal_name,
-                location=location,
-                notes=notes[:500],
-                all_day=all_day,
-                uid=uid,
+                summary=summary, start=start_dt, end=end_dt, calendar=cal_name,
+                location=location, notes=notes[:500], all_day=all_day, uid=uid,
             ))
-
-        events.sort(key=lambda e: e.start)
-        return events
     except Exception as e:
-        print(f"[calendar] get_events error: {e}")
-        return []
+        print(f"[calendar] get_events (non-recurring) error: {e}")
+
+    # Pass 2: recurring masters → expand
+    try:
+        from dateutil.rrule import rrulestr
+    except ImportError:
+        rrulestr = None
+
+    try:
+        result = await _run_osascript(script_recurring)
+        for raw in result.split("\x1e"):
+            raw = raw.strip(" \t\n\r")
+            if not raw:
+                continue
+            parts = raw.split("\x1f")
+            if len(parts) < 8:
+                continue
+            summary = parts[0].strip()
+            master_start = _parse_apple_date(parts[1].strip())
+            master_end = _parse_apple_date(parts[2].strip())
+            cal_name = parts[3].strip()
+            location = parts[4].strip() if len(parts) > 4 else ""
+            notes = parts[5].strip() if len(parts) > 5 else ""
+            uid = parts[6].strip() if len(parts) > 6 else ""
+            rrule_str = parts[7].strip() if len(parts) > 7 else ""
+            excluded_raw = parts[8].strip() if len(parts) > 8 else ""
+
+            if not master_start or not master_end or not rrule_str:
+                continue
+
+            # Parse excluded dates
+            excluded = set()
+            for ex in excluded_raw.split("|"):
+                ex = ex.strip()
+                if not ex:
+                    continue
+                ed_dt = _parse_apple_date(ex)
+                if ed_dt:
+                    excluded.add(ed_dt.replace(microsecond=0))
+
+            duration = master_end - master_start
+            all_day = duration.total_seconds() >= 86400
+
+            # Expand RRULE
+            instances: list[datetime] = []
+            if rrulestr is not None:
+                try:
+                    # AppleScript returns rule content only, e.g. "FREQ=WEEKLY;INTERVAL=1"
+                    rule_text = rrule_str
+                    if not rule_text.upper().startswith("RRULE:") and not rule_text.upper().startswith("FREQ="):
+                        # Unknown format — skip
+                        continue
+                    if rule_text.upper().startswith("FREQ="):
+                        rule_text = "RRULE:" + rule_text
+                    rule = rrulestr(rule_text, dtstart=master_start)
+                    # Generate instances in window
+                    for dt in rule.between(start, end, inc=True):
+                        if dt.replace(microsecond=0) in excluded:
+                            continue
+                        instances.append(dt)
+                except Exception as exp_err:
+                    print(f"[calendar] rrule expand failed for '{summary}': {exp_err}")
+                    # Fallback: if master start is in window, include it
+                    if start <= master_start < end:
+                        instances.append(master_start)
+            else:
+                # No dateutil — include master if in window
+                if start <= master_start < end:
+                    instances.append(master_start)
+
+            for inst_start in instances:
+                inst_end = inst_start + duration
+                events.append(CalendarEvent(
+                    summary=summary,
+                    start=inst_start,
+                    end=inst_end,
+                    calendar=cal_name,
+                    location=location,
+                    notes=notes[:500],
+                    all_day=all_day,
+                    uid=uid,
+                ))
+    except Exception as e:
+        print(f"[calendar] get_events (recurring) error: {e}")
+
+    # Dedup (same uid+start) and sort
+    seen = set()
+    dedup = []
+    for ev in events:
+        key = (ev.uid, ev.start)
+        if key in seen:
+            continue
+        seen.add(key)
+        dedup.append(ev)
+    dedup.sort(key=lambda e: e.start)
+    return dedup
 
 
 async def create_event(

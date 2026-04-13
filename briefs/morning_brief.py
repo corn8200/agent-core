@@ -57,7 +57,7 @@ RULES:
    - CALENDAR & SCHEDULE: Walk through EVERY event in apple.calendar with bucket='today' — say the time and what it is. Then tomorrow's preview (bucket='tomorrow'). Then top three priority tasks for the day.
    - FAMILY & REMINDERS: apple.reminders.today items (by name), then apple.reminders.this_week items (by name, brief). If reminders.undated has non-grocery actionable items, mention a few. Groceries get a single line like "shopping list has X items".
    - AWARENESS: Only MAJOR breaking national news. If nothing major, skip entirely.
-   - INFRASTRUCTURE: Only problems. If all green: "All systems running clean."
+   - INFRASTRUCTURE: Only problems. If all green: "All systems running clean." If `data.vps_auth.recent_incidents` has entries from the last twenty-four hours, mention them as "VPS Claude auth flapped N times overnight, all auto-recovered, currently {data.vps_auth.status}" — this is ground-truth status, not a problem, just situation awareness so any alert emails John sees are already contextualized. If `data.vps_auth.status` is "fail" right now, that IS a problem — say "VPS Claude auth is currently broken, reauth needed" and put it in URGENT too.
 4. Top three priorities after schedule section.
 5. Be actionable. "You've got a lead who clicked three times — might be worth a direct call" not "3 click events detected."
 6. Skip green. Don't report healthy services, zero bounces, no SAM matches.
@@ -227,6 +227,17 @@ async def main():
     print(f"[{datetime.now():%H:%M:%S}] Gathering data...")
     data = await gather_all(force=True)
     print(f"[{datetime.now():%H:%M:%S}] Gathered from {len(data)} sources")
+
+    # Pull VPS auth-watcher state so the brief can surface overnight incidents
+    try:
+        r = subprocess.run(
+            ["ssh", VPS_SSH, "cat /srv/apps/auth-watcher/state.json"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if r.returncode == 0 and r.stdout.strip():
+            data["vps_auth"] = json.loads(r.stdout)
+    except Exception as e:
+        print(f"[warn] could not fetch vps_auth state: {e}")
 
     if gather_only:
         print(f"Cache written to /tmp/claude-gather.json")

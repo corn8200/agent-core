@@ -16,10 +16,12 @@ from __future__ import annotations
 
 import contextlib
 import functools
+import inspect
 import json
 import os
 import socket
 import sys
+import threading
 import time
 import traceback
 import urllib.request
@@ -140,6 +142,29 @@ def event(
         return None
 
 
+def event_async(
+    agent: str,
+    kind: str,
+    payload=None,
+    cost=None,
+    host: str | None = None,
+    duration_ms: int | None = None,
+    trace_id: str | None = None,
+    error_text: str | None = None,
+) -> None:
+    """Fire-and-forget version of event() — never blocks the caller."""
+    t = threading.Thread(
+        target=event,
+        args=(agent, kind),
+        kwargs={
+            "payload": payload, "cost": cost, "host": host,
+            "duration_ms": duration_ms, "trace_id": trace_id, "error_text": error_text,
+        },
+        daemon=True,
+    )
+    t.start()
+
+
 def is_killed(agent: str) -> bool:
     now = time.time()
     if _on_vps():
@@ -168,6 +193,43 @@ def track(agent: str, capture_cost=None):
     def main(): ...
     """
     def deco(fn):
+        if inspect.iscoroutinefunction(fn):
+            @functools.wraps(fn)
+            async def awrapper(*args, **kwargs):
+                tid = uuid.uuid4().hex[:12]
+                t0 = time.monotonic()
+                try:
+                    event(agent, "start", trace_id=tid)
+                except Exception:
+                    pass
+                try:
+                    result = await fn(*args, **kwargs)
+                except BaseException as e:
+                    dur = int((time.monotonic() - t0) * 1000)
+                    tb = traceback.format_exc()
+                    try:
+                        event(
+                            agent, "error",
+                            payload={"exc": type(e).__name__, "msg": str(e)[:500]},
+                            duration_ms=dur, trace_id=tid, error_text=tb[:8000],
+                        )
+                    except Exception:
+                        _log_stderr(f"error event emit failed for {agent}")
+                    raise
+                dur = int((time.monotonic() - t0) * 1000)
+                cost = None
+                if capture_cost:
+                    try:
+                        cost = capture_cost(result)
+                    except Exception:
+                        pass
+                try:
+                    event(agent, "complete", duration_ms=dur, trace_id=tid, cost=cost)
+                except Exception:
+                    pass
+                return result
+            return awrapper
+
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
             tid = uuid.uuid4().hex[:12]

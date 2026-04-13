@@ -36,6 +36,10 @@ for _leak_var in (
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.constants import HOME, PERSONAL_EMAIL, WIFE_EMAIL  # noqa: E402
+try:
+    import core.agent_cp_client as cp  # noqa: E402
+except Exception:
+    cp = None
 
 from home_ops import gather as gather_mod  # noqa: E402
 from home_ops import prompts as prompts_mod  # noqa: E402
@@ -256,13 +260,34 @@ def main():
     if args.include_wife:
         recipients.append(WIFE_EMAIL)
 
-    code = asyncio.run(run(
-        mode=mode,
-        dry_run=args.dry_run,
-        gather_only=args.gather_only,
-        force=args.force,
-        recipients=recipients,
-    ))
+    agent_name = f"home-ops-{mode}"
+    if cp:
+        try: cp.event(agent_name, "start")
+        except Exception: pass
+        if cp.is_killed(agent_name):
+            print(f"[home-ops] {agent_name} killed via agent-cp, exiting")
+            sys.exit(0)
+    try:
+        code = asyncio.run(run(
+            mode=mode,
+            dry_run=args.dry_run,
+            gather_only=args.gather_only,
+            force=args.force,
+            recipients=recipients,
+        ))
+    except BaseException as _e:
+        import traceback as _tb
+        _tbs = _tb.format_exc()
+        if cp:
+            try:
+                cp.event(agent_name, "error",
+                         payload={"exc": type(_e).__name__, "msg": str(_e)[:500]})
+            except Exception: pass
+        sys.stderr.write(_tbs)
+        raise
+    if cp:
+        try: cp.event(agent_name, "complete", payload={"code": code})
+        except Exception: pass
     sys.exit(code)
 
 

@@ -36,6 +36,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.gather import gather_all
 from core.constants import HOME, PERSONAL_EMAIL, VPS_SSH
+try:
+    import core.agent_cp_client as cp
+except Exception:
+    cp = None
+CP_AGENT = "morning-brief"
 
 BRIEF_TEXT_PATH = Path.home() / "logs" / "brief-text.txt"
 BRIEF_HTML_PATH = Path.home() / "logs" / "morning-brief.html"
@@ -273,4 +278,24 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    if cp:
+        try: cp.event(CP_AGENT, "start")
+        except Exception: pass
+        if cp.is_killed(CP_AGENT):
+            print(f"[brief] {CP_AGENT} killed via agent-cp, exiting")
+            sys.exit(0)
+    try:
+        asyncio.run(main())
+    except BaseException as _e:
+        import traceback as _tb
+        _tbs = _tb.format_exc()
+        if cp:
+            try:
+                cp.event(CP_AGENT, "error",
+                         payload={"exc": type(_e).__name__, "msg": str(_e)[:500]})
+            except Exception: pass
+        sys.stderr.write(_tbs)
+        raise
+    if cp:
+        try: cp.event(CP_AGENT, "complete")
+        except Exception: pass

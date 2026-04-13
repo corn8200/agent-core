@@ -23,6 +23,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.calendar import get_events, get_week_view, SKIP_CALENDARS
 from core.constants import PERSONAL_EMAIL
 from core.gather import gather_reminders
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
+import agent_cp_client as cp  # noqa: E402
+CP_AGENT = "nudge-engine"
 
 
 def _reminder_lines(reminders: dict, include_week: bool = False) -> list[str]:
@@ -255,6 +258,10 @@ async def main():
 
     init_nudge_db()
 
+    if cp.is_killed(CP_AGENT):
+        print(f"[nudge] killed via agent-cp, exiting")
+        return
+
     if args.status:
         await show_status()
         return
@@ -265,4 +272,19 @@ async def main():
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try: cp.event(CP_AGENT, "start")
+    except Exception: pass
+    try:
+        asyncio.run(main())
+    except BaseException as _e:
+        import traceback as _tb
+        _tbs = _tb.format_exc()
+        try:
+            cp.event(CP_AGENT, "error",
+                     payload={"exc": type(_e).__name__, "msg": str(_e)[:500]})
+        except Exception: pass
+        import sys as _sys
+        _sys.stderr.write(_tbs)
+        raise
+    try: cp.event(CP_AGENT, "complete")
+    except Exception: pass

@@ -7,16 +7,23 @@ Usage:
     if cp.is_killed("handler-agent"):
         sys.exit(0)
 
+    @cp.track("my-agent")
+    def main(): ...
+
 Silent fail by design — never crash the caller.
 """
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import os
 import socket
 import sys
 import time
+import traceback
 import urllib.request
+import uuid
 from pathlib import Path
 
 VPS_URL = "http://100.118.21.64:8767"
@@ -72,30 +79,29 @@ def _log_stderr(msg: str) -> None:
         pass
 
 
-def _insert_local(host: str, agent: str, kind: str, payload, cost) -> int | None:
+def _insert_local(host, agent, kind, payload, cost, duration_ms, trace_id, error_text) -> int | None:
     try:
         import sqlite3
-        conn = sqlite3.connect(str(LOCAL_DB))
-        try:
+        with contextlib.closing(sqlite3.connect(str(LOCAL_DB))) as conn:
             pl = json.dumps(payload) if payload is not None else None
             cur = conn.execute(
-                "INSERT INTO events (host, agent, kind, payload, cost_usd) VALUES (?,?,?,?,?)",
-                (host, agent, kind, pl, cost),
+                "INSERT INTO events (host, agent, kind, payload, cost_usd, duration_ms, trace_id, error_text)"
+                " VALUES (?,?,?,?,?,?,?,?)",
+                (host, agent, kind, pl, cost, duration_ms, trace_id, error_text),
             )
             conn.commit()
             return cur.lastrowid
-        finally:
-            conn.close()
     except Exception as e:
         _log_stderr(f"local insert failed: {e}")
         return None
 
 
-def _post_remote(host: str, agent: str, kind: str, payload, cost) -> int | None:
+def _post_remote(host, agent, kind, payload, cost, duration_ms, trace_id, error_text) -> int | None:
     try:
         body = json.dumps({
             "host": host, "agent": agent, "kind": kind,
             "payload": payload, "cost_usd": cost,
+            "duration_ms": duration_ms, "trace_id": trace_id, "error_text": error_text,
         }).encode()
         req = urllib.request.Request(
             f"{VPS_URL}/ingest",
@@ -114,12 +120,21 @@ def _post_remote(host: str, agent: str, kind: str, payload, cost) -> int | None:
         return None
 
 
-def event(agent: str, kind: str, payload=None, cost=None, host: str | None = None) -> int | None:
+def event(
+    agent: str,
+    kind: str,
+    payload=None,
+    cost=None,
+    host: str | None = None,
+    duration_ms: int | None = None,
+    trace_id: str | None = None,
+    error_text: str | None = None,
+) -> int | None:
     h = host or _detect_host()
     try:
         if _on_vps():
-            return _insert_local(h, agent, kind, payload, cost)
-        return _post_remote(h, agent, kind, payload, cost)
+            return _insert_local(h, agent, kind, payload, cost, duration_ms, trace_id, error_text)
+        return _post_remote(h, agent, kind, payload, cost, duration_ms, trace_id, error_text)
     except Exception as e:
         _log_stderr(f"event failed: {e}")
         return None
@@ -144,3 +159,48 @@ def is_killed(agent: str) -> bool:
         _log_stderr(f"is_killed check failed: {e}")
     _KILL_CACHE[agent] = (now, killed)
     return killed
+
+
+def track(agent: str, capture_cost=None):
+    """Decorator that emits start/complete/error events with timing + trace_id.
+
+    @cp.track("my-agent")
+    def main(): ...
+    """
+    def deco(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            tid = uuid.uuid4().hex[:12]
+            t0 = time.monotonic()
+            try:
+                event(agent, "start", trace_id=tid)
+            except Exception:
+                pass
+            try:
+                result = fn(*args, **kwargs)
+            except BaseException as e:
+                dur = int((time.monotonic() - t0) * 1000)
+                tb = traceback.format_exc()
+                try:
+                    event(
+                        agent, "error",
+                        payload={"exc": type(e).__name__, "msg": str(e)[:500]},
+                        duration_ms=dur, trace_id=tid, error_text=tb[:8000],
+                    )
+                except Exception:
+                    _log_stderr(f"error event emit failed for {agent}")
+                raise
+            dur = int((time.monotonic() - t0) * 1000)
+            cost = None
+            if capture_cost:
+                try:
+                    cost = capture_cost(result)
+                except Exception:
+                    pass
+            try:
+                event(agent, "complete", duration_ms=dur, trace_id=tid, cost=cost)
+            except Exception:
+                pass
+            return result
+        return wrapper
+    return deco

@@ -20,6 +20,11 @@ import subprocess
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+sys_path_inserted = True
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'core'))
+import agent_cp_client as cp  # noqa: E402
+CP_AGENT = 'handler-agent'
 
 # ⚠️ Scrub API billing vars before importing claude_agent_sdk. See morning_brief.py
 # for full rationale. Prevents silent pay-as-you-go billing when Max is intended.
@@ -442,13 +447,30 @@ Keep it under 300 words. No fluff."""
 
 
 async def main():
+    if cp.is_killed(CP_AGENT):
+        print(f"[handler] {CP_AGENT} killed via agent-cp, exiting")
+        return
+    try: cp.event(CP_AGENT, "start")
+    except Exception: pass
     dry_run = "--dry-run" in sys.argv
     full = "--full" in sys.argv
 
-    if full:
-        await full_handler()
-    else:
-        await quick_check(dry_run=dry_run)
+    try:
+        if full:
+            await full_handler()
+        else:
+            await quick_check(dry_run=dry_run)
+    except BaseException as _e:
+        import traceback as _tb
+        _tbs = _tb.format_exc()
+        try:
+            cp.event(CP_AGENT, "error",
+                     payload={"exc": type(_e).__name__, "msg": str(_e)[:500]})
+        except Exception: pass
+        sys.stderr.write(_tbs)
+        raise
+    try: cp.event(CP_AGENT, "complete")
+    except Exception: pass
 
 
 if __name__ == "__main__":

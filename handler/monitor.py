@@ -39,7 +39,9 @@ from core.constants import HOME, PERSONAL_EMAIL, VPS_SSH
 
 # --- Dedup State ---
 STATE_FILE = Path.home() / "logs" / "handler-state.json"
+DIAGNOSIS_CACHE_FILE = Path.home() / "logs" / "handler-diagnosis-cache.json"
 EMAIL_COOLDOWN = timedelta(hours=6)  # Don't re-email same anomaly set within this window
+DIAGNOSIS_COOLDOWN = timedelta(hours=6)  # Don't re-diagnose same anomaly within this window
 QUIET_HOURS = (22, 7)  # 22:00-07:00 = push-only, no email
 
 
@@ -61,6 +63,39 @@ def anomaly_fingerprint(anomalies: list[dict]) -> str:
     """Stable hash of anomaly set (ignores ordering)."""
     key = sorted(f"{a['severity']}|{a['source']}|{a['message']}" for a in anomalies)
     return hashlib.sha1("\n".join(key).encode()).hexdigest()[:12]
+
+
+def load_diagnosis_cache() -> dict:
+    if DIAGNOSIS_CACHE_FILE.exists():
+        try:
+            return json.loads(DIAGNOSIS_CACHE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def save_diagnosis_cache(cache: dict):
+    DIAGNOSIS_CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    DIAGNOSIS_CACHE_FILE.write_text(json.dumps(cache, indent=2))
+
+
+def diagnosis_fingerprint(anomalies: list[dict]) -> str:
+    """Per-anomaly fingerprint keyed on source (host) + message (service+type)."""
+    key = sorted(f"{a['source']}|{a['message']}" for a in anomalies)
+    return hashlib.sha1("\n".join(key).encode()).hexdigest()[:12]
+
+
+def prune_diagnosis_cache(cache: dict, now: datetime) -> dict:
+    """Drop entries older than the cooldown window."""
+    fresh = {}
+    for fp, ts_str in cache.items():
+        try:
+            ts = datetime.fromisoformat(ts_str)
+        except Exception:
+            continue
+        if (now - ts) < DIAGNOSIS_COOLDOWN:
+            fresh[fp] = ts_str
+    return fresh
 
 
 def is_quiet_hours(now: datetime | None = None) -> bool:
@@ -365,8 +400,20 @@ async def quick_check(dry_run: bool = False):
         heal_context += "\nEscalated (needs manual intervention):\n" + "\n".join(
             f"  ⚠ {r.playbook}: {r.detail}" for r in escalated)
 
-    print(f"[{now:%H:%M:%S}] Diagnosing...")
-    diagnosis = await diagnose_anomalies(actionable, data, heal_context)
+    # --- Diagnosis Cooldown (prevents burning Opus credits on unresolved anomalies) ---
+    diag_cache = prune_diagnosis_cache(load_diagnosis_cache(), now)
+    diag_fp = diagnosis_fingerprint(actionable)
+    if diag_fp in diag_cache:
+        last_diag = datetime.fromisoformat(diag_cache[diag_fp])
+        age = now - last_diag
+        print(f"[{now:%H:%M:%S}] Skipping diagnosis: same anomaly (fp={diag_fp}) diagnosed {age} ago, cooldown={DIAGNOSIS_COOLDOWN}.")
+        diagnosis = ""
+        save_diagnosis_cache(diag_cache)
+    else:
+        print(f"[{now:%H:%M:%S}] Diagnosing...")
+        diagnosis = await diagnose_anomalies(actionable, data, heal_context)
+        diag_cache[diag_fp] = now.isoformat()
+        save_diagnosis_cache(diag_cache)
 
     # Push notification always fires (cheap, silent on phone at night)
     heal_prefix = f"[{len(healed)} auto-healed] " if healed else ""

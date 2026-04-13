@@ -73,10 +73,16 @@ async def _ensure_app_running(app_name: str, app_path: str) -> None:
 # --- Calendar (7 days) ---
 
 async def gather_calendar_7d() -> list[dict]:
-    """Pull 7 days of events. Bucket as today / tomorrow / week_ahead."""
+    """Pull 10 days of events. Bucket as today / tomorrow / week_ahead.
+
+    Window is today 00:00 through (today + 10 days) 23:59:59 — catches
+    'next Tuesday'/'next Monday' style items the model should flag for prep.
+    The previous 8-day midnight end silently dropped day-10 events (user hit
+    this 2026-04-13 when next Tuesday's baseball practice vanished).
+    """
     now = datetime.now()
     start = datetime.combine(now.date(), datetime.min.time())
-    end = start + timedelta(days=8)
+    end = start + timedelta(days=11) - timedelta(seconds=1)
     events = await get_events(start, end)
 
     today = now.date()

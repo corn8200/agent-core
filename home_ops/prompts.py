@@ -285,22 +285,39 @@ def _shrink_payload(payload: dict, limit: int = 14000) -> str:
     if len(blob) <= limit:
         return blob
 
+    w = payload.get("weather")
+    if isinstance(w, dict) and isinstance(w.get("hours"), list) and len(w["hours"]) > 12:
+        w["hours"] = w["hours"][:12]
+        blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
     msgs = payload.get("imessages_7d") or []
-    while len(blob) > limit and len(msgs) > 10:
-        msgs = msgs[: len(msgs) - 5]
+    while len(blob) > limit and len(msgs) > 15:
+        msgs = msgs[: max(15, int(len(msgs) * 0.75))]
+        payload["imessages_7d"] = msgs
+        blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
+    mails = payload.get("mail_7d") or []
+    while len(blob) > limit and len(mails) > 10:
+        mails = mails[: max(10, int(len(mails) * 0.75))]
+        payload["mail_7d"] = mails
+        blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
+    contacts = payload.get("contacts") or []
+    while len(blob) > limit and len(contacts) > 15:
+        contacts = contacts[: max(15, int(len(contacts) * 0.75))]
+        payload["contacts"] = contacts
+        blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
+    msgs = payload.get("imessages_7d") or []
+    while len(blob) > limit and len(msgs) > 5:
+        msgs = msgs[: max(5, int(len(msgs) * 0.6))]
         payload["imessages_7d"] = msgs
         blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
 
     mails = payload.get("mail_7d") or []
     while len(blob) > limit and len(mails) > 5:
-        mails = mails[: len(mails) - 3]
+        mails = mails[: max(5, int(len(mails) * 0.6))]
         payload["mail_7d"] = mails
-        blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
-
-    contacts = payload.get("contacts") or []
-    while len(blob) > limit and len(contacts) > 10:
-        contacts = contacts[: len(contacts) - 5]
-        payload["contacts"] = contacts
         blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
 
     if len(blob) > limit:

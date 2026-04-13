@@ -179,7 +179,7 @@ async def gather_reminders() -> dict:
             due_raw = parts[2].strip() if len(parts) > 2 else ""
 
             # Skip decorative header-style entries (start with emoji 📅/📋/🔖 etc and no real action text)
-            if name and name[0] in "📅📋🔖🗓️📌🔹▪️•":
+            if name and name[0] in "📅📋🔖🗓📌🔹▪•🔮⭐✨":
                 continue
             # Skip empty names
             if not name:

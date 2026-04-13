@@ -1,0 +1,157 @@
+"""
+sdk_guard.py — Structural rate-limit + call-count guard for claude_agent_sdk.
+
+Installed via sitecustomize.py in the agent-core venv. Runs automatically
+before any code imports claude_agent_sdk. Zero per-agent changes needed.
+
+What it does:
+  1. Wraps query() to detect Max rate-limit responses → raises RateLimitError
+     immediately so the caller stops making calls.
+  2. Counts SDK invocations in /tmp/agent-sdk-calls.json. If >HOURLY_CAP
+     calls in a rolling hour, sends a P0 Pushover alert (once per hour).
+
+Neither check requires any caller to opt in.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    pass
+
+CALL_LOG = Path("/tmp/agent-sdk-calls.json")
+HOURLY_CAP = 50
+ALERT_COOLDOWN = 3600  # only alert once per hour even if cap stays exceeded
+
+RATE_LIMIT_PHRASES = [
+    "hit your limit",
+    "you've hit your limit",
+    "usage limit",
+    "resets at",
+    "resets 2pm",
+    "rate limit",
+    "ratelimit",
+    "limit reached",
+]
+
+
+class RateLimitError(RuntimeError):
+    """Raised when the Max CLI signals a rate limit in a response body."""
+
+
+# ---------------------------------------------------------------------------
+# Call counter
+# ---------------------------------------------------------------------------
+
+def _load_log() -> dict:
+    try:
+        return json.loads(CALL_LOG.read_text())
+    except Exception:
+        return {"calls": [], "last_alert": 0}
+
+
+def _save_log(data: dict) -> None:
+    try:
+        CALL_LOG.write_text(json.dumps(data))
+    except Exception:
+        pass
+
+
+def _record_and_check() -> tuple[int, bool]:
+    """Record this invocation. Returns (rolling_count, should_alert)."""
+    data = _load_log()
+    now = time.time()
+    calls = [t for t in data.get("calls", []) if now - t < 3600]
+    calls.append(now)
+    data["calls"] = calls
+
+    count = len(calls)
+    last_alert = data.get("last_alert", 0)
+    should_alert = count > HOURLY_CAP and (now - last_alert) > ALERT_COOLDOWN
+    if should_alert:
+        data["last_alert"] = now
+
+    _save_log(data)
+    return count, should_alert
+
+
+def _pushover_alert(count: int) -> None:
+    try:
+        secrets = Path.home() / ".config" / "secrets.env"
+        env: dict[str, str] = {}
+        for line in secrets.read_text().splitlines():
+            line = line.strip()
+            if line.startswith("export "):
+                line = line[7:]
+            if "=" in line and not line.startswith("#"):
+                k, _, v = line.partition("=")
+                env[k.strip()] = v.strip().strip('"').strip("'")
+
+        token = env.get("PUSHOVER_APP_TOKEN") or os.environ.get("PUSHOVER_APP_TOKEN")
+        user = env.get("PUSHOVER_USER_KEY") or os.environ.get("PUSHOVER_USER_KEY")
+        if not token or not user:
+            return
+
+        import urllib.request, urllib.parse
+        data = urllib.parse.urlencode({
+            "token": token,
+            "user": user,
+            "title": "SDK runaway alert",
+            "message": f"agent-core made {count} SDK calls in the last hour (cap={HOURLY_CAP}). Check logs.",
+            "priority": "0",
+        }).encode()
+        urllib.request.urlopen(
+            "https://api.pushover.net/1/messages.json",
+            data=data,
+            timeout=5,
+        )
+    except Exception:
+        pass  # never block a real agent call over an alert failure
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit text detection
+# ---------------------------------------------------------------------------
+
+def _looks_rate_limited(text: str) -> bool:
+    lower = text.lower()
+    return any(p in lower for p in RATE_LIMIT_PHRASES)
+
+
+# ---------------------------------------------------------------------------
+# Patch
+# ---------------------------------------------------------------------------
+
+def patch() -> None:
+    """Monkey-patch claude_agent_sdk.query with the guard wrapper."""
+    try:
+        import claude_agent_sdk as _sdk
+    except ImportError:
+        return
+
+    original_query = _sdk.query
+
+    async def guarded_query(**kwargs):  # type: ignore[override]
+        count, should_alert = _record_and_check()
+        if should_alert:
+            _pushover_alert(count)
+
+        async for msg in original_query(**kwargs):
+            # Inspect text blocks for rate-limit signals
+            text = None
+            if hasattr(msg, "text"):
+                text = msg.text
+            elif hasattr(msg, "content") and isinstance(msg.content, str):
+                text = msg.content
+
+            if text and _looks_rate_limited(text):
+                raise RateLimitError(text[:300])
+
+            yield msg
+
+    _sdk.query = guarded_query  # type: ignore[assignment]

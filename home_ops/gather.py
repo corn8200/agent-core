@@ -104,6 +104,8 @@ async def gather_reminders_full() -> dict:
 async def gather_contacts() -> list[dict]:
     """Pull every contact with: name, related-names, emails, phones, address.
     The LLM uses related-names ('spouse', 'child', 'mother') to infer family.
+    NOTE: Variable names MUST NOT shadow Contacts properties (emails, phones, organization)
+    or AppleScript silently returns nothing.
     """
     script = r'''
     set FS to (ASCII character 31)
@@ -114,50 +116,52 @@ async def gather_contacts() -> list[dict]:
             try
                 set nm to name of p
                 if nm is missing value then set nm to ""
-                set org to ""
+                set orgStr to ""
                 try
-                    set org to organization of p
-                    if org is missing value then set org to ""
+                    set orgStr to organization of p
+                    if orgStr is missing value then set orgStr to ""
                 end try
-                set emails to ""
+                set emStr to ""
                 try
-                    repeat with e in emails of p
-                        set emails to emails & (value of e) & ","
+                    repeat with e in (emails of p)
+                        set emStr to emStr & (value of e) & ","
                     end repeat
                 end try
-                set phones to ""
+                set phStr to ""
                 try
-                    repeat with ph in phones of p
-                        set phones to phones & (value of ph) & ","
+                    repeat with x in (phones of p)
+                        set phStr to phStr & (value of x) & ","
                     end repeat
                 end try
-                set rels to ""
+                set relStr to ""
                 try
-                    repeat with r in related names of p
-                        set rels to rels & (label of r) & "=" & (value of r) & ","
+                    repeat with r in (related names of p)
+                        set relStr to relStr & (label of r) & "=" & (value of r) & ","
                     end repeat
                 end try
-                set bday to ""
+                set bdayStr to ""
                 try
                     set b to birth date of p
-                    if b is not missing value then set bday to (b as string)
+                    if b is not missing value then set bdayStr to (b as string)
                 end try
-                set output to output & nm & FS & org & FS & emails & FS & phones & FS & rels & FS & bday & RS
+                set output to output & nm & FS & orgStr & FS & emStr & FS & phStr & FS & relStr & FS & bdayStr & RS
             end try
         end repeat
         return output
     end tell
     '''
-    raw = await _osascript(script, timeout=30)
+    raw = await _osascript(script, timeout=120)
     if not raw:
         return []
     out = []
     for entry in raw.split("\x1e"):
-        entry = entry.strip()
+        # NOTE: do NOT use entry.strip() — Python treats \x1c-\x1f as whitespace
+        # and would eat trailing unit separators, collapsing 6-field records to 4.
+        entry = entry.strip(" \t\n\r")
         if not entry:
             continue
         parts = entry.split("\x1f")
-        if len(parts) < 6 or not parts[0].strip():
+        if len(parts) < 6 or not parts[0].strip(" \t\n\r"):
             continue
         name, org, emails, phones, rels, bday = parts[:6]
         # Skip noise: must have at least one of email/phone/relation
@@ -168,7 +172,7 @@ async def gather_contacts() -> list[dict]:
             "org": org.strip() or None,
             "emails": [e for e in emails.strip(",").split(",") if e],
             "phones": [p for p in phones.strip(",").split(",") if p],
-            "relations": [r for r in rels.strip(",").split(",") if r],
+            "relations": [_clean_relation(r) for r in rels.strip(",").split(",") if r],
             "birthday": bday.strip() or None,
         })
     return out
@@ -176,9 +180,63 @@ async def gather_contacts() -> list[dict]:
 
 # --- iMessages (all threads, 7 days) ---
 
+def _extract_attributed_body(blob: bytes) -> str:
+    """Extract plain text from a chat.db attributedBody NSKeyedArchiver blob.
+    Modern macOS stores most iMessage text here when m.text is NULL.
+    Strategy: find NSString marker, skip the 1-byte length prefix that follows,
+    then read printable run until next typedstream control byte.
+    """
+    if not blob:
+        return ""
+    try:
+        idx = blob.find(b"NSString")
+        if idx == -1:
+            return ""
+        # After "NSString" there's a class-version byte, then the string token:
+        #   0x01 0x2b (short, len < 0xff)  → followed by 1-byte length, then UTF-8 bytes
+        #   0x00 0x81 (long)               → followed by 2-byte LE length, then bytes
+        sub = blob[idx + 8:]
+        # Walk forward to first non-control byte after possible length markers
+        # Skip up to 5 leading control bytes, then read printable run
+        i = 0
+        while i < 6 and i < len(sub) and (sub[i] < 32 or sub[i] == 0x2b):
+            i += 1
+        out = []
+        for b in sub[i:i + 2000]:
+            if 32 <= b < 127 or b in (9, 10, 13) or b >= 0x80:
+                out.append(b)
+            else:
+                if out:
+                    break
+        return bytes(out).decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
+def _clean_relation(rel: str) -> str:
+    """'_$!<Spouse>!$_=Ashley Cornelius' → 'Spouse=Ashley Cornelius'."""
+    if "=" not in rel:
+        return rel
+    label, _, value = rel.partition("=")
+    label = label.replace("_$!<", "").replace(">!$_", "")
+    return f"{label}={value}"
+
+
+def _decode_mime_header(s: str) -> str:
+    """Decode MIME-encoded headers like '=?UTF-8?B?...?='"""
+    if not s or "=?" not in s:
+        return s
+    try:
+        from email.header import decode_header, make_header
+        return str(make_header(decode_header(s)))
+    except Exception:
+        return s
+
+
 def _read_chat_db_direct(days: int = 7) -> list[dict]:
     """Direct sqlite3 read of chat.db. Works when caller has FDA (Terminal/tmux).
     Returns list of {ts, from_me, sender, chat_id, text}.
+    Falls back to attributedBody blob extraction when m.text is NULL (macOS 13+).
     """
     db = Path.home() / "Library" / "Messages" / "chat.db"
     if not db.exists():
@@ -191,29 +249,34 @@ def _read_chat_db_direct(days: int = 7) -> list[dict]:
         c.chat_identifier,
         c.display_name,
         m.text,
+        m.attributedBody,
         m.cache_has_attachments
     FROM message m
     LEFT JOIN handle h ON m.handle_id = h.ROWID
     LEFT JOIN chat_message_join cmj ON m.ROWID = cmj.message_id
     LEFT JOIN chat c ON cmj.chat_id = c.ROWID
-    WHERE m.date/1000000000 + 978307200 > strftime('%s', 'now', ?)
-      AND m.text IS NOT NULL
-      AND length(m.text) > 0
+    WHERE m.date > (CAST(strftime('%s', 'now', ?) AS INTEGER) - 978307200) * 1000000000
     ORDER BY m.date DESC
-    LIMIT 800
+    LIMIT 1500
     """
     out = []
     try:
         conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
         conn.row_factory = sqlite3.Row
         for row in conn.execute(sql, (f"-{days} days",)):
+            text = row["text"] or ""
+            if not text and row["attributedBody"]:
+                text = _extract_attributed_body(row["attributedBody"])
+            text = text.strip()
+            if not text:
+                continue
             out.append({
                 "ts": row["ts"],
                 "from_me": bool(row["is_from_me"]),
                 "sender": row["sender_id"] or "",
                 "chat": row["chat_identifier"] or "",
                 "chat_name": row["display_name"] or "",
-                "text": (row["text"] or "")[:600],
+                "text": text[:600],
             })
         conn.close()
     except Exception as e:
@@ -229,35 +292,42 @@ async def gather_imessages(days: int = 7) -> list[dict]:
 # --- Mail (VPS mailtriage.db, 7 days, real-human filter) ---
 
 async def gather_mail_recent(days: int = 7) -> list[dict]:
-    """Query mailtriage.db on VPS over SSH. Returns last N days of inbox messages."""
+    """Query mailtriage.db on VPS over SSH. Returns last N days of inbox messages.
+    Uses sqlite3 -json + base64-piped SQL to dodge nested-quote hell.
+    """
+    import base64
     sql = (
         "SELECT date_received, from_name, from_addr, subject, "
-        "category, urgency_score, substr(body_preview,1,400) "
+        "category, urgency_score, substr(body_preview,1,400) AS preview "
         "FROM messages "
         f"WHERE date_received > datetime('now','-{days} days') "
-        "ORDER BY date_received DESC LIMIT 200"
+        "ORDER BY date_received DESC LIMIT 200;"
     )
+    sql_b64 = base64.b64encode(sql.encode()).decode()
     cmd = (
         f"ssh -o ConnectTimeout=10 {VPS_SSH} "
-        f"\"sqlite3 -separator '\\x1f' /srv/apps/mailtriage/data/mailtriage.db \\\"{sql}\\\"\""
+        f"\"echo {sql_b64} | base64 -d | sqlite3 -json /srv/apps/mailtriage/data/mailtriage.db\""
     )
-    raw = await _run(cmd, timeout=20)
+    raw = await _run(cmd, timeout=25)
     if not raw:
         return []
+    try:
+        rows = json.loads(raw)
+    except Exception as e:
+        return [{"_error": f"json parse: {e}", "_raw": raw[:200]}]
     out = []
-    for line in raw.split("\n"):
-        parts = line.split("\x1f")
-        if len(parts) < 7:
-            continue
-        ts, from_name, from_addr, subject, category, urgency, preview = parts[:7]
+    for r in rows:
+        from_name = (r.get("from_name") or "").strip()
+        from_addr = (r.get("from_addr") or "").strip()
+        urgency = r.get("urgency_score") or 0
         out.append({
-            "ts": ts,
-            "from": (from_name or from_addr).strip(),
-            "from_addr": from_addr.strip(),
-            "subject": subject.strip()[:120],
-            "category": category.strip() or "unknown",
-            "urgency": int(urgency) if urgency.isdigit() else 0,
-            "preview": preview.strip()[:300],
+            "ts": r.get("date_received", ""),
+            "from": _decode_mime_header(from_name) or from_addr,
+            "from_addr": from_addr,
+            "subject": _decode_mime_header((r.get("subject") or "").strip())[:120],
+            "category": (r.get("category") or "unknown").strip(),
+            "urgency": int(urgency) if isinstance(urgency, (int, str)) and str(urgency).isdigit() else 0,
+            "preview": (r.get("preview") or "").strip()[:300],
         })
     return out
 

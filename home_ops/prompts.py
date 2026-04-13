@@ -1,6 +1,9 @@
 """home-ops synthesizer prompts."""
 from __future__ import annotations
 import json
+import sys
+from datetime import datetime, timedelta, date
+from zoneinfo import ZoneInfo
 
 SYSTEM_PROMPT = """You are the home-ops assistant for John Cornelius. You write a short, question-driven household brief twice a day (evening prep at 8 PM, morning anchor at 6:30 AM). This brief is HOME LIFE ONLY. Do not mention Sentry AI Thermal, his employer, work projects, job search, or any business matter. Another brief handles that.
 
@@ -141,13 +144,27 @@ Loose ends:
 Weather: Thunderstorms 4-6pm, 5pm practice is probably getting canceled — check the league text thread before you head out."""
 
 
-def _filter_contacts(contacts):
+def _filter_contacts(contacts, cap: int = 60):
     if not contacts:
         return []
     with_rel = [c for c in contacts if c.get("relations")]
-    if len(contacts) < 30:
-        return contacts
-    return with_rel
+    without_rel = [c for c in contacts if not c.get("relations")]
+    without_rel.sort(
+        key=lambda c: (
+            1 if (c.get("email") or c.get("phone") or c.get("phones") or c.get("emails")) else 0,
+            (c.get("name") or "").lower(),
+        ),
+        reverse=True,
+    )
+    merged = list(with_rel)
+    seen = {id(c) for c in merged}
+    for c in without_rel:
+        if len(merged) >= cap:
+            break
+        if id(c) in seen:
+            continue
+        merged.append(c)
+    return merged[:cap]
 
 
 def _filter_imessages(msgs):
@@ -168,16 +185,16 @@ def _filter_imessages(msgs):
 def _filter_mail(mails):
     if not mails:
         return []
-    def score(m):
-        urg = m.get("urgency") or m.get("urgency_score") or 0
+    def urg_val(m):
+        u = m.get("urgency") or m.get("urgency_score") or 0
         try:
-            urg = float(urg)
+            return float(u)
         except (TypeError, ValueError):
-            urg = 0
-        has_from = 1 if m.get("from") or m.get("from_name") else 0
-        return (urg, has_from, m.get("ts") or "")
-    prioritized = [m for m in mails if (m.get("urgency") or 0) or m.get("from")]
-    pool = prioritized if prioritized else mails
+            return 0.0
+    def score(m):
+        return (urg_val(m), m.get("ts") or "")
+    prioritized = [m for m in mails if urg_val(m) >= 0.3]
+    pool = prioritized if prioritized else sorted(mails, key=score, reverse=True)[:40]
     pool = sorted(pool, key=score, reverse=True)
     return pool[:40]
 
@@ -243,6 +260,62 @@ def _slim_weather(w):
     }
 
 
+def _build_day_labels() -> str:
+    tz = ZoneInfo("America/New_York")
+    today = datetime.now(tz).date()
+    lines = ["DAY LABELS (use exactly these for bucketing):"]
+
+    def fmt(d: date) -> str:
+        return f"{d:%a %b %d} ({d.isoformat()})"
+
+    lines.append(f"  Today = {fmt(today)}")
+    lines.append(f"  Tomorrow = {fmt(today + timedelta(days=1))}")
+    weekday_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+    for i in range(2, 7):
+        d = today + timedelta(days=i)
+        lines.append(f"  {weekday_names[d.weekday()]} = {fmt(d)}")
+    for i in range(7, 11):
+        d = today + timedelta(days=i)
+        lines.append(f"  Next {weekday_names[d.weekday()]} = {fmt(d)}")
+    return "\n".join(lines)
+
+
+def _shrink_payload(payload: dict, limit: int = 14000) -> str:
+    blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+    if len(blob) <= limit:
+        return blob
+
+    msgs = payload.get("imessages_7d") or []
+    while len(blob) > limit and len(msgs) > 10:
+        msgs = msgs[: len(msgs) - 5]
+        payload["imessages_7d"] = msgs
+        blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
+    mails = payload.get("mail_7d") or []
+    while len(blob) > limit and len(mails) > 5:
+        mails = mails[: len(mails) - 3]
+        payload["mail_7d"] = mails
+        blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
+    contacts = payload.get("contacts") or []
+    while len(blob) > limit and len(contacts) > 10:
+        contacts = contacts[: len(contacts) - 5]
+        payload["contacts"] = contacts
+        blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
+    if len(blob) > limit:
+        print(
+            f"WARN: home_ops prompt payload still {len(blob)} > {limit} after shrink; "
+            "clearing imessages_7d + mail_7d",
+            file=sys.stderr,
+        )
+        payload["imessages_7d"] = []
+        payload["mail_7d"] = []
+        blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
+    return blob
+
+
 def build_user_prompt(gather: dict, mode: str) -> str:
     mode = (mode or "").lower().strip()
     if mode not in {"evening", "morning"}:
@@ -263,21 +336,8 @@ def build_user_prompt(gather: dict, mode: str) -> str:
         "learned_facts": gather.get("learned_facts") or [],
     }
 
-    blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
-
-    if len(blob) > 14000:
-        msgs = payload["imessages_7d"]
-        while len(blob) > 14000 and len(msgs) > 20:
-            msgs = msgs[: max(20, len(msgs) - 10)]
-            payload["imessages_7d"] = msgs
-            blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
-        mails = payload["mail_7d"]
-        while len(blob) > 14000 and len(mails) > 10:
-            mails = mails[: max(10, len(mails) - 5)]
-            payload["mail_7d"] = mails
-            blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
-        if len(blob) > 14000:
-            blob = blob[:14000] + "\n... [truncated]"
+    blob = _shrink_payload(payload, limit=14000)
+    day_labels = _build_day_labels()
 
     mode_hint = (
         "evening mode: it's 8 PM. focus on tomorrow prep + day after + week-ahead items that need action tonight. "
@@ -291,6 +351,7 @@ def build_user_prompt(gather: dict, mode: str) -> str:
         f"{FEW_SHOT_EXAMPLES}\n\n"
         f"--- END EXAMPLES ---\n\n"
         f"{mode_hint}\n\n"
+        f"{day_labels}\n\n"
         f"Here is the gathered data as JSON:\n\n"
         f"{blob}\n\n"
         f"Write the {mode} brief now. Plain text only. No preamble. No signoff."

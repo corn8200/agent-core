@@ -8,7 +8,6 @@ on the VPS). NEVER embeds images — masthead/footer are pure styled HTML text.
 
 import asyncio
 import html as html_lib
-import re
 import subprocess
 import sys
 import tempfile
@@ -30,34 +29,13 @@ def _escape(s: str) -> str:
     return html_lib.escape(s, quote=False)
 
 
-def _render_paragraph(block: str) -> str:
-    lines = [ln.rstrip() for ln in block.split("\n") if ln.strip()]
-    if not lines:
-        return ""
-
-    bullet_re = re.compile(r"^\s*(?:-|•)\s+(.*)$")
-    if all(bullet_re.match(ln) for ln in lines):
-        items = "".join(
-            f'<li style="margin:4px 0;">{_escape(bullet_re.match(ln).group(1))}</li>'
-            for ln in lines
-        )
-        return (
-            f'<ul style="margin:0 0 14px 0;padding-left:22px;'
-            f'font-size:15px;line-height:1.55;color:{TEXT_COLOR};">{items}</ul>'
-        )
-
-    escaped = [_escape(ln) for ln in lines]
-    joined = "<br>".join(escaped)
-    return (
-        f'<p style="margin:0 0 14px 0;font-size:15px;line-height:1.55;'
-        f'color:{TEXT_COLOR};">{joined}</p>'
-    )
-
-
 def _brief_to_html_body(brief_text: str) -> str:
-    blocks = re.split(r"\n\s*\n", brief_text.strip())
-    rendered = [_render_paragraph(b) for b in blocks]
-    return "\n".join(r for r in rendered if r)
+    escaped = _escape(brief_text.strip())
+    return (
+        f'<pre style="font-family:{FONT_STACK};font-size:15px;line-height:1.55;'
+        f'white-space:pre-wrap;word-wrap:break-word;margin:0;color:{TEXT_COLOR};">'
+        f'{escaped}</pre>'
+    )
 
 
 def build_html(brief_text: str, mode: str) -> str:

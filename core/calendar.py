@@ -12,7 +12,7 @@ from typing import Optional
 
 
 # Calendars to skip in scheduling logic (still shown in display output)
-SKIP_CALENDARS = {"Siri Suggestions", "US Holidays", "Birthdays"}
+SKIP_CALENDARS = {"Siri Suggestions", "US Holidays"}
 
 
 @dataclass
@@ -171,11 +171,10 @@ async def _get_events_swift(start: datetime, end: datetime) -> Optional[list[Cal
     script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "calendar_fetch.swift")
     if not os.path.exists(script_path):
         return None
-    today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-    days_back = max(0, (today - start).days)
-    days_fwd = max(1, (end - today).days)
+    start_epoch = start.timestamp()
+    end_epoch = end.timestamp()
     proc = await asyncio.create_subprocess_exec(
-        "swift", script_path, str(days_back), str(days_fwd),
+        "swift", script_path, f"{start_epoch:.0f}", f"{end_epoch:.0f}",
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:
@@ -251,7 +250,7 @@ async def get_events(start: datetime, end: datetime) -> list[CalendarEvent]:
     script_non_recurring = f'''
     set FS to (ASCII character 31)
     set RS to (ASCII character 30)
-    set skipCals to {{"Siri Suggestions", "US Holidays", "Birthdays"}}
+    set skipCals to {{"Siri Suggestions", "US Holidays"}}
     tell application "Calendar"
         set startDate to date "{start_str}"
         set time of startDate to {start.hour * 3600 + start.minute * 60}
@@ -293,7 +292,7 @@ async def get_events(start: datetime, end: datetime) -> list[CalendarEvent]:
     script_recurring = f'''
     set FS to (ASCII character 31)
     set RS to (ASCII character 30)
-    set skipCals to {{"Siri Suggestions", "US Holidays", "Birthdays"}}
+    set skipCals to {{"Siri Suggestions", "US Holidays"}}
     tell application "Calendar"
         set endDate to date "{end_str}"
         set time of endDate to {end.hour * 3600 + end.minute * 60 + 86399}

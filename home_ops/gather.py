@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.calendar import get_events, SKIP_CALENDARS
+from core.calendar import get_events
 from core.constants import VPS_SSH
 
 # --- Helpers ---
@@ -89,8 +89,6 @@ async def gather_calendar_7d() -> list[dict]:
     tomorrow = today + timedelta(days=1)
     out = []
     for e in events:
-        if e.calendar in SKIP_CALENDARS:
-            continue
         d = e.start.date()
         if d == today:
             bucket = "today"
@@ -189,8 +187,8 @@ async def gather_contacts() -> list[dict]:
         if len(parts) < 6 or not parts[0].strip(" \t\n\r"):
             continue
         name, org, emails, phones, rels, bday = parts[:6]
-        # Skip noise: must have at least one of email/phone/relation
-        if not (emails.strip() or phones.strip() or rels.strip()):
+        # Skip noise: must have at least one of email/phone/relation/birthday
+        if not (emails.strip() or phones.strip() or rels.strip() or bday.strip()):
             continue
         out.append({
             "name": name.strip(),
@@ -207,33 +205,46 @@ async def gather_contacts() -> list[dict]:
 
 def _extract_attributed_body(blob: bytes) -> str:
     """Extract plain text from a chat.db attributedBody NSKeyedArchiver blob.
-    Modern macOS stores most iMessage text here when m.text is NULL.
-    Strategy: find NSString marker, skip the 1-byte length prefix that follows,
-    then read printable run until next typedstream control byte.
+
+    Modern macOS stores most iMessage text here when m.text is NULL. The blob
+    is a typedstream (NSArchiver, not NSKeyedArchiver despite the column name).
+    The text lives after an NSString class descriptor; we look for the reliable
+    three-byte sequence `84 01 2B` where `2B` is the typedstream type code for
+    a C string (+), followed by a length prefix in one of three forms:
+        short:    one byte < 0x81 = length
+        0x81 XY:  little-endian uint16 length
+        0x82 WXYZ: little-endian uint32 length
+    then exactly `length` UTF-8 bytes.
     """
     if not blob:
         return ""
     try:
-        idx = blob.find(b"NSString")
-        if idx == -1:
+        start = blob.find(b"NSString")
+        if start == -1:
             return ""
-        # After "NSString" there's a class-version byte, then the string token:
-        #   0x01 0x2b (short, len < 0xff)  → followed by 1-byte length, then UTF-8 bytes
-        #   0x00 0x81 (long)               → followed by 2-byte LE length, then bytes
-        sub = blob[idx + 8:]
-        # Walk forward to first non-control byte after possible length markers
-        # Skip up to 5 leading control bytes, then read printable run
-        i = 0
-        while i < 6 and i < len(sub) and (sub[i] < 32 or sub[i] == 0x2b):
-            i += 1
-        out = []
-        for b in sub[i:i + 2000]:
-            if 32 <= b < 127 or b in (9, 10, 13) or b >= 0x80:
-                out.append(b)
-            else:
-                if out:
-                    break
-        return bytes(out).decode("utf-8", errors="replace").strip()
+        marker = blob.find(b"\x84\x01\x2b", start)
+        if marker == -1:
+            return ""
+        p = marker + 3
+        if p >= len(blob):
+            return ""
+        ln = blob[p]
+        if ln == 0x81:
+            if p + 3 > len(blob):
+                return ""
+            length = int.from_bytes(blob[p + 1:p + 3], "little")
+            p += 3
+        elif ln == 0x82:
+            if p + 5 > len(blob):
+                return ""
+            length = int.from_bytes(blob[p + 1:p + 5], "little")
+            p += 5
+        else:
+            length = ln
+            p += 1
+        if length <= 0 or p + length > len(blob):
+            return ""
+        return blob[p:p + length].decode("utf-8", errors="replace").strip()
     except Exception:
         return ""
 

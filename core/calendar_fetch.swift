@@ -1,5 +1,7 @@
 // calendar_fetch.swift — fast EventKit-based calendar reader.
-// Usage: swift calendar_fetch.swift <days_back> <days_fwd>
+// Usage: swift calendar_fetch.swift <start_epoch> <end_epoch>
+// Epoch args are unix seconds (float ok). Legacy 2-arg form
+// (days_back, days_fwd) still supported for direct CLI debugging.
 // Output: one event per line, fields separated by \x1f, records terminated by \x1e.
 // Fields: title, start_iso, end_iso, calendar, location, notes, uid, all_day(0/1)
 // Unlike AppleScript, this EXPANDS recurring event instances and runs in ~1s.
@@ -21,16 +23,27 @@ if !granted {
 }
 
 let args = CommandLine.arguments
-let daysBack = Int(args.count > 1 ? args[1] : "0") ?? 0
-let daysFwd = Int(args.count > 2 ? args[2] : "8") ?? 8
+let arg1 = args.count > 1 ? args[1] : "0"
+let arg2 = args.count > 2 ? args[2] : "8"
 
-let cal = Calendar.current
-let startBase = cal.startOfDay(for: Date())
-let start = cal.date(byAdding: .day, value: -daysBack, to: startBase)!
-let end = cal.date(byAdding: .day, value: daysFwd, to: startBase)!
+let start: Date
+let end: Date
+// Epoch-seconds mode: both args parse as double and the first is large
+// enough to be a real unix timestamp (> year 2001).
+if let a = Double(arg1), let b = Double(arg2), a > 978307200 {
+    start = Date(timeIntervalSince1970: a)
+    end = Date(timeIntervalSince1970: b)
+} else {
+    let daysBack = Int(arg1) ?? 0
+    let daysFwd = Int(arg2) ?? 8
+    let cal = Calendar.current
+    let startBase = cal.startOfDay(for: Date())
+    start = cal.date(byAdding: .day, value: -daysBack, to: startBase)!
+    end = cal.date(byAdding: .day, value: daysFwd, to: startBase)!
+}
 
 let calendars = store.calendars(for: .event)
-let skip: Set<String> = ["Siri Suggestions", "US Holidays", "Birthdays"]
+let skip: Set<String> = ["Siri Suggestions", "US Holidays"]
 let filtered = calendars.filter { !skip.contains($0.title) }
 
 let pred = store.predicateForEvents(withStart: start, end: end, calendars: filtered)

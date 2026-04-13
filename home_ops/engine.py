@@ -20,6 +20,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -77,37 +78,75 @@ async def synthesize(gather: dict, mode: str) -> str:
             if hasattr(msg, "result") and msg.result:
                 brief_text = msg.result
     except Exception as e:
-        # SDK throws on CLI exit after result is received — only real error
-        # is one that leaves brief_text empty
-        if not brief_text:
-            print(f"synthesize error: {e}", file=sys.stderr)
+        print(f"synthesize error: {e}", file=sys.stderr)
 
-    return brief_text.strip()
+    brief_text = brief_text.strip()
+    if brief_text:
+        lower = brief_text.lower()
+        last_line = brief_text.splitlines()[-1].strip() if brief_text.splitlines() else ""
+        malformed = (
+            "loose ends" not in lower
+            or not last_line
+            or last_line in ("-", "•", "*")
+            or last_line.endswith(("—", "-"))
+        )
+        if malformed:
+            print(
+                "WARN: synthesized brief may be truncated or malformed "
+                f"(last_line={last_line!r})",
+                file=sys.stderr,
+            )
+    return brief_text
+
+
+_DAY_START_RE = re.compile(
+    r"^(monday|tuesday|wednesday|thursday|friday|saturday|sunday|"
+    r"mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun|"
+    r"today|tomorrow|next)\b",
+    re.IGNORECASE,
+)
 
 
 def extract_loose_ends(brief_text: str) -> list[str]:
-    """Parse the 'loose ends:' section of the brief into individual bullet lines.
-    Best-effort; if the model skipped the section, return [].
+    """Parse the 'Loose ends:' section of the brief into bullet lines.
+
+    Enter the section on a "loose ends" header. Exit on:
+      - blank line after captures, OR
+      - a day-label line (Mon/Tue/.../Today/Tomorrow/Next ...), OR
+      - a "Weather" line, OR
+      - any other Title-Case section label ending with ':'.
+    Only bullet-prefixed lines (-, •, *) inside the section are captured.
     """
-    lines = brief_text.split("\n")
     out: list[str] = []
     in_section = False
-    for line in lines:
+    for line in brief_text.split("\n"):
         stripped = line.strip()
         if not in_section:
-            if stripped.lower().startswith("loose ends"):
+            low = stripped.lower().rstrip(":")
+            if low == "loose ends" or low.startswith("loose ends"):
                 in_section = True
             continue
+
         if not stripped:
-            # blank line — section ended IF we already captured items
             if out:
                 break
             continue
-        # stop when we hit another section header (lowercase word + no bullet)
-        if not stripped.startswith(("-", "•", "*")) and stripped.lower().split()[0] in (
-            "weather", "today", "tomorrow", "this", "week",
+
+        low = stripped.lower()
+        if low.startswith("weather"):
+            break
+        if _DAY_START_RE.match(stripped):
+            break
+        if (
+            not stripped.startswith(("-", "•", "*"))
+            and stripped.endswith(":")
+            and stripped[0].isupper()
         ):
             break
+
+        if not stripped.startswith(("-", "•", "*")):
+            continue
+
         cleaned = stripped.lstrip("-•* ").strip()
         if cleaned:
             out.append(cleaned[:200])
@@ -157,8 +196,9 @@ async def run(mode: str, dry_run: bool = False, gather_only: bool = False,
     BRIEF_TEXT_PATH.write_text(brief_text)
     print(f"[{datetime.now():%H:%M:%S}] brief: {len(brief_text)} chars → {BRIEF_TEXT_PATH}")
 
-    # Stage 3: dedup
-    fingerprint = state_mod.fingerprint_brief(brief_text)
+    # Stage 3: dedup — salt with mode+date so morning/evening same day are distinct
+    salted = f"{mode}|{datetime.now().date().isoformat()}|{brief_text}"
+    fingerprint = state_mod.fingerprint_brief(salted)
     if not force and state_mod.already_sent(fingerprint):
         print(f"[{datetime.now():%H:%M:%S}] DEDUP: fingerprint already sent, skipping")
         return 0

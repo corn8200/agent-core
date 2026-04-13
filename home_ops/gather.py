@@ -41,17 +41,33 @@ async def _run(cmd: str, timeout: int = 15) -> str:
         return ""
 
 
-async def _osascript(script: str, timeout: int = 20) -> str:
+async def _osascript(script: str, timeout: int = 20) -> tuple[str, str]:
     proc = await asyncio.create_subprocess_exec(
         "osascript", "-e", script,
         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
     )
     try:
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-        return stdout.decode(errors="replace").strip()
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        return stdout.decode(errors="replace").strip(), stderr.decode(errors="replace").strip()
     except asyncio.TimeoutError:
         proc.kill()
-        return ""
+        return "", "TIMEOUT"
+
+
+async def _ensure_app_running(app_name: str, app_path: str) -> None:
+    """pgrep + open -gj pattern. Prevents AppleEvents -600 silent failures."""
+    proc = await asyncio.create_subprocess_exec(
+        "pgrep", "-xq", app_name,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    if await proc.wait() == 0:
+        return
+    proc = await asyncio.create_subprocess_exec(
+        "open", "-gj", app_path,
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+    )
+    await proc.wait()
+    await asyncio.sleep(2)
 
 
 # --- Calendar (7 days) ---
@@ -150,8 +166,11 @@ async def gather_contacts() -> list[dict]:
         return output
     end tell
     '''
-    raw = await _osascript(script, timeout=120)
+    await _ensure_app_running("Contacts", "/System/Applications/Contacts.app")
+    raw, err = await _osascript(script, timeout=180)
     if not raw:
+        if err:
+            return [{"_error": f"osascript: {err[:200]}"}]
         return []
     out = []
     for entry in raw.split("\x1e"):

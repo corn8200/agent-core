@@ -37,8 +37,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.gather import gather_all
 from core.constants import HOME, PERSONAL_EMAIL, VPS_SSH
 
-BRIEF_TEXT_PATH = Path("/tmp/brief-text.txt")
-BRIEF_HTML_PATH = Path("/tmp/morning-brief.html")
+BRIEF_TEXT_PATH = Path.home() / "logs" / "brief-text.txt"
+BRIEF_HTML_PATH = Path.home() / "logs" / "morning-brief.html"
+BRIEF_TEXT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 SYNTHESIS_PROMPT = """You have the following system data gathered just now. Write a SPOKEN morning brief.
 

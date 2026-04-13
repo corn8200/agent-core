@@ -280,7 +280,7 @@ def _build_day_labels() -> str:
     return "\n".join(lines)
 
 
-def _shrink_payload(payload: dict, limit: int = 20000) -> str:
+def _shrink_payload(payload: dict, limit: int = 24000) -> str:
     blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
     if len(blob) <= limit:
         return blob
@@ -353,7 +353,7 @@ def build_user_prompt(gather: dict, mode: str) -> str:
         "learned_facts": gather.get("learned_facts") or [],
     }
 
-    blob = _shrink_payload(payload, limit=20000)
+    blob = _shrink_payload(payload, limit=24000)
     day_labels = _build_day_labels()
 
     mode_hint = (

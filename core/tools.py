@@ -427,7 +427,7 @@ async def swarm_context_list(args: dict[str, Any]) -> dict:
     {},
 )
 async def get_schedule(args: dict[str, Any]) -> dict:
-    from core.calendar import get_schedule_view
+    from core.calendar_service import get_schedule_view
     view = await get_schedule_view()
     return {"content": [{"type": "text", "text": json.dumps(view.to_dict(), indent=2)}]}
 
@@ -438,7 +438,7 @@ async def get_schedule(args: dict[str, Any]) -> dict:
     {},
 )
 async def get_week_view_tool(args: dict[str, Any]) -> dict:
-    from core.calendar import get_week_view
+    from core.calendar_service import get_week_view
     view = await get_week_view()
     return {"content": [{"type": "text", "text": json.dumps(view.to_dict(), indent=2)}]}
 
@@ -450,7 +450,7 @@ async def get_week_view_tool(args: dict[str, Any]) -> dict:
 )
 async def check_calendar(args: dict[str, Any]) -> dict:
     from datetime import datetime as dt
-    from core.calendar import check_availability, detect_conflicts
+    from core.calendar_service import check_availability, detect_conflicts
     start = dt.fromisoformat(args["start"])
     end = dt.fromisoformat(args["end"])
     free, conflicts = await asyncio.gather(
@@ -471,7 +471,7 @@ async def check_calendar(args: dict[str, Any]) -> dict:
 )
 async def create_calendar_event(args: dict[str, Any]) -> dict:
     from datetime import datetime as dt
-    from core.calendar import create_event
+    from core.calendar_service import create_event
     start = dt.fromisoformat(args["start"])
     end = dt.fromisoformat(args["end"])
     ok = await create_event(

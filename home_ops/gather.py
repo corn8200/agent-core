@@ -24,7 +24,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.calendar import get_events
+from core.calendar_service import get_events
 from core.constants import (
     GATHER_CACHE,
     GATHER_TTL_SECONDS,

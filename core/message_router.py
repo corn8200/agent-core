@@ -246,7 +246,7 @@ async def _get_email_context() -> dict:
 async def _get_calendar_context() -> dict:
     """Pull calendar context from the calendar service."""
     try:
-        from core.calendar import get_schedule_view, get_week_view
+        from core.calendar_service import get_schedule_view, get_week_view
         view, week = await asyncio.gather(
             get_schedule_view(),
             get_week_view(),
@@ -501,7 +501,7 @@ async def _handle_inline(intent: str, msg: InboundMessage, classification: dict)
         else:
             # Pull fresh schedule and send
             try:
-                from core.calendar import get_schedule_view
+                from core.calendar_service import get_schedule_view
                 view = await get_schedule_view()
                 parts = [view.current_status]
                 if view.events_today:

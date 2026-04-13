@@ -20,7 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.calendar import get_events, get_week_view, SKIP_CALENDARS
+from core.calendar_service import get_events, get_week_view, SKIP_CALENDARS
 from core.constants import PERSONAL_EMAIL
 from home_ops.gather import gather_reminders
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
@@ -175,7 +175,7 @@ async def run_nudges(dry_run: bool = False):
 
         morning_key = f"morning-{today.isoformat()}"
         if not already_sent(morning_key, "morning_preview"):
-            from core.calendar import _compute_free_slots, get_schedule_view
+            from core.calendar_service import _compute_free_slots, get_schedule_view
             view = await get_schedule_view()
 
             parts = [f"Today: {len(schedulable)} events"]

@@ -194,15 +194,14 @@ async def deliver_tts(brief_text: str) -> bool:
                     str(BRIEF_TEXT_PATH),
                     "--no-imessage",
                 ],
-                capture_output=True, text=True, timeout=90,
+                capture_output=True, text=True, timeout=120,
             )
             audio_ok = result.returncode == 0
             if not audio_ok:
                 print(f"brief-deliver.py failed: {result.stderr[:400]}", file=sys.stderr)
         except subprocess.TimeoutExpired:
-            print("brief-deliver.py timed out at 90s", file=sys.stderr)
-            # Even on timeout, the m4a may have been written before the hang
-            audio_ok = (Path.home() / "research-output" / "public" / "brief.m4a").exists()
+            print("brief-deliver.py timed out at 120s", file=sys.stderr)
+            audio_ok = Path("/tmp/brief-audio.m4a").exists()
     else:
         # Fallback: macOS say (no iMessage delivery in this branch)
         try:
@@ -211,17 +210,31 @@ async def deliver_tts(brief_text: str) -> bool:
         except Exception:
             return False
 
-    # Deliver link via iMessage using the tmux relay (works from launchd context)
+    # Upload audio to R2 and deliver HTTPS link via iMessage
     if audio_ok:
+        audio_path = Path("/tmp/brief-audio.m4a")
+        r2_url = None
+        try:
+            upload = subprocess.run(
+                ["wrangler", "r2", "object", "put", "audio-share/brief.m4a",
+                 "--file", str(audio_path), "--content-type", "audio/mp4", "--remote"],
+                capture_output=True, text=True, timeout=60,
+            )
+            if upload.returncode == 0:
+                r2_url = "https://pub-a5fc31bf3f0b42c69a2565c407a447cd.r2.dev/brief.m4a"
+            else:
+                print(f"R2 upload failed: {upload.stderr[:200]}", file=sys.stderr)
+        except Exception as e:
+            print(f"R2 upload error: {e}", file=sys.stderr)
+
         try:
             from core.tools import send_imessage_reliable
-            audio_url = "http://100.122.35.56:8080/brief.m4a"
+            url = r2_url or "http://100.122.35.56:8080/brief.m4a"
             first_line = brief_text.split("\n", 1)[0][:180]
-            msg = f"Morning Brief ready: {audio_url}\n\n{first_line}"
+            msg = f"Morning Brief: {url}\n\n{first_line}"
             await send_imessage_reliable(PERSONAL_EMAIL, msg)
         except Exception as e:
             print(f"iMessage delivery failed: {e}", file=sys.stderr)
-            # Audio still exists at the URL — not a full failure
     return audio_ok
 
 

@@ -30,5 +30,12 @@
     <string>/Users/johncornelius/logs/imessage-bus.log</string>
     <key>ThrottleInterval</key>
     <integer>5</integer>
+    <key>WorkingDirectory</key>
+    <string>/Users/johncornelius/Projects/agent-core</string>
+    <key>SoftResourceLimits</key>
+    <dict>
+        <key>NumberOfFiles</key>
+        <integer>4096</integer>
+    </dict>
 </dict>
 </plist>

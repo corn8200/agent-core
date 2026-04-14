@@ -94,11 +94,27 @@ async def synthesize(data: dict) -> str:
     from core.thinking import HEAVY
 
     now = datetime.now()
+
+    try:
+        from core.memory import search as memory_search
+        past_briefs = memory_search("morning brief summary insights", k=5, agent='morning_brief', category='brief')
+        if past_briefs:
+            brief_history = '\n'.join(
+                f"- [{b['timestamp'][:10]}] {b['content'][:250]}"
+                for b in past_briefs
+            )
+        else:
+            brief_history = ''
+    except Exception:
+        brief_history = ''
+
     prompt = SYNTHESIS_PROMPT.format(
         day_of_week=now.strftime("%A"),
         month_day=now.strftime("%B %d"),
         data=json.dumps(data, indent=2, default=str),
     )
+    if brief_history:
+        prompt += f"\n\n## Recent Brief History\n{brief_history}"
 
     brief_text = ""
     try:
@@ -246,17 +262,6 @@ async def main():
     print(f"[{datetime.now():%H:%M:%S}] Gathering data...")
     data = await gather_all(force=True)
     print(f"[{datetime.now():%H:%M:%S}] Gathered from {len(data)} sources")
-
-    # Pull VPS auth-watcher state so the brief can surface overnight incidents
-    try:
-        r = subprocess.run(
-            ["ssh", VPS_SSH, "cat /srv/apps/auth-watcher/state.json"],
-            capture_output=True, text=True, timeout=15,
-        )
-        if r.returncode == 0 and r.stdout.strip():
-            data["vps_auth"] = json.loads(r.stdout)
-    except Exception as e:
-        print(f"[warn] could not fetch vps_auth state: {e}")
 
     if gather_only:
         print(f"Cache written to /tmp/claude-gather.json")

@@ -176,25 +176,6 @@ def detect_anomalies(data: dict) -> list[dict]:
             "message": f"Pi unreachable: {pi['error'][:100]}",
         })
 
-    # Unread business email pileup
-    mail_unread = data.get("apple", {}).get("mail_unread", 0)
-    if isinstance(mail_unread, int) and mail_unread > 20:
-        anomalies.append({
-            "severity": "low",
-            "source": "email",
-            "message": f"{mail_unread} unread emails in inbox",
-        })
-
-    # Overdue reminders
-    reminders = data.get("apple", {}).get("reminders", {})
-    reminder_count = reminders.get("count", 0)
-    if reminder_count > 10:
-        anomalies.append({
-            "severity": "low",
-            "source": "reminders",
-            "message": f"{reminder_count} incomplete reminders",
-        })
-
     return anomalies
 
 
@@ -270,7 +251,6 @@ print("sent")
 async def diagnose_anomalies(anomalies: list[dict], data: dict, heal_context: str = "") -> str:
     """Use SDK to diagnose anomalies and suggest fixes."""
     from claude_agent_sdk import query, ClaudeAgentOptions
-    from core.tools import create_core_server
     from core.hooks import AGENT_HOOKS
     from core.thinking import STANDARD
 
@@ -314,7 +294,6 @@ Be concise. This goes to a push notification."""
                 max_turns=5,
                 max_budget_usd=0.30,
                 cwd=str(HOME),
-                mcp_servers={"core": create_core_server()},
                 hooks=AGENT_HOOKS,
                 thinking=STANDARD,
                 effort="max",

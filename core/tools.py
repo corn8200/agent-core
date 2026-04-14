@@ -325,24 +325,27 @@ async def send_imessage(args: dict[str, Any]) -> dict:
     {"to": str, "subject": str, "body": str},
 )
 async def send_business_email(args: dict[str, Any]) -> dict:
-    to_addr = args["to"]
-    subject = args["subject"].replace("'", "'\\''")
-    body = args["body"].replace("'", "'\\''")
-    queue_cmd = (
-        f"cd /srv/apps/sentry-mailqueue && "
-        f".venv/bin/python queue_cli.py --to '{to_addr}' --subject '{subject}' --body '{body}' && "
-        f".venv/bin/python queue_cli.py --send-now"
-    )
-    proc = await asyncio.create_subprocess_exec(
-        "ssh", "vps", queue_cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    output = stdout.decode().strip()
-    if proc.returncode != 0:
-        return {"content": [{"type": "text", "text": f"Email failed: {stderr.decode()}"}]}
-    return {"content": [{"type": "text", "text": f"Business email sent to {to_addr}: {output}"}]}
+    try:
+        to_addr = args["to"]
+        subject = args["subject"].replace("'", "'\\''")
+        body = args["body"].replace("'", "'\\''")
+        queue_cmd = (
+            f"cd /srv/apps/sentry-mailqueue && "
+            f".venv/bin/python queue_cli.py --to '{to_addr}' --subject '{subject}' --body '{body}' && "
+            f".venv/bin/python queue_cli.py --send-now"
+        )
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", "vps", queue_cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        output = stdout.decode().strip()
+        if proc.returncode != 0:
+            return {"content": [{"type": "text", "text": f"Email failed: {stderr.decode()}"}]}
+        return {"content": [{"type": "text", "text": f"Business email sent to {to_addr}: {output}"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"send_business_email error: {e}"}]}
 
 
 @tool(

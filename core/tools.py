@@ -376,18 +376,21 @@ async def osascript_run(args: dict[str, Any]) -> dict:
     {"title": str, "message": str},
 )
 async def moshi_push(args: dict[str, Any]) -> dict:
-    title = shlex.quote(args["title"])
-    message = shlex.quote(args["message"])
-    # Uses the notify-moshi.sh script if available, otherwise curl
-    proc = await asyncio.create_subprocess_exec(
-        "bash", "-c",
-        f'if [ -x ~/bin/notify-moshi.sh ]; then ~/bin/notify-moshi.sh {title} {message}; '
-        f'else echo "notify-moshi.sh not found"; fi',
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    return {"content": [{"type": "text", "text": stdout.decode().strip() or "Push sent"}]}
+    try:
+        title = shlex.quote(args["title"])
+        message = shlex.quote(args["message"])
+        # Uses the notify-moshi.sh script if available, otherwise curl
+        proc = await asyncio.create_subprocess_exec(
+            "bash", "-c",
+            f'if [ -x ~/bin/notify-moshi.sh ]; then ~/bin/notify-moshi.sh {title} {message}; '
+            f'else echo "notify-moshi.sh not found"; fi',
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        return {"content": [{"type": "text", "text": stdout.decode().strip() or "Push sent"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"moshi_push error: {e}"}]}
 
 
 @tool(

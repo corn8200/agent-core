@@ -473,19 +473,22 @@ async def get_week_view_tool(args: dict[str, Any]) -> dict:
     {"start": str, "end": str},
 )
 async def check_calendar(args: dict[str, Any]) -> dict:
-    from datetime import datetime as dt
-    from core.calendar_service import check_availability, detect_conflicts
-    start = dt.fromisoformat(args["start"])
-    end = dt.fromisoformat(args["end"])
-    free, conflicts = await asyncio.gather(
-        check_availability(start, end),
-        detect_conflicts(start, end),
-    )
-    result = {
-        "free_slots": [s.to_dict() for s in free],
-        "conflicts": [e.to_dict() for e in conflicts],
-    }
-    return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+    try:
+        from datetime import datetime as dt
+        from core.calendar_service import check_availability, detect_conflicts
+        start = dt.fromisoformat(args["start"])
+        end = dt.fromisoformat(args["end"])
+        free, conflicts = await asyncio.gather(
+            check_availability(start, end),
+            detect_conflicts(start, end),
+        )
+        result = {
+            "free_slots": [s.to_dict() for s in free],
+            "conflicts": [e.to_dict() for e in conflicts],
+        }
+        return {"content": [{"type": "text", "text": json.dumps(result, indent=2)}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"check_calendar error: {e}"}]}
 
 
 @tool(
@@ -494,20 +497,23 @@ async def check_calendar(args: dict[str, Any]) -> dict:
     {"summary": str, "start": str, "end": str, "calendar": str, "location": str, "notes": str},
 )
 async def create_calendar_event(args: dict[str, Any]) -> dict:
-    from datetime import datetime as dt
-    from core.calendar_service import create_event
-    start = dt.fromisoformat(args["start"])
-    end = dt.fromisoformat(args["end"])
-    ok = await create_event(
-        summary=args["summary"],
-        start=start,
-        end=end,
-        calendar=args.get("calendar", "notify@jcornelius.net"),
-        location=args.get("location", ""),
-        notes=args.get("notes", ""),
-    )
-    status = "Event created" if ok else "Failed to create event"
-    return {"content": [{"type": "text", "text": status}]}
+    try:
+        from datetime import datetime as dt
+        from core.calendar_service import create_event
+        start = dt.fromisoformat(args["start"])
+        end = dt.fromisoformat(args["end"])
+        ok = await create_event(
+            summary=args["summary"],
+            start=start,
+            end=end,
+            calendar=args.get("calendar", "notify@jcornelius.net"),
+            location=args.get("location", ""),
+            notes=args.get("notes", ""),
+        )
+        status = "Event created" if ok else "Failed to create event"
+        return {"content": [{"type": "text", "text": status}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"create_calendar_event error: {e}"}]}
 
 
 def create_core_server():

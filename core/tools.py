@@ -304,16 +304,19 @@ async def ssh_command(args: dict[str, Any]) -> dict:
     {"buddy": str, "message": str, "agent": str, "tier": str},
 )
 async def send_imessage(args: dict[str, Any]) -> dict:
-    agent = args.get("agent", "unknown")
-    tier = args.get("tier", "normal")
-    from core.message_bus import send_message
-    ok, result = await send_message(
-        message=args["message"],
-        agent=agent,
-        recipient=args["buddy"],
-        tier=tier,
-    )
-    return {"content": [{"type": "text", "text": result}]}
+    try:
+        agent = args.get("agent", "unknown")
+        tier = args.get("tier", "normal")
+        from core.message_bus import send_message
+        ok, result = await send_message(
+            message=args["message"],
+            agent=agent,
+            recipient=args["buddy"],
+            tier=tier,
+        )
+        return {"content": [{"type": "text", "text": result}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"send_imessage error: {e}"}]}
 
 
 @tool(
@@ -414,11 +417,14 @@ async def swarm_context_read(args: dict[str, Any]) -> dict:
     {},
 )
 async def swarm_context_list(args: dict[str, Any]) -> dict:
-    ctx = _get_active_context()
-    keys = ctx.list_keys()
-    if not keys:
-        return {"content": [{"type": "text", "text": "Swarm context is empty"}]}
-    return {"content": [{"type": "text", "text": "Keys: " + ", ".join(keys)}]}
+    try:
+        ctx = _get_active_context()
+        keys = ctx.list_keys()
+        if not keys:
+            return {"content": [{"type": "text", "text": "Swarm context is empty"}]}
+        return {"content": [{"type": "text", "text": "Keys: " + ", ".join(keys)}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"swarm_context_list error: {e}"}]}
 
 
 @tool(

@@ -268,6 +268,12 @@ async def main():
     BRIEF_TEXT_PATH.write_text(brief_text)
     print(f"[{datetime.now():%H:%M:%S}] Brief: {len(brief_text)} chars, saved to {BRIEF_TEXT_PATH}")
 
+    try:
+        from core.memory import store as memory_store
+        memory_store(brief_text, agent='morning_brief', category='brief')
+    except Exception:
+        pass
+
     if dry_run:
         print("\n--- DRY RUN OUTPUT ---")
         print(brief_text[:1000])

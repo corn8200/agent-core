@@ -276,10 +276,23 @@ async def diagnose_anomalies(anomalies: list[dict], data: dict, heal_context: st
 
     heal_section = f"\n\nAuto-remediation results:\n{heal_context}" if heal_context else ""
 
+    try:
+        from core.memory import search as memory_search
+        anomaly_query = ' '.join(a.get('message', '') for a in anomalies[:3])
+        past_diagnoses = memory_search(anomaly_query, k=3, agent='handler', category='diagnosis')
+        if past_diagnoses:
+            history_text = '\n'.join(f"- [{d['timestamp'][:10]}] {d['content'][:200]}" for d in past_diagnoses)
+        else:
+            history_text = ''
+    except Exception:
+        history_text = ''
+
+    history_section = f"\n\n## Recent similar diagnoses\n{history_text}" if history_text else ""
+
     prompt = f"""You are a systems handler for John's infrastructure. Anomalies detected:
 
 {json.dumps(anomalies, indent=2)}
-{heal_section}
+{heal_section}{history_section}
 
 Raw system data:
 {json.dumps(data, indent=2, default=str)[:8000]}
@@ -313,7 +326,19 @@ Be concise. This goes to a push notification."""
                         result += block.text
             if hasattr(msg, "result") and msg.result:
                 result = msg.result
-        return result.strip()
+        diagnosis_text = result.strip()
+        if diagnosis_text:
+            try:
+                from core.memory import store as memory_store
+                memory_store(
+                    diagnosis_text,
+                    agent='handler',
+                    category='diagnosis',
+                    metadata={'anomalies': anomalies},
+                )
+            except Exception:
+                pass
+        return diagnosis_text
     except Exception as e:
         return f"Diagnosis unavailable: {e}"
 

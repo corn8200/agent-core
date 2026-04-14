@@ -10,7 +10,7 @@ Usage:
 
     options = ClaudeAgentOptions(
         model="opus",
-        thinking=HEAVY,          # 12k budget for hard reasoning
+        thinking=HEAVY,          # 32k budget for hard reasoning
         effort="max",            # always max per user preference
         hooks=AGENT_HOOKS,
         ...
@@ -23,12 +23,14 @@ Picking a preset:
     LIGHT    — simple Q&A, status checks, straightforward classification
     ADAPTIVE — let Claude decide (good default when budget is unknown)
     OFF      — explicitly disable (rare — only for pure formatting tasks)
+
+Opus 4.6 supports up to 64k thinking tokens. Budgets are set high (cost not a concern).
 """
 
 from typing import Any
 
-HEAVY: dict[str, Any] = {"type": "enabled", "budget_tokens": 12000}
-STANDARD: dict[str, Any] = {"type": "enabled", "budget_tokens": 6000}
-LIGHT: dict[str, Any] = {"type": "enabled", "budget_tokens": 3000}
+HEAVY: dict[str, Any] = {"type": "enabled", "budget_tokens": 32000}
+STANDARD: dict[str, Any] = {"type": "enabled", "budget_tokens": 16000}
+LIGHT: dict[str, Any] = {"type": "enabled", "budget_tokens": 6000}
 ADAPTIVE: dict[str, Any] = {"type": "adaptive"}
 OFF: dict[str, Any] = {"type": "disabled"}

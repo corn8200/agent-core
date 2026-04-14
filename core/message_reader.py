@@ -28,6 +28,16 @@ def _looks_like_bot_attribution(text: str) -> bool:
     return bool(_BOT_ATTRIBUTION_RE.match(text.lstrip()))
 
 
+# Control-character delimiters that cannot appear in iMessage text bodies.
+# 0x1f = ASCII Unit Separator (between fields)
+# 0x1e = ASCII Record Separator (between rows)
+# Using these instead of "|||"/newline makes parsing immune to message
+# bodies containing pipes, parens, or embedded newlines (e.g. forwarded
+# multi-line content like "(shared from GROUNDTRUTH)\nsome text").
+_FIELD_SEP = "\x1f"
+_RECORD_SEP = "\x1e"
+
+
 def _sqlite_via_relay_cmd(sql: str, db_path: str = "~/Library/Messages/chat.db") -> str:
     """Build a shell command that pipes base64-encoded SQL into sqlite3.
 
@@ -35,7 +45,10 @@ def _sqlite_via_relay_cmd(sql: str, db_path: str = "~/Library/Messages/chat.db")
     quotes without escaping. The relay runs the result under bash.
     """
     encoded = base64.b64encode(sql.encode("utf-8")).decode("ascii")
-    return f'echo {encoded} | base64 -d | sqlite3 -separator "|||" {db_path}'
+    return (
+        f"echo {encoded} | base64 -d | "
+        f"sqlite3 -separator $'\\x1f' -newline $'\\x1e' {db_path}"
+    )
 
 
 STATE_FILE = Path.home() / ".imessage_bus_state"
@@ -156,14 +169,26 @@ class MessageReader:
             return []
 
         messages = []
-        for line in output.strip().split("\n"):
-            if "|||" not in line:
+        # Strip a trailing record separator (sqlite3 emits one after the last row).
+        raw = output.rstrip(_RECORD_SEP).rstrip("\n")
+        if not raw:
+            return []
+        for record in raw.split(_RECORD_SEP):
+            record = record.strip("\n")
+            if not record or _FIELD_SEP not in record:
                 continue
-            parts = line.split("|||", 5)
+            parts = record.split(_FIELD_SEP)
             if len(parts) < 4:
                 continue
 
-            rowid = int(parts[0])
+            try:
+                rowid = int(parts[0])
+            except (ValueError, TypeError):
+                # Defensive: if the first field isn't an int, the row is
+                # malformed (should be impossible with control-char delimiters,
+                # but skip + log rather than crash the whole poll loop).
+                print(f"[reader] Skipping malformed row (bad ROWID): {parts[0][:60]!r}")
+                continue
             text = parts[1] if len(parts) > 1 else ""
             hex_body = parts[2] if len(parts) > 2 else ""
             is_from_me = parts[3] == "1" if len(parts) > 3 else True
@@ -259,15 +284,24 @@ async def get_recent_messages(chat_identifier: str, limit: int = 5) -> list[dict
         return []
 
     messages = []
-    for line in output.strip().split("\n"):
-        if "|||" not in line:
+    raw = output.rstrip(_RECORD_SEP).rstrip("\n")
+    if not raw:
+        return []
+    for record in raw.split(_RECORD_SEP):
+        record = record.strip("\n")
+        if not record or _FIELD_SEP not in record:
             continue
-        parts = line.split("|||", 3)
-        if len(parts) >= 3:
-            messages.append({
-                "text": parts[1],
-                "from_me": parts[2] == "1",
-                "timestamp": parts[3] if len(parts) > 3 else "",
-            })
+        parts = record.split(_FIELD_SEP)
+        if len(parts) < 3:
+            continue
+        try:
+            int(parts[0])
+        except (ValueError, TypeError):
+            continue
+        messages.append({
+            "text": parts[1],
+            "from_me": parts[2] == "1",
+            "timestamp": parts[3] if len(parts) > 3 else "",
+        })
     messages.reverse()  # chronological order
     return messages

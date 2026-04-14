@@ -1,0 +1,97 @@
+{
+  "tasks": [
+    {
+      "id": "T1",
+      "requirement": "R1: Expand AgentDefinition descriptions",
+      "description": "In core/agents.py, expand each of the 9 AgentDefinition `description` fields from <100 chars to 120-500 chars. Each should describe what the agent does, when to pick it over alternatives, notable tools, and constraints (read-only, high turn budget, etc.). Keep double-quoted single-line strings. Touch ONLY the description fields — do not modify prompt, tools, model, maxTurns, or any other field. Agents: scout, forge, wrench, dispatch, ledger, toolsmith, titan, anvil, critic.",
+      "test_predicate": "python3 -c \"import re; descs = re.findall(r'description=\\\"(.+?)\\\"', open('/Users/johncornelius/Projects/agent-core/core/agents.py').read()); assert len(descs) >= 9, f'found {len(descs)}'; short = [d[:50] for d in descs if len(d) < 120]; assert not short, f'too short: {short}'; over = [d[:50] for d in descs if len(d) > 1536]; assert not over, f'over cap: {over}'\"",
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": "T2",
+      "requirement": "R2: Harden @tool error handling",
+      "description": "In core/tools.py, wrap the body of every @tool-decorated function in try/except Exception that returns a clean error string in the standard MCP content shape ({'content': [{'type': 'text', 'text': f'<tool> error: {e}'}]}). 10 functions are missing wrappers: send_imessage, send_business_email, moshi_push, swarm_context_write, swarm_context_read, swarm_context_list, get_schedule, get_week_view_tool, check_calendar, create_calendar_event. Skip ssh_command and osascript_run — they already have try/except. Add wrapper only where missing; do not restructure functions.",
+      "test_predicate": "python3 -c \"import ast; tree = ast.parse(open('/Users/johncornelius/Projects/agent-core/core/tools.py').read())\nfor node in ast.walk(tree):\n    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)): continue\n    if any((isinstance(d, ast.Name) and d.id == 'tool') or (isinstance(d, ast.Call) and getattr(d.func, 'id', '') == 'tool') for d in node.decorator_list):\n        assert any(isinstance(s, ast.Try) for s in ast.walk(node)), f'@tool {node.name} line {node.lineno} has no try/except'\nprint('OK')\"",
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": "T3",
+      "requirement": "R3: Verify no MCP first-turn workarounds",
+      "description": "Scan briefs/morning_brief.py, handler/monitor.py, swarm/engine.py, home_ops/engine.py for dummy first turns, tool-availability retries, sleep-before-first-prompt patterns, or comments referencing this workaround. Remove any found. Pre-check shows all four files are already clean — this task is a guardrail. No edits expected.",
+      "test_predicate": "! grep -rn -iE '(first.turn.workaround|dummy.*(turn|prompt|ping)|mcp.*(warm|not.ready|wait)|sleep.*tool.*(avail|connect))' /Users/johncornelius/Projects/agent-core/briefs/morning_brief.py /Users/johncornelius/Projects/agent-core/handler/monitor.py /Users/johncornelius/Projects/agent-core/swarm/engine.py /Users/johncornelius/Projects/agent-core/home_ops/engine.py 2>/dev/null",
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": "T4",
+      "requirement": "R4: Verify no custom stream timeout/retry wrappers",
+      "description": "Scan briefs/morning_brief.py, handler/monitor.py, swarm/engine.py, home_ops/engine.py for asyncio.wait_for wrapping agent/SDK calls, custom hung-stream detection, manual stream-abort logic, or comments about stream timeouts. Remove any found. Pre-check shows all four files are already clean — this task is a guardrail. No edits expected.",
+      "test_predicate": "! grep -rn -iE '(stream.*(timeout|hung|abort|stall)|wait_for.*(agent|sdk|claude)|manual.*(retry|abort).*(stream|api))' /Users/johncornelius/Projects/agent-core/briefs/morning_brief.py /Users/johncornelius/Projects/agent-core/handler/monitor.py /Users/johncornelius/Projects/agent-core/swarm/engine.py /Users/johncornelius/Projects/agent-core/home_ops/engine.py 2>/dev/null",
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": "T5",
+      "requirement": "R5: Verify no WebFetch style/script stripping",
+      "description": "Scan home_ops/gather.py for BeautifulSoup .decompose() calls or regex removing style/script tags from fetched HTML. Remove if found. Pre-check shows the file is already clean — this task is a guardrail. No edits expected.",
+      "test_predicate": "! grep -n -E '(\\.decompose\\(\\)|remove.*(script|style)|strip.*(script|style)|re\\.sub.*<(script|style))' /Users/johncornelius/Projects/agent-core/home_ops/gather.py 2>/dev/null",
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": "T6",
+      "requirement": "Integration: imports + agent count + syntax",
+      "description": "After T1 and T2 land, verify that core.agents, core.tools, and core.hooks all still import cleanly, that ALL_AGENTS contains exactly 9 entries, and that the three changed files parse as valid Python. This is the union of the spec's success-criteria checks (minus ruff which is not installed in this environment).",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && python3 -c \"import core.agents, core.tools, core.hooks; from core.agents import ALL_AGENTS; assert len(ALL_AGENTS) == 9, f'agent count {len(ALL_AGENTS)}'; import ast; [ast.parse(open(f).read()) for f in ['core/agents.py','core/tools.py','home_ops/gather.py']]; print('OK')\"",
+      "depends_on": [
+        "T1",
+        "T2"
+      ],
+      "status": "pending"
+    }
+  ],
+  "verification_criteria": [
+    {
+      "id": "V1",
+      "criterion": "core.agents, core.tools, core.hooks all import without error",
+      "test": "cd /Users/johncornelius/Projects/agent-core && python3 -c \"import core.agents, core.tools, core.hooks; print('imports OK')\""
+    },
+    {
+      "id": "V2",
+      "criterion": "ALL_AGENTS contains exactly 9 named agents",
+      "test": "cd /Users/johncornelius/Projects/agent-core && python3 -c \"from core.agents import ALL_AGENTS; assert len(ALL_AGENTS) == 9, f'{len(ALL_AGENTS)}'\""
+    },
+    {
+      "id": "V3",
+      "criterion": "R1: All 9 AgentDefinition descriptions are 120-1536 chars",
+      "test": "python3 -c \"import re; descs = re.findall(r'description=\\\"(.+?)\\\"', open('/Users/johncornelius/Projects/agent-core/core/agents.py').read()); assert len(descs) >= 9, f'found {len(descs)}'; short = [d[:50] for d in descs if len(d) < 120]; assert not short, f'too short: {short}'; over = [d[:50] for d in descs if len(d) > 1536]; assert not over, f'over cap: {over}'\""
+    },
+    {
+      "id": "V4",
+      "criterion": "R2: Every @tool function in core/tools.py contains a try/except",
+      "test": "python3 -c \"import ast; tree = ast.parse(open('/Users/johncornelius/Projects/agent-core/core/tools.py').read())\nfor node in ast.walk(tree):\n    if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)): continue\n    if any((isinstance(d, ast.Name) and d.id == 'tool') or (isinstance(d, ast.Call) and getattr(d.func, 'id', '') == 'tool') for d in node.decorator_list):\n        assert any(isinstance(s, ast.Try) for s in ast.walk(node)), f'@tool {node.name} line {node.lineno} has no try/except'\nprint('OK')\""
+    },
+    {
+      "id": "V5",
+      "criterion": "R3: No MCP first-turn workaround patterns in the four headless agent files",
+      "test": "! grep -rn -iE '(first.turn.workaround|dummy.*(turn|prompt|ping)|mcp.*(warm|not.ready|wait)|sleep.*tool.*(avail|connect))' /Users/johncornelius/Projects/agent-core/briefs/morning_brief.py /Users/johncornelius/Projects/agent-core/handler/monitor.py /Users/johncornelius/Projects/agent-core/swarm/engine.py /Users/johncornelius/Projects/agent-core/home_ops/engine.py 2>/dev/null"
+    },
+    {
+      "id": "V6",
+      "criterion": "R4: No custom stream timeout/retry wrappers in the four headless agent files",
+      "test": "! grep -rn -iE '(stream.*(timeout|hung|abort|stall)|wait_for.*(agent|sdk|claude)|manual.*(retry|abort).*(stream|api))' /Users/johncornelius/Projects/agent-core/briefs/morning_brief.py /Users/johncornelius/Projects/agent-core/handler/monitor.py /Users/johncornelius/Projects/agent-core/swarm/engine.py /Users/johncornelius/Projects/agent-core/home_ops/engine.py 2>/dev/null"
+    },
+    {
+      "id": "V7",
+      "criterion": "R5: No BeautifulSoup .decompose() or script/style stripping in home_ops/gather.py",
+      "test": "! grep -n -E '(\\.decompose\\(\\)|remove.*(script|style)|strip.*(script|style)|re\\.sub.*<(script|style))' /Users/johncornelius/Projects/agent-core/home_ops/gather.py 2>/dev/null"
+    },
+    {
+      "id": "V8",
+      "criterion": "Changed files parse as valid Python (ruff check substitute — ruff not installed)",
+      "test": "cd /Users/johncornelius/Projects/agent-core && python3 -c \"import ast; [ast.parse(open(f).read()) for f in ['core/agents.py','core/tools.py','home_ops/gather.py']]; print('syntax ok')\""
+    }
+  ]
+}

@@ -399,9 +399,12 @@ async def moshi_push(args: dict[str, Any]) -> dict:
     {"key": str, "value": str},
 )
 async def swarm_context_write(args: dict[str, Any]) -> dict:
-    ctx = _get_active_context()
-    ctx.write(args["key"], args["value"])
-    return {"content": [{"type": "text", "text": f"Stored '{args['key']}' in swarm context"}]}
+    try:
+        ctx = _get_active_context()
+        ctx.write(args["key"], args["value"])
+        return {"content": [{"type": "text", "text": f"Stored '{args['key']}' in swarm context"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"swarm_context_write error: {e}"}]}
 
 
 @tool(
@@ -410,11 +413,14 @@ async def swarm_context_write(args: dict[str, Any]) -> dict:
     {"key": str},
 )
 async def swarm_context_read(args: dict[str, Any]) -> dict:
-    ctx = _get_active_context()
-    value = ctx.read(args["key"])
-    if value is None:
-        return {"content": [{"type": "text", "text": f"Key '{args['key']}' not found in swarm context"}]}
-    return {"content": [{"type": "text", "text": value}]}
+    try:
+        ctx = _get_active_context()
+        value = ctx.read(args["key"])
+        if value is None:
+            return {"content": [{"type": "text", "text": f"Key '{args['key']}' not found in swarm context"}]}
+        return {"content": [{"type": "text", "text": value}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"swarm_context_read error: {e}"}]}
 
 
 @tool(
@@ -439,9 +445,12 @@ async def swarm_context_list(args: dict[str, Any]) -> dict:
     {},
 )
 async def get_schedule(args: dict[str, Any]) -> dict:
-    from core.calendar_service import get_schedule_view
-    view = await get_schedule_view()
-    return {"content": [{"type": "text", "text": json.dumps(view.to_dict(), indent=2)}]}
+    try:
+        from core.calendar_service import get_schedule_view
+        view = await get_schedule_view()
+        return {"content": [{"type": "text", "text": json.dumps(view.to_dict(), indent=2)}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"get_schedule error: {e}"}]}
 
 
 @tool(
@@ -450,9 +459,12 @@ async def get_schedule(args: dict[str, Any]) -> dict:
     {},
 )
 async def get_week_view_tool(args: dict[str, Any]) -> dict:
-    from core.calendar_service import get_week_view
-    view = await get_week_view()
-    return {"content": [{"type": "text", "text": json.dumps(view.to_dict(), indent=2)}]}
+    try:
+        from core.calendar_service import get_week_view
+        view = await get_week_view()
+        return {"content": [{"type": "text", "text": json.dumps(view.to_dict(), indent=2)}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"get_week_view error: {e}"}]}
 
 
 @tool(

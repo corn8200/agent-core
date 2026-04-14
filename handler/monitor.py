@@ -209,41 +209,25 @@ async def send_alert_email(anomalies: list[dict], data: dict):
 <p style="color:#666;font-size:11px;">Generated {now.strftime('%Y-%m-%d %H:%M')} by agent-core/handler</p>
 </body></html>"""
 
-    email_script = f'''
-import smtplib, os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from dotenv import load_dotenv
-
-load_dotenv("/srv/apps/friday-email/.env")
-
-msg = MIMEMultipart("alternative")
-msg["Subject"] = "Handler Alert — {now.strftime('%b %d %H:%M')}"
-msg["From"] = "Cornelius Family <notify@jcornelius.net>"
-msg["To"] = "{PERSONAL_EMAIL}"
-msg.attach(MIMEText("""{html.replace('"', '\\"')}""", "html"))
-
-with smtplib.SMTP("smtp.gmail.com", 587) as s:
-    s.starttls()
-    s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
-    s.send_message(msg)
-print("sent")
-'''
-    script_path = Path("/tmp/handler_alert_send.py")
-    script_path.write_text(email_script)
-
-    proc = await asyncio.create_subprocess_exec(
-        "scp", str(script_path), f"{VPS_SSH}:/tmp/handler_alert_send.py",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    import base64, shlex
+    subject = f"Handler Alert — {now.strftime('%b %d %H:%M')}"
+    b64 = base64.b64encode(html.encode()).decode()
+    cmd = (
+        f"send-email --from notify@jcornelius.net "
+        f"--to {shlex.quote(PERSONAL_EMAIL)} "
+        f"--subject {shlex.quote(subject)} "
+        f"--body-b64 {b64} --html"
     )
-    await proc.communicate()
-
     proc = await asyncio.create_subprocess_exec(
-        "ssh", VPS_SSH,
-        "cd /srv/apps/friday-email && .venv/bin/python /tmp/handler_alert_send.py",
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        "ssh", VPS_SSH, cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
     )
-    await proc.communicate()
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        print(f"[handler] email failed: {stderr.decode().strip()}", file=sys.stderr)
+    else:
+        print(f"[handler] {stdout.decode().strip()}")
 
 
 # --- SDK Diagnosis ---

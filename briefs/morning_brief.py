@@ -154,38 +154,25 @@ def build_html(brief_text: str) -> str:
 
 
 def deliver_email(html: str) -> bool:
-    """Send HTML email via VPS SMTP."""
-    email_script = f'''
-import smtplib, os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from dotenv import load_dotenv
-
-load_dotenv("/srv/apps/friday-email/.env")
-
-msg = MIMEMultipart("alternative")
-msg["Subject"] = "Morning Brief — {datetime.now().strftime('%A %b %d')}"
-msg["From"] = "Cornelius Family <notify@jcornelius.net>"
-msg["To"] = "{PERSONAL_EMAIL}"
-msg.attach(MIMEText("""{html.replace('"', '\\"')}""", "html"))
-
-with smtplib.SMTP("smtp.gmail.com", 587) as s:
-    s.starttls()
-    s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
-    s.send_message(msg)
-print("sent")
-'''
-    script_path = Path("/tmp/morning_brief_send.py")
-    script_path.write_text(email_script)
-
-    # SCP to VPS and run
-    subprocess.run(["scp", str(script_path), f"{VPS_SSH}:/tmp/morning_brief_send.py"],
-                   capture_output=True, timeout=15)
+    """Send morning brief HTML email via VPS send-email wrapper."""
+    import base64, shlex
+    subject = f"Morning Brief — {datetime.now().strftime('%A %b %d')}"
+    b64 = base64.b64encode(html.encode()).decode()
+    cmd = (
+        f"send-email --from notify@jcornelius.net "
+        f"--to {shlex.quote(PERSONAL_EMAIL)} "
+        f"--subject {shlex.quote(subject)} "
+        f"--body-b64 {b64} --html"
+    )
     result = subprocess.run(
-        ["ssh", VPS_SSH, "cd /srv/apps/friday-email && .venv/bin/python /tmp/morning_brief_send.py"],
+        ["ssh", VPS_SSH, cmd],
         capture_output=True, text=True, timeout=30,
     )
-    return result.returncode == 0
+    if result.returncode != 0:
+        print(f"[brief] email failed: {result.stderr.strip()}", file=sys.stderr)
+        return False
+    print(f"[brief] {result.stdout.strip()}")
+    return True
 
 
 async def deliver_tts(brief_text: str) -> bool:

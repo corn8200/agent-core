@@ -71,9 +71,18 @@ nudge/
 - All automated agents: `permission_mode="bypassPermissions"`, always set `max_turns` + `max_budget_usd`
 - Always include `hooks=AGENT_HOOKS` on SDK calls
 - Always pass `thinking=<preset>` + `effort="max"` — pick the preset per task:
-  - `HEAVY` (12k) → synthesis, tailoring, proposal drafting, job-fit judgment, merging multi-agent output
-  - `STANDARD` (6k) → diagnosis, single swarm agent, general reasoning
-  - `LIGHT` (3k) → structured extraction, template filling, straightforward classification
+  - `HEAVY` (32k) → synthesis, tailoring, proposal drafting, job-fit judgment, merging multi-agent output
+  - `STANDARD` (16k) → diagnosis, single swarm agent, general reasoning
+  - `LIGHT` (6k) → structured extraction, template filling, straightforward classification
   - `ADAPTIVE` → when budget is unknown / let Claude decide
 - VPS SSH hostname is `vps`, NOT jcornelius.net
-- NEVER use Gmail MCP drafts for sending email
+
+## Email Sending
+- Business (info@sentryaithermal.com): `send_business_email` MCP tool → sentry-mailqueue → Resend
+- Personal/system (notify@jcornelius.net): `send_personal_email` MCP tool → VPS send-email wrapper → Gmail SMTP
+- NEVER SCP scripts to VPS for email — use MCP tools
+- NEVER use Gmail MCP drafts
+
+## Email Receive
+- corn82@icloud.com: mailtriage daemon (auto-classify, Pushover urgent, approval-queue drafts)
+- corn82@gmail.com: mailgw-idle (forwards important → iCloud → mailtriage)

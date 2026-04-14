@@ -327,11 +327,11 @@ async def send_imessage(args: dict[str, Any]) -> dict:
 async def send_business_email(args: dict[str, Any]) -> dict:
     try:
         to_addr = args["to"]
-        subject = args["subject"].replace("'", "'\\''")
-        body = args["body"].replace("'", "'\\''")
+        subject = args["subject"]
+        body = args["body"]
         queue_cmd = (
             f"cd /srv/apps/sentry-mailqueue && "
-            f".venv/bin/python queue_cli.py --to '{to_addr}' --subject '{subject}' --body '{body}' && "
+            f".venv/bin/python queue_cli.py --to {shlex.quote(to_addr)} --subject {shlex.quote(subject)} --body {shlex.quote(body)} && "
             f".venv/bin/python queue_cli.py --send-now"
         )
         proc = await asyncio.create_subprocess_exec(
@@ -346,6 +346,36 @@ async def send_business_email(args: dict[str, Any]) -> dict:
         return {"content": [{"type": "text", "text": f"Business email sent to {to_addr}: {output}"}]}
     except Exception as e:
         return {"content": [{"type": "text", "text": f"send_business_email error: {e}"}]}
+
+
+@tool(
+    "send_personal_email",
+    "Send a personal or system email from notify@jcornelius.net (Cornelius Family). Use for briefs, alerts, family communications.",
+    {"to": {"type": "string", "description": "recipient email address"},
+     "subject": {"type": "string", "description": "email subject"},
+     "body": {"type": "string", "description": "email body (plain text or HTML)"},
+     "html": {"type": "boolean", "description": "treat body as HTML", "default": False}},
+)
+async def send_personal_email(args: dict[str, Any]) -> dict:
+    import base64
+    to = args["to"]
+    subject = args["subject"]
+    body = args["body"]
+    html_flag = "--html" if args.get("html") else ""
+    b64 = base64.b64encode(body.encode()).decode()
+    cmd = f"send-email --from notify@jcornelius.net --to {shlex.quote(to)} --subject {shlex.quote(subject)} --body-b64 {b64} {html_flag}".strip()
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", "vps", cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode != 0:
+            return {"content": [{"type": "text", "text": f"Email failed: {stderr.decode().strip()}"}]}
+        return {"content": [{"type": "text", "text": f"Personal email sent to {to}"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"send_personal_email error: {e}"}]}
 
 
 @tool(
@@ -525,6 +555,7 @@ def create_core_server():
             ssh_command,
             send_imessage,
             send_business_email,
+            send_personal_email,
             osascript_run,
             moshi_push,
             get_schedule,

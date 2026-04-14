@@ -8,9 +8,7 @@ on the VPS). NEVER embeds images — masthead/footer are pure styled HTML text.
 
 import asyncio
 import html as html_lib
-import subprocess
 import sys
-import tempfile
 from datetime import datetime
 from pathlib import Path
 
@@ -77,40 +75,6 @@ def _auto_subject(mode: str) -> str:
     return f"Home ops — {mode} brief, {date_str}"
 
 
-def _build_send_script(
-    subject: str,
-    recipients: list[str],
-    html: str,
-    plaintext: str,
-) -> str:
-    import json
-    return f'''import smtplib, os
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
-from dotenv import load_dotenv
-
-load_dotenv("/srv/apps/friday-email/.env")
-
-SUBJECT = {json.dumps(subject)}
-RECIPIENTS = {json.dumps(recipients)}
-HTML = {json.dumps(html)}
-PLAIN = {json.dumps(plaintext)}
-
-msg = MIMEMultipart("alternative")
-msg["Subject"] = SUBJECT
-msg["From"] = "Cornelius Family <notify@jcornelius.net>"
-msg["To"] = ", ".join(RECIPIENTS)
-msg.attach(MIMEText(PLAIN, "plain"))
-msg.attach(MIMEText(HTML, "html"))
-
-with smtplib.SMTP("smtp.gmail.com", 587) as s:
-    s.starttls()
-    s.login(os.environ["SMTP_USER"], os.environ["SMTP_PASSWORD"])
-    s.sendmail(msg["From"], RECIPIENTS, msg.as_string())
-print("sent")
-'''
-
-
 async def send_brief(
     brief_text: str,
     mode: str,
@@ -126,48 +90,32 @@ async def send_brief(
 
     subject = subject or _auto_subject(mode)
     html = build_html(brief_text, mode)
-    plaintext = build_plaintext(brief_text)
 
-    script = _build_send_script(subject, recipients, html, plaintext)
+    import base64, shlex
+    b64 = base64.b64encode(html.encode()).decode()
 
-    ts = datetime.now().strftime("%Y%m%d%H%M%S")
-    remote_path = f"/tmp/home-ops-send-{ts}.py"
-
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".py", prefix="home-ops-send-", delete=False
-    ) as f:
-        f.write(script)
-        local_path = f.name
-
-    try:
-        scp = subprocess.run(
-            ["scp", local_path, f"{VPS_SSH}:{remote_path}"],
-            capture_output=True, text=True, timeout=20,
+    ok_count = 0
+    for recipient in recipients:
+        cmd = (
+            f"send-email --from notify@jcornelius.net "
+            f"--to {shlex.quote(recipient)} "
+            f"--subject {shlex.quote(subject)} "
+            f"--body-b64 {b64} --html"
         )
-        if scp.returncode != 0:
-            return False, f"scp failed: {scp.stderr.strip()[:200]}"
-
-        run = subprocess.run(
-            ["ssh", VPS_SSH,
-             f"cd /srv/apps/friday-email && .venv/bin/python {remote_path}"],
-            capture_output=True, text=True, timeout=45,
+        proc = await asyncio.create_subprocess_exec(
+            "ssh", VPS_SSH, cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
+        stdout, stderr = await proc.communicate()
+        if proc.returncode == 0:
+            ok_count += 1
+        else:
+            print(f"[home_ops] email to {recipient} failed: {stderr.decode().strip()}", file=sys.stderr)
 
-        subprocess.run(
-            ["ssh", VPS_SSH, f"rm -f {remote_path}"],
-            capture_output=True, timeout=10,
-        )
-
-        if run.returncode != 0:
-            err = (run.stderr or run.stdout or "").strip()[:300]
-            return False, f"smtp failed: {err}"
-
-        return True, f"sent to {len(recipients)} recipient{'s' if len(recipients) != 1 else ''}"
-    finally:
-        try:
-            Path(local_path).unlink(missing_ok=True)
-        except Exception:
-            pass
+    if ok_count == 0:
+        return False, "all sends failed"
+    return True, f"sent to {ok_count} recipient{'s' if ok_count != 1 else ''}"
 
 
 async def _test_send():

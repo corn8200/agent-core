@@ -16,5 +16,11 @@ logs/
 .env.local
 *.secret
 
+# Ralph (QA tool state)
+.ralph/
+
+# Planning / spec artifacts
+prd-*.md
+
 # OS
 .DS_Store

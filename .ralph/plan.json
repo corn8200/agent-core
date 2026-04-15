@@ -14,7 +14,7 @@
       "description": "Insert `import warnings` + `warnings.filterwarnings('ignore', category=DeprecationWarning, message=r'.*claude-(?:opus|sonnet)-4-20250514')` in ~/Projects/anthropic-update-watcher/watcher.py after the module docstring (line 6) and before `from __future__ import annotations` (line 7).",
       "test_predicate": "grep -q 'filterwarnings.*DeprecationWarning' ~/Projects/anthropic-update-watcher/watcher.py && python3 -c \"import ast,os; ast.parse(open(os.path.expanduser('~/Projects/anthropic-update-watcher/watcher.py')).read()); print('ok')\"",
       "depends_on": [],
-      "status": "pending"
+      "status": "complete"
     },
     {
       "id": "T3",
@@ -25,7 +25,7 @@
         "T1",
         "T2"
       ],
-      "status": "pending"
+      "status": "complete"
     }
   ],
   "verification_criteria": [

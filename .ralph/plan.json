@@ -6,7 +6,7 @@
       "description": "Insert `import warnings` + `warnings.filterwarnings('ignore', category=DeprecationWarning, message=r'.*claude-(?:opus|sonnet)-4-20250514')` after the module docstring (line 1) and before the `from pathlib import Path` import (line 3) in core/agents.py.",
       "test_predicate": "python3 -c \"import os; L=open(os.path.expanduser('/Users/johncornelius/Projects/agent-core/core/agents.py')).readlines(); fw=next(i for i,l in enumerate(L) if 'filterwarnings' in l); sdk=next(i for i,l in enumerate(L) if 'claude_agent_sdk' in l); assert fw<sdk; print('ok')\"",
       "depends_on": [],
-      "status": "pending"
+      "status": "complete"
     },
     {
       "id": "T2",

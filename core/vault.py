@@ -33,7 +33,18 @@ _TOKEN_FILE: Final = Path.home() / ".config" / "op-service-account-token"
 _LEGACY_FILE: Final = Path.home() / ".config" / "secrets.env.legacy"
 _FALLBACK_FILE: Final = Path.home() / ".config" / "secrets.env"
 
-_DANGEROUS_NAMES: Final = frozenset({"ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"})
+# Never auto-hydrated into os.environ. ANTHROPIC_API_KEY / ANTHROPIC_AUTH_TOKEN
+# would trigger pay-as-you-go billing on SDK calls. ANTHROPIC_CONSOLE_KEY* are
+# real sk-ant API keys stored under renamed names; injecting them into general
+# env defeats the scrub-block defense-in-depth that downstream scripts rely on.
+# Scripts that explicitly need these must call get_secret("...") directly.
+_DANGEROUS_NAMES: Final = frozenset({
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_CONSOLE_KEY",
+    "ANTHROPIC_CONSOLE_KEY_MAC",
+    "ANTHROPIC_CONSOLE_KEY_VPS",
+})
 
 _BASH_NOISE: Final = frozenset({
     "_", "PWD", "OLDPWD", "SHLVL", "LINES", "COLUMNS",

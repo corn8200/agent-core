@@ -34,6 +34,13 @@ for _leak_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_U
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# Hydrate os.environ from 1Password MachineAuto vault.
+# Must run AFTER the scrub block above (so ANTHROPIC_API_KEY stays popped)
+# and BEFORE any import that reads secrets at module load time (memory.py
+# reads OPENAI_API_KEY at openai client construction).
+from core.vault import hydrate_env
+hydrate_env()
+
 from home_ops.gather import gather_all
 from core.constants import HOME, PERSONAL_EMAIL, VPS_SSH
 try:

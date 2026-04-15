@@ -35,6 +35,9 @@ for _leak_var in (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from core.vault import hydrate_env  # noqa: E402
+hydrate_env()
+
 from core.constants import HOME, PERSONAL_EMAIL  # noqa: E402
 try:
     import core.agent_cp_client as cp  # noqa: E402

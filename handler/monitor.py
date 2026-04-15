@@ -34,6 +34,9 @@ for _leak_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_U
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from core.vault import hydrate_env
+hydrate_env()
+
 from home_ops.gather import gather_all, quick_gather
 from core.constants import HOME, PERSONAL_EMAIL, VPS_SSH
 

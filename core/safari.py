@@ -67,6 +67,21 @@ async def safari_is_running() -> bool:
     return result.strip().lower() == "true"
 
 
+async def safari_ensure_window(fallback_url: str = "about:blank") -> None:
+    """Make sure Safari is running and has at least one window open.
+
+    Safari sometimes runs without any visible windows; every helper that
+    references `window 1` will raise `-1719 Invalid index` in that state.
+    Call this at the start of any flow that expects window 1 to exist.
+    """
+    await _osascript(f'''tell application "Safari"
+        activate
+        if (count of windows) = 0 then
+            make new document with properties {{URL:"{fallback_url}"}}
+        end if
+    end tell''')
+
+
 async def safari_current_url(window_idx: int = 1) -> str:
     """Return the URL of the active tab in the given window."""
     return await _osascript(
@@ -339,6 +354,7 @@ async def safari_dump_state(
 __all__ = [
     "safari_activate",
     "safari_is_running",
+    "safari_ensure_window",
     "safari_current_url",
     "safari_current_title",
     "safari_tab_list",

@@ -10,6 +10,7 @@ HARD RULE: Pushover priority is ALWAYS 0. Never escalate.
 """
 import hashlib
 import json
+import os
 import re
 import sqlite3
 import sys
@@ -21,10 +22,12 @@ from pathlib import Path
 
 sys.path.insert(0, '/Users/johncornelius/Projects/agent-core')
 
+from core.vault import hydrate_env, get_secret  # noqa: E402
+hydrate_env()
+
 DB_PATH = Path.home() / 'logs' / 'agent-memory.db'
 LOG_PATH = Path.home() / 'logs' / 'memory-digest.log'
 STATE_PATH = Path('/tmp/memory-digest-last.json')
-SECRETS_PATH = Path.home() / '.config' / 'secrets.env'
 
 RECENT_WINDOW_MIN = 30
 HANDLER_WINDOW_HOURS = 4
@@ -58,16 +61,10 @@ def _log(msg: str) -> None:
 
 
 def _load_secrets() -> dict:
-    env = {}
-    if not SECRETS_PATH.exists():
-        return env
-    for line in SECRETS_PATH.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith('#') or '=' not in line:
-            continue
-        k, _, v = line.partition('=')
-        env[k.strip()] = v.strip().strip('"').strip("'")
-    return env
+    return {
+        "PUSHOVER_APP_TOKEN": get_secret("PUSHOVER_APP_TOKEN") or "",
+        "PUSHOVER_USER_KEY": get_secret("PUSHOVER_USER_KEY") or "",
+    }
 
 
 def _fetch(conn: sqlite3.Connection, sql: str, params: tuple) -> list:

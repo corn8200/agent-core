@@ -1,0 +1,55 @@
+{
+  "all_pass": false,
+  "results": [
+    {
+      "id": "V1",
+      "criterion": "No spinner/indicator references in codebase",
+      "passed": true,
+      "details": "grep returns no matches. Clean."
+    },
+    {
+      "id": "V2",
+      "criterion": "All 9 agent definitions load cleanly with hooks and tools",
+      "passed": true,
+      "details": "`.venv/bin/python` smoke test prints 'smoke ok'. Note: system python fails (no claude_agent_sdk) — test command in spec doesn't activate the venv."
+    },
+    {
+      "id": "V3",
+      "criterion": "effort=max set on all 9 agents",
+      "passed": true,
+      "details": "grep -c returns 9. All agents configured."
+    },
+    {
+      "id": "V4",
+      "criterion": "No uncommitted changes — nothing was modified",
+      "passed": true,
+      "details": "git diff --name-only is empty. Working tree is clean."
+    }
+  ],
+  "issues": [
+    {
+      "id": "FIX1",
+      "description": "core/vault.py (192 lines) was added — completely out of scope. The spec explicitly states 'Files to change: None', 'Do not modify pyproject.toml, core/agents.py, core/hooks.py, or core/tools.py', and 'Do not create a branch — there are no changes to commit.' A brand new 1Password vault integration module was committed under a no-op PRD. Nothing in the project imports it — it is dead code. This file should be reverted/removed and submitted under its own PRD with proper review.",
+      "severity": "high",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && ! test -f core/vault.py"
+    },
+    {
+      "id": "FIX2",
+      "description": ".gitignore was modified outside spec scope — 6 lines added (.ralph/, prd-*.md). A prior QA run's revert (b2c04a8) was overwritten by subsequent auto-sync commits. The spec says no files should change.",
+      "severity": "medium",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && git diff 993b964~5..993b964 -- .gitignore | wc -l | xargs test 0 -eq"
+    },
+    {
+      "id": "FIX3",
+      "description": "Two prd-*.md files are tracked in git despite the new .gitignore pattern. Gitignore only prevents future tracking — already-committed files remain tracked. They need explicit `git rm --cached prd-*.md` to untrack.",
+      "severity": "medium",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && test -z \"$(git ls-files 'prd-*.md')\""
+    },
+    {
+      "id": "FIX4",
+      "description": "V2 test command in spec uses bare `python` which lacks claude_agent_sdk — only works under `.venv/bin/python`. The acceptance test as written will fail on any fresh shell without venv activation. Minor but the spec's own test is broken.",
+      "severity": "low",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && python -c \"from core.agents import scout; print('ok')\" 2>/dev/null || .venv/bin/python -c \"from core.agents import scout; print('ok')\""
+    }
+  ]
+}

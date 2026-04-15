@@ -1,0 +1,49 @@
+{
+  "all_pass": false,
+  "results": [
+    {
+      "id": "V1",
+      "criterion": "No spinner/indicator references in codebase",
+      "passed": true,
+      "details": "grep returned no matches in core/"
+    },
+    {
+      "id": "V2",
+      "criterion": "All 9 agent definitions load cleanly with hooks and tools",
+      "passed": true,
+      "details": "Passes with .venv/bin/python. NOTE: the spec's test command uses bare `python` which lacks claude_agent_sdk — the test as written fails, but the code itself is correct. Use `.venv/bin/python` for the smoke test."
+    },
+    {
+      "id": "V3",
+      "criterion": "effort=max set on all 9 agents",
+      "passed": true,
+      "details": "grep -c found exactly 9 instances of effort=\"max\" in core/agents.py"
+    },
+    {
+      "id": "V4",
+      "criterion": "No uncommitted changes — nothing was modified",
+      "passed": false,
+      "details": ".ralph/plan.json is modified (dirty). Ralph process PID 13753 is still running, so this may resolve on exit — but 3 auto-sync commits (cb7656e, 52d262d, 993b964) already pushed ralph artifacts and the PRD file into git history."
+    }
+  ],
+  "issues": [
+    {
+      "id": "FIX1",
+      "description": ".ralph/ directory is not in .gitignore. Lock files (.ralph/.lock), plan.json, and verify-*.json are all tracked in git. These are runtime orchestration artifacts — a stale .lock with a PID has no business in source control.",
+      "severity": "medium",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && grep -q '.ralph/' .gitignore"
+    },
+    {
+      "id": "FIX2",
+      "description": "prd-claude-code-v2.1.109-20260415-065712.md was committed to the repo root (cb7656e). The spec explicitly says 'Do not create a branch — there are no changes to commit.' For a no-op PRD, a 73-line file in the project root is pure clutter. PRD files should be gitignored or stored outside the repo.",
+      "severity": "medium",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && ! git ls-files --error-unmatch prd-claude-code-v2.1.109-20260415-065712.md 2>/dev/null"
+    },
+    {
+      "id": "FIX3",
+      "description": "V4 test fails because .ralph/plan.json is dirty. The auto-sync hook committed the initial plan.json (52d262d) while ralph was still running, then ralph continued modifying it. Even if this resolves when ralph exits, the committed snapshot is stale by definition.",
+      "severity": "low",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && test -z \"$(git diff --name-only)\""
+    }
+  ]
+}

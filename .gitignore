@@ -1,6 +1,5 @@
 # Python
 .venv/
-.venv.*/
 __pycache__/
 *.pyc
 *.pyo
@@ -15,12 +14,6 @@ logs/
 .env
 .env.local
 *.secret
-
-# Ralph orchestration runtime
-.ralph/
-
-# PRD specs (generated, not source)
-prd-*.md
 
 # OS
 .DS_Store

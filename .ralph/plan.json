@@ -1,0 +1,34 @@
+{
+  "tasks": [
+    {
+      "id": "T1",
+      "requirement": "R0: No-op — verify and skip",
+      "description": "Confirm agent-core has zero coupling to the CLI thinking-phase progress indicator. Run all success criteria commands. No files to change.",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && ! grep -rn 'spinner\\|progress_hint\\|ThinkingIndicator\\|ProgressIndicator' core/ && test \"$(grep -c 'effort=\"max\"' core/agents.py)\" -ge 9 && grep -q 'AGENT_HOOKS' core/hooks.py && python -c \"from core.agents import scout, forge, wrench, dispatch, ledger, toolsmith, titan, anvil, critic; print('ok')\" && test -z \"$(git diff --name-only)\"",
+      "depends_on": [],
+      "status": "complete"
+    }
+  ],
+  "verification_criteria": [
+    {
+      "id": "V1",
+      "criterion": "No spinner/indicator references in codebase",
+      "test": "cd /Users/johncornelius/Projects/agent-core && ! grep -rn 'spinner\\|progress_hint\\|ThinkingIndicator\\|ProgressIndicator' core/"
+    },
+    {
+      "id": "V2",
+      "criterion": "All 9 agent definitions load cleanly with hooks and tools",
+      "test": "cd /Users/johncornelius/Projects/agent-core && python -c \"from core.agents import scout, forge, wrench, dispatch, ledger, toolsmith, titan, anvil, critic; from core.hooks import AGENT_HOOKS; from core.tools import tmux_relay_shell; print('smoke ok')\""
+    },
+    {
+      "id": "V3",
+      "criterion": "effort=max set on all 9 agents",
+      "test": "cd /Users/johncornelius/Projects/agent-core && test \"$(grep -c 'effort=\"max\"' core/agents.py)\" -ge 9"
+    },
+    {
+      "id": "V4",
+      "criterion": "No uncommitted changes — nothing was modified",
+      "test": "cd /Users/johncornelius/Projects/agent-core && test -z \"$(git diff --name-only)\""
+    }
+  ]
+}

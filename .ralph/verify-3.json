@@ -1,0 +1,61 @@
+{
+  "all_pass": false,
+  "results": [
+    {
+      "id": "V1",
+      "criterion": "Filter in agents.py precedes claude_agent_sdk import",
+      "passed": true,
+      "details": "warnings.filterwarnings at line 4, claude_agent_sdk import at line 12. Correct ordering."
+    },
+    {
+      "id": "V2",
+      "criterion": "Filter present in watcher.py",
+      "passed": true,
+      "details": "Filter at line 9-10 of watcher.py, after required `from __future__ import annotations` and before all other imports including evaluator/sources/notifier (lines 26-28)."
+    },
+    {
+      "id": "V3",
+      "criterion": "agents.py parses cleanly",
+      "passed": true,
+      "details": "ast.parse succeeds."
+    },
+    {
+      "id": "V4",
+      "criterion": "watcher.py parses cleanly",
+      "passed": true,
+      "details": "ast.parse succeeds."
+    },
+    {
+      "id": "V5",
+      "criterion": "No deprecated constant imports anywhere",
+      "passed": true,
+      "details": "No CLAUDE_OPUS_4_20250514 or CLAUDE_SONNET_4_20250514 found in either project."
+    },
+    {
+      "id": "V6",
+      "criterion": "Warning suppression actually works",
+      "passed": true,
+      "details": "python3 -W error::DeprecationWarning test passes — filter correctly suppresses the warning."
+    },
+    {
+      "id": "V7",
+      "criterion": "Only core/agents.py changed in agent-core",
+      "passed": false,
+      "details": ".gitignore was also modified (+6 lines adding .ralph/ and prd-*.md patterns). Spec explicitly says 'do NOT touch... any other file' and test step 6 requires only core/agents.py changed. The .gitignore change is harmless housekeeping but out of scope."
+    }
+  ],
+  "issues": [
+    {
+      "id": "FIX1",
+      "description": ".gitignore was modified outside of spec scope. The spec says only core/agents.py should be touched in agent-core. The .gitignore additions (.ralph/, prd-*.md) are QA tool cleanup that should not have been committed as part of this implementation. Revert .gitignore to its prior state.",
+      "severity": "low",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && git diff 9dee8a4~1..HEAD --name-only -- ':!.ralph' | sort | xargs echo | grep -q '^.gitignore core/agents.py$' && echo 'only expected files' || echo 'unexpected files changed'"
+    },
+    {
+      "id": "FIX2",
+      "description": "QA tool artifacts leaked into git history. .ralph/plan.json was committed in 9dee8a4, touched across 4 commits, then deleted in 3a24e40. The PRD spec file was similarly committed then removed in 3ded819. These pollute the repo history with transient QA state. Not blocking since the files are now untracked and gitignored, but the 5 auto-sync commits between 06:37-06:44 are noisy.",
+      "severity": "low",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && test -z \"$(git ls-files .ralph/)\" && echo 'no .ralph tracked' || echo '.ralph still tracked'"
+    }
+  ]
+}

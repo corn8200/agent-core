@@ -1,5 +1,12 @@
 """AgentDefinition objects for all named agents, translated from ~/.claude/agents/*.md."""
 
+import warnings
+warnings.filterwarnings(
+    "ignore",
+    category=DeprecationWarning,
+    message=r".*claude-(?:opus|sonnet)-4-20250514",
+)
+
 from pathlib import Path
 
 from claude_agent_sdk import AgentDefinition

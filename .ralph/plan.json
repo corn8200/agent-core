@@ -1,0 +1,68 @@
+{
+  "tasks": [
+    {
+      "id": "T1",
+      "requirement": "R1: Add DeprecationWarning filter to core/agents.py",
+      "description": "Insert `import warnings` + `warnings.filterwarnings('ignore', category=DeprecationWarning, message=r'.*claude-(?:opus|sonnet)-4-20250514')` after the module docstring (line 1) and before the `from pathlib import Path` import (line 3) in core/agents.py.",
+      "test_predicate": "python3 -c \"import os; L=open(os.path.expanduser('/Users/johncornelius/Projects/agent-core/core/agents.py')).readlines(); fw=next(i for i,l in enumerate(L) if 'filterwarnings' in l); sdk=next(i for i,l in enumerate(L) if 'claude_agent_sdk' in l); assert fw<sdk; print('ok')\"",
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": "T2",
+      "requirement": "R2: Add DeprecationWarning filter to watcher.py",
+      "description": "Insert `import warnings` + `warnings.filterwarnings('ignore', category=DeprecationWarning, message=r'.*claude-(?:opus|sonnet)-4-20250514')` in ~/Projects/anthropic-update-watcher/watcher.py after the module docstring (line 6) and before `from __future__ import annotations` (line 7).",
+      "test_predicate": "grep -q 'filterwarnings.*DeprecationWarning' ~/Projects/anthropic-update-watcher/watcher.py && python3 -c \"import ast,os; ast.parse(open(os.path.expanduser('~/Projects/anthropic-update-watcher/watcher.py')).read()); print('ok')\"",
+      "depends_on": [],
+      "status": "pending"
+    },
+    {
+      "id": "T3",
+      "requirement": "R3: Verify no deprecated constant imports",
+      "description": "Confirm no file in agent-core or anthropic-update-watcher imports CLAUDE_OPUS_4_20250514 or CLAUDE_SONNET_4_20250514 as Python names. Already verified clean — this is a no-op confirmation task.",
+      "test_predicate": "test -z \"$(grep -r 'CLAUDE_OPUS_4_20250514\\|CLAUDE_SONNET_4_20250514' /Users/johncornelius/Projects/agent-core ~/Projects/anthropic-update-watcher --include='*.py')\"",
+      "depends_on": [
+        "T1",
+        "T2"
+      ],
+      "status": "pending"
+    }
+  ],
+  "verification_criteria": [
+    {
+      "id": "V1",
+      "criterion": "Filter in agents.py precedes claude_agent_sdk import",
+      "test": "python3 -c \"import os; L=open(os.path.expanduser('/Users/johncornelius/Projects/agent-core/core/agents.py')).readlines(); fw=next(i for i,l in enumerate(L) if 'filterwarnings' in l); sdk=next(i for i,l in enumerate(L) if 'claude_agent_sdk' in l); assert fw<sdk; print('ordering ok')\""
+    },
+    {
+      "id": "V2",
+      "criterion": "Filter present in watcher.py",
+      "test": "grep -q 'filterwarnings.*DeprecationWarning' ~/Projects/anthropic-update-watcher/watcher.py"
+    },
+    {
+      "id": "V3",
+      "criterion": "agents.py parses cleanly",
+      "test": "python3 -c \"import ast,os; ast.parse(open(os.path.expanduser('/Users/johncornelius/Projects/agent-core/core/agents.py')).read()); print('agents.py ok')\""
+    },
+    {
+      "id": "V4",
+      "criterion": "watcher.py parses cleanly",
+      "test": "python3 -c \"import ast,os; ast.parse(open(os.path.expanduser('~/Projects/anthropic-update-watcher/watcher.py')).read()); print('watcher.py ok')\""
+    },
+    {
+      "id": "V5",
+      "criterion": "No deprecated constant imports anywhere",
+      "test": "test -z \"$(grep -r 'CLAUDE_OPUS_4_20250514\\|CLAUDE_SONNET_4_20250514' /Users/johncornelius/Projects/agent-core ~/Projects/anthropic-update-watcher --include='*.py')\""
+    },
+    {
+      "id": "V6",
+      "criterion": "Warning suppression actually works",
+      "test": "python3 -W error::DeprecationWarning -c \"import warnings; warnings.filterwarnings('ignore', category=DeprecationWarning, message=r'.*claude-(?:opus|sonnet)-4-20250514'); warnings.warn('claude-opus-4-20250514 is deprecated', DeprecationWarning); print('suppression ok')\""
+    },
+    {
+      "id": "V7",
+      "criterion": "Only core/agents.py changed in agent-core",
+      "test": "cd /Users/johncornelius/Projects/agent-core && test \"$(git diff --name-only)\" = 'core/agents.py'"
+    }
+  ]
+}

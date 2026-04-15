@@ -35,7 +35,7 @@ for _leak_var in (
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from core.constants import HOME, PERSONAL_EMAIL, WIFE_EMAIL  # noqa: E402
+from core.constants import HOME, PERSONAL_EMAIL  # noqa: E402
 try:
     import core.agent_cp_client as cp  # noqa: E402
 except Exception:
@@ -48,6 +48,68 @@ from home_ops import state as state_mod  # noqa: E402
 
 GATHER_DUMP_PATH = Path("/tmp/home-ops-gather.json")
 BRIEF_TEXT_PATH = Path("/tmp/home-ops-brief.txt")
+
+
+async def deliver_tts(brief_text: str) -> bool:
+    """Generate audio brief, upload to R2, deliver URL via iMessage.
+
+    Ported from briefs/morning_brief.py when the two daily briefs were
+    consolidated (2026-04-15). brief-deliver.py runs with --no-imessage
+    because its bare osascript path hangs under launchd; we send via
+    the tmux relay here instead.
+    """
+    import subprocess
+    from core.constants import PERSONAL_EMAIL
+
+    BRIEF_TEXT_PATH.write_text(brief_text)
+    deliver_script = HOME / "claude-config" / "scripts" / "brief-deliver.py"
+    if not deliver_script.exists():
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                str(HOME / ".venvs" / "sora" / "bin" / "python3"),
+                str(deliver_script),
+                str(BRIEF_TEXT_PATH),
+                "--no-imessage",
+            ],
+            capture_output=True, text=True, timeout=120,
+        )
+        audio_ok = result.returncode == 0
+        if not audio_ok:
+            print(f"brief-deliver.py failed: {result.stderr[:400]}", file=sys.stderr)
+    except subprocess.TimeoutExpired:
+        print("brief-deliver.py timed out at 120s", file=sys.stderr)
+        audio_ok = Path("/tmp/brief-audio.m4a").exists()
+
+    if not audio_ok:
+        return False
+
+    audio_path = Path("/tmp/brief-audio.m4a")
+    r2_url = None
+    try:
+        upload = subprocess.run(
+            ["wrangler", "r2", "object", "put", "audio-share/brief.m4a",
+             "--file", str(audio_path), "--content-type", "audio/mp4", "--remote"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if upload.returncode == 0:
+            r2_url = "https://pub-a5fc31bf3f0b42c69a2565c407a447cd.r2.dev/brief.m4a"
+        else:
+            print(f"R2 upload failed: {upload.stderr[:200]}", file=sys.stderr)
+    except Exception as e:
+        print(f"R2 upload error: {e}", file=sys.stderr)
+
+    try:
+        from core.tools import send_imessage_reliable
+        url = r2_url or "http://100.122.35.56:8080/brief.m4a"
+        first_line = brief_text.split("\n", 1)[0][:180]
+        msg = f"Morning Brief: {url}\n\n{first_line}"
+        await send_imessage_reliable(PERSONAL_EMAIL, msg)
+    except Exception as e:
+        print(f"iMessage delivery failed: {e}", file=sys.stderr)
+    return True
 
 
 async def synthesize(gather: dict, mode: str) -> str:
@@ -158,7 +220,8 @@ def extract_loose_ends(brief_text: str) -> list[str]:
 
 
 async def run(mode: str, dry_run: bool = False, gather_only: bool = False,
-              force: bool = False, recipients: list[str] | None = None) -> int:
+              force: bool = False, recipients: list[str] | None = None,
+              audio: bool = False) -> int:
     """Main orchestrator. Returns exit code."""
     t0 = datetime.now()
     print(f"[{t0:%H:%M:%S}] home-ops {mode} starting (dry_run={dry_run})")
@@ -238,6 +301,12 @@ async def run(mode: str, dry_run: bool = False, gather_only: bool = False,
     # Auto-resolve loose ends not seen in 30 days
     state_mod.mark_stale_loose_ends(days=30)
 
+    # Morning brief only: spoken audio via iMessage (ported from old morning-brief)
+    if audio and mode == "morning":
+        print(f"[{datetime.now():%H:%M:%S}] TTS delivery...")
+        tts_ok = await deliver_tts(brief_text)
+        print(f"[{datetime.now():%H:%M:%S}] TTS: {'delivered' if tts_ok else 'FAILED'}")
+
     elapsed = (datetime.now() - t0).total_seconds()
     print(f"[{datetime.now():%H:%M:%S}] done in {elapsed:.1f}s — {send_msg}")
     return 0
@@ -251,14 +320,12 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="gather + synthesize, skip send")
     parser.add_argument("--gather-only", action="store_true", help="dump gather dict only")
     parser.add_argument("--force", action="store_true", help="ignore dedup")
-    parser.add_argument("--include-wife", action="store_true",
-                        help="Phase 2: also email Ashley")
+    parser.add_argument("--no-audio", action="store_true",
+                        help="skip TTS audio delivery (morning mode only)")
     args = parser.parse_args()
 
     mode = "evening" if args.evening else "morning"
     recipients = [PERSONAL_EMAIL]
-    if args.include_wife:
-        recipients.append(WIFE_EMAIL)
 
     agent_name = f"home-ops-{mode}"
     if cp:
@@ -274,6 +341,7 @@ def main():
             gather_only=args.gather_only,
             force=args.force,
             recipients=recipients,
+            audio=(mode == "morning" and not args.no_audio),
         ))
     except BaseException as _e:
         import traceback as _tb

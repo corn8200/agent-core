@@ -6,7 +6,7 @@
       "description": "Confirm agent-core has zero coupling to the CLI thinking-phase progress indicator. Run all success criteria commands. No files to change.",
       "test_predicate": "cd /Users/johncornelius/Projects/agent-core && ! grep -rn 'spinner\\|progress_hint\\|ThinkingIndicator\\|ProgressIndicator' core/ && test \"$(grep -c 'effort=\"max\"' core/agents.py)\" -ge 9 && grep -q 'AGENT_HOOKS' core/hooks.py && python -c \"from core.agents import scout, forge, wrench, dispatch, ledger, toolsmith, titan, anvil, critic; print('ok')\" && test -z \"$(git diff --name-only)\"",
       "depends_on": [],
-      "status": "pending"
+      "status": "complete"
     }
   ],
   "verification_criteria": [

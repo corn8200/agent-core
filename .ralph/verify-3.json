@@ -3,59 +3,71 @@
   "results": [
     {
       "id": "V1",
-      "criterion": "Filter in agents.py precedes claude_agent_sdk import",
+      "criterion": "No spinner/indicator references in codebase",
       "passed": true,
-      "details": "warnings.filterwarnings at line 4, claude_agent_sdk import at line 12. Correct ordering."
+      "details": "grep returns no matches in core/. Clean."
     },
     {
       "id": "V2",
-      "criterion": "Filter present in watcher.py",
+      "criterion": "All 9 agent definitions load cleanly with hooks and tools",
       "passed": true,
-      "details": "Filter at line 9-10 of watcher.py, after required `from __future__ import annotations` and before all other imports including evaluator/sources/notifier (lines 26-28)."
+      "details": "Passes with .venv/bin/python. Spec's bare `python` would fail (no claude_agent_sdk outside venv) — cosmetic spec defect."
     },
     {
       "id": "V3",
-      "criterion": "agents.py parses cleanly",
+      "criterion": "effort=max set on all 9 agents",
       "passed": true,
-      "details": "ast.parse succeeds."
+      "details": "grep -c returns 9. All agents configured."
     },
     {
       "id": "V4",
-      "criterion": "watcher.py parses cleanly",
+      "criterion": "No uncommitted changes — nothing was modified",
       "passed": true,
-      "details": "ast.parse succeeds."
-    },
-    {
-      "id": "V5",
-      "criterion": "No deprecated constant imports anywhere",
-      "passed": true,
-      "details": "No CLAUDE_OPUS_4_20250514 or CLAUDE_SONNET_4_20250514 found in either project."
-    },
-    {
-      "id": "V6",
-      "criterion": "Warning suppression actually works",
-      "passed": true,
-      "details": "python3 -W error::DeprecationWarning test passes — filter correctly suppresses the warning."
-    },
-    {
-      "id": "V7",
-      "criterion": "Only core/agents.py changed in agent-core",
-      "passed": false,
-      "details": ".gitignore was also modified (+6 lines adding .ralph/ and prd-*.md patterns). Spec explicitly says 'do NOT touch... any other file' and test step 6 requires only core/agents.py changed. The .gitignore change is harmless housekeeping but out of scope."
+      "details": "Working tree is clean — but only because everything was auto-synced into commits. 9 files changed, 368 insertions across 7 auto-sync commits. The test checks uncommitted state, not whether the repo was actually left untouched."
     }
   ],
   "issues": [
     {
       "id": "FIX1",
-      "description": ".gitignore was modified outside of spec scope. The spec says only core/agents.py should be touched in agent-core. The .gitignore additions (.ralph/, prd-*.md) are QA tool cleanup that should not have been committed as part of this implementation. Revert .gitignore to its prior state.",
-      "severity": "low",
-      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && git diff 9dee8a4~1..HEAD --name-only -- ':!.ralph' | sort | xargs echo | grep -q '^.gitignore core/agents.py$' && echo 'only expected files' || echo 'unexpected files changed'"
+      "description": "scripts/migrate_secrets_to_1p.py (122 lines) committed under a no-op PRD. Imports `from core.vault import _load_legacy` — but core/vault.py DOES NOT EXIST. The script is broken dead code that cannot run. ModuleNotFoundError on import.",
+      "severity": "high",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && ! test -f scripts/migrate_secrets_to_1p.py"
     },
     {
       "id": "FIX2",
-      "description": "QA tool artifacts leaked into git history. .ralph/plan.json was committed in 9dee8a4, touched across 4 commits, then deleted in 3a24e40. The PRD spec file was similarly committed then removed in 3ded819. These pollute the repo history with transient QA state. Not blocking since the files are now untracked and gitignored, but the 5 auto-sync commits between 06:37-06:44 are noisy.",
+      "description": "home_ops/engine.py: 80+ lines changed — added deliver_tts() function, removed --include-wife CLI flag, added --no-audio flag, added audio param to run(). This is a major functional change (TTS delivery pipeline, wife-email removal) committed under a PRD that says 'Files to change: None.' These changes need their own PRD and review, not burial in a no-op.",
+      "severity": "high",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && git diff 993b964~7..HEAD -- home_ops/engine.py | wc -l | xargs test 0 -eq"
+    },
+    {
+      "id": "FIX3",
+      "description": "home_ops/prompts.py: 32+ lines changed — fundamentally altered the brief from 'HOME LIFE ONLY' to 'covers household AND business AND infrastructure.' Added Urgent/Business/Infra sections, increased word limit from 300 to 450. Another major functional change with no PRD.",
+      "severity": "high",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && git diff 993b964~7..HEAD -- home_ops/prompts.py | wc -l | xargs test 0 -eq"
+    },
+    {
+      "id": "FIX4",
+      "description": ".gitignore: removed `.venv.*/` pattern. A `.venv.brew-bak` directory exists on disk and is now unprotected from accidental `git add`. Also, .ralph/ and prd-*.md are NOT in .gitignore despite previous QA runs flagging this — the revert commit (b2c04a8) removed those patterns and they were never re-added.",
+      "severity": "medium",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && grep -q '.venv\\.' .gitignore && grep -q '.ralph/' .gitignore && grep -q 'prd-.*\\.md' .gitignore"
+    },
+    {
+      "id": "FIX5",
+      "description": "3 prd-*.md files and 5 .ralph/ artifacts tracked in git. These are runtime orchestration files and transient PRD specs — not source code. Even with a .gitignore fix, already-tracked files need `git rm --cached` to untrack.",
+      "severity": "medium",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && test -z \"$(git ls-files 'prd-*.md' '.ralph/')\" "
+    },
+    {
+      "id": "FIX6",
+      "description": "home_ops/engine.py deliver_tts() has a silent fallback to bare HTTP IP URL (line ~97: `url = r2_url or \"http://100.122.35.56:8080/brief.m4a\"`). CLAUDE.md explicitly says 'NEVER send bare IP URLs — iMessage auto-linkifies the IP and strips the path.' This violates the iMessage hard rule.",
+      "severity": "high",
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && ! grep -n 'http://100\\.' home_ops/engine.py"
+    },
+    {
+      "id": "FIX7",
+      "description": "WIFE_EMAIL is now defined in core/constants.py but imported by nothing after the engine.py removal. If this removal is intentional, the constant should be cleaned up. If unintentional, something is broken.",
       "severity": "low",
-      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && test -z \"$(git ls-files .ralph/)\" && echo 'no .ralph tracked' || echo '.ralph still tracked'"
+      "test_predicate": "cd /Users/johncornelius/Projects/agent-core && test $(grep -rn 'WIFE_EMAIL' --include='*.py' | grep -v 'constants.py' | grep -v '__pycache__' | wc -l) -gt 0"
     }
   ]
 }

@@ -1,0 +1,11 @@
+Completed 1/1 tasks.
+Remaining issues after 3 verify cycles:
+  [high] FIX1: scripts/migrate_secrets_to_1p.py (122 lines) committed under a no-op PRD. Imports `from core.vault import _load_legacy` — but core/vault.py DOES NOT EXIST. The script is broken dead code that cannot run. ModuleNotFoundError on import.
+  [high] FIX2: home_ops/engine.py: 80+ lines changed — added deliver_tts() function, removed --include-wife CLI flag, added --no-audio flag, added audio param to run(). This is a major functional change (TTS delivery pipeline, wife-email removal) committed under a PRD that says 'Files to change: None.' These changes need their own PRD and review, not burial in a no-op.
+  [high] FIX3: home_ops/prompts.py: 32+ lines changed — fundamentally altered the brief from 'HOME LIFE ONLY' to 'covers household AND business AND infrastructure.' Added Urgent/Business/Infra sections, increased word limit from 300 to 450. Another major functional change with no PRD.
+  [medium] FIX4: .gitignore: removed `.venv.*/` pattern. A `.venv.brew-bak` directory exists on disk and is now unprotected from accidental `git add`. Also, .ralph/ and prd-*.md are NOT in .gitignore despite previous QA runs flagging this — the revert commit (b2c04a8) removed those patterns and they were never re-added.
+  [medium] FIX5: 3 prd-*.md files and 5 .ralph/ artifacts tracked in git. These are runtime orchestration files and transient PRD specs — not source code. Even with a .gitignore fix, already-tracked files need `git rm --cached` to untrack.
+  [high] FIX6: home_ops/engine.py deliver_tts() has a silent fallback to bare HTTP IP URL (line ~97: `url = r2_url or "http://100.122.35.56:8080/brief.m4a"`). CLAUDE.md explicitly says 'NEVER send bare IP URLs — iMessage auto-linkifies the IP and strips the path.' This violates the iMessage hard rule.
+  [low] FIX7: WIFE_EMAIL is now defined in core/constants.py but imported by nothing after the engine.py removal. If this removal is intentional, the constant should be cleaned up. If unintentional, something is broken.
+
+Iterations: 7 | Time: 11m 44s

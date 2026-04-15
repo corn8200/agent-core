@@ -122,7 +122,14 @@ async def gather_calendar_7d() -> list[dict]:
 # --- Reminders (canonical, bucketed) ---
 
 async def gather_reminders() -> dict:
-    """Get incomplete reminders from Apple Reminders, bucketed by urgency.
+    """Get incomplete reminders bucketed by urgency.
+
+    Uses a Swift/EventKit helper (`core/reminders_fetch.swift`) because the
+    AppleScript path (`tell application "Reminders" to get every reminder
+    whose completed is false`) crashes Reminders.app under macOS 26.4.1 with
+    a Swift runtime assertion during NSScriptCommand property evaluation
+    (crash: Reminders-2026-04-14-203044.ips). EventKit talks directly to the
+    reminders store — no AppleEvents, no Reminders.app launch.
 
     Returns:
         {
@@ -133,78 +140,58 @@ async def gather_reminders() -> dict:
             "later": [...],
             "undated": [...],
         }
-    Each item is {name, list, due} where due is a string or None.
+    Each item is {name, list, due} where due is an ISO string or None.
     """
-    script = r'''
-    set FS to (ASCII character 31)
-    set RS to (ASCII character 30)
-    tell application "Reminders"
-        set output to ""
-        repeat with reminderList in lists
-            try
-                set incompleteReminders to (every reminder of reminderList whose completed is false)
-                repeat with r in incompleteReminders
-                    set rName to name of r
-                    set listName to name of reminderList
-                    set dueStr to ""
-                    try
-                        set d to due date of r
-                        if d is not missing value then set dueStr to (d as string)
-                    end try
-                    set output to output & rName & FS & listName & FS & dueStr & RS
-                end repeat
-            end try
-        end repeat
-        return output
-    end tell
-    '''
-    try:
-        import re
-        result, _ = await _osascript(script, timeout=30)
-        if not result:
-            return {"count": 0, "overdue": [], "today": [], "this_week": [], "later": [], "undated": []}
+    empty = {"count": 0, "overdue": [], "today": [], "this_week": [], "later": [], "undated": []}
+    script_path = Path(__file__).resolve().parent.parent / "core" / "reminders_fetch.swift"
+    if not script_path.exists():
+        return {**empty, "error": f"missing {script_path}"}
 
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "swift", str(script_path),
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return {**empty, "error": "swift reminders_fetch timeout"}
+        if proc.returncode != 0:
+            return {**empty, "error": f"swift rc={proc.returncode}: {stderr.decode(errors='replace').strip()[:200]}"}
+
+        raw = stdout.decode(errors="replace")
         now = datetime.now()
         today_date = now.date()
         week_end = today_date + timedelta(days=7)
-
         buckets = {"overdue": [], "today": [], "this_week": [], "later": [], "undated": []}
-
-        def parse_apple_date(s: str):
-            if not s:
-                return None
-            s2 = re.sub(r"^\w+,\s*", "", s)
-            for fmt in (
-                "%B %d, %Y at %H:%M:%S",
-                "%B %d, %Y at %I:%M:%S %p",
-                "%B %d, %Y",
-            ):
-                try:
-                    return datetime.strptime(s2, fmt)
-                except ValueError:
-                    continue
-            return None
-
         total = 0
-        for raw in result.split("\x1e"):
-            raw = raw.strip("\r\n ")
-            if not raw:
+
+        for rec in raw.split("\x1e"):
+            rec = rec.strip(" \t\n\r")
+            if not rec:
                 continue
-            parts = raw.split("\x1f")
+            parts = rec.split("\x1f")
             if len(parts) < 2:
                 continue
             name = parts[0].strip()
             list_name = parts[1].strip() if len(parts) > 1 else ""
-            due_raw = parts[2].strip() if len(parts) > 2 else ""
+            due_iso = parts[2].strip() if len(parts) > 2 else ""
 
-            if name and name[0] in "📅📋🔖🗓📌🔹▪•🔮⭐✨":
-                continue
             if not name:
+                continue
+            if name[0] in "📅📋🔖🗓📌🔹▪•🔮⭐✨":
                 continue
 
             total += 1
-            due_dt = parse_apple_date(due_raw) if due_raw else None
-            entry = {"name": name, "list": list_name, "due": due_raw or None}
+            due_dt = None
+            if due_iso:
+                try:
+                    due_dt = datetime.fromisoformat(due_iso.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+                except ValueError:
+                    due_dt = None
+
+            entry = {"name": name, "list": list_name, "due": due_iso or None}
             if due_dt is None:
                 buckets["undated"].append(entry)
             elif due_dt.date() < today_date:
@@ -225,7 +212,7 @@ async def gather_reminders() -> dict:
             "undated": buckets["undated"][:15],
         }
     except Exception as e:
-        return {"count": 0, "error": str(e), "overdue": [], "today": [], "this_week": [], "later": [], "undated": []}
+        return {**empty, "error": str(e)}
 
 
 async def gather_reminders_full() -> dict:

@@ -203,6 +203,19 @@ def track(agent: str, capture_cost=None):
                     pass
                 try:
                     result = await fn(*args, **kwargs)
+                except SystemExit as e:
+                    dur = int((time.monotonic() - t0) * 1000)
+                    kind = "complete" if (e.code is None or e.code == 0) else "error"
+                    try:
+                        if kind == "error":
+                            event(agent, "error",
+                                  payload={"exc": "SystemExit", "msg": str(e.code)[:500]},
+                                  duration_ms=dur, trace_id=tid)
+                        else:
+                            event(agent, "complete", duration_ms=dur, trace_id=tid)
+                    except Exception:
+                        pass
+                    raise
                 except BaseException as e:
                     dur = int((time.monotonic() - t0) * 1000)
                     tb = traceback.format_exc()
@@ -239,6 +252,19 @@ def track(agent: str, capture_cost=None):
                 pass
             try:
                 result = fn(*args, **kwargs)
+            except SystemExit as e:
+                dur = int((time.monotonic() - t0) * 1000)
+                kind = "complete" if (e.code is None or e.code == 0) else "error"
+                try:
+                    if kind == "error":
+                        event(agent, "error",
+                              payload={"exc": "SystemExit", "msg": str(e.code)[:500]},
+                              duration_ms=dur, trace_id=tid)
+                    else:
+                        event(agent, "complete", duration_ms=dur, trace_id=tid)
+                except Exception:
+                    pass
+                raise
             except BaseException as e:
                 dur = int((time.monotonic() - t0) * 1000)
                 tb = traceback.format_exc()

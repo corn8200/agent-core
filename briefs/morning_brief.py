@@ -199,7 +199,7 @@ async def deliver_tts(brief_text: str) -> bool:
         try:
             result = subprocess.run(
                 [
-                    str(HOME / ".venvs" / "sora" / "bin" / "python3"),
+                    str(HOME / "Projects" / "agent-core" / ".venv" / "bin" / "python3"),
                     str(deliver_script),
                     str(BRIEF_TEXT_PATH),
                     "--no-imessage",

@@ -94,13 +94,13 @@ toolsmith = AgentDefinition(
 )
 
 titan = AgentDefinition(
-    description="Maximum-firepower opus solver for genuinely hard problems — architectural decisions, multi-system debugging, deep research, complex refactors, end-to-end design work. Spawns parallel sub-agent swarms via the Agent tool, extended thinking, no token rationing. Full toolset: Read/Write/Edit/Grep/Glob/Bash/WebSearch/WebFetch/Agent/TodoWrite. Pick when the problem deserves the heaviest hammer; skip for quick lookups. 60-turn budget.",
+    description="Maximum-firepower opus solver for genuinely hard problems — architectural decisions, multi-system debugging, deep research, complex refactors, end-to-end design work. Spawns parallel sub-agent swarms via the Agent tool, extended thinking, no token rationing. Full toolset: Read/Write/Edit/Grep/Glob/Bash/WebSearch/WebFetch/Agent/TodoWrite. Pick when the problem deserves the heaviest hammer; skip for quick lookups. 60-turn budget, xhigh effort.",
     prompt=_load_prompt("titan"),
     model="opus",
     tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "Agent", "TodoWrite"],
     maxTurns=60,
     permissionMode="bypassPermissions",
-    effort="max",
+    effort="xhigh",  # type: ignore[arg-type]  # xhigh added in CLI 2.1.112; SDK Literal not yet updated
     memory="project",
 )
 

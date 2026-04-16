@@ -81,11 +81,13 @@ nudge/
 ## Rules
 - All automated agents: `permission_mode="bypassPermissions"`, always set `max_turns` + `max_budget_usd`
 - Always include `hooks=AGENT_HOOKS` on SDK calls
-- Always pass `thinking=<preset>` + `effort="max"` — pick the preset per task:
-  - `HEAVY` (32k) → synthesis, tailoring, proposal drafting, job-fit judgment, merging multi-agent output
-  - `STANDARD` (16k) → diagnosis, single swarm agent, general reasoning
-  - `LIGHT` (6k) → structured extraction, template filling, straightforward classification
+- Always pass `thinking=<preset>` + `effort=<level>` — pick per task:
+  - `ULTRA` (64k) + `effort="xhigh"` → **Titan** / architectural decisions / hardest multi-system problems
+  - `HEAVY` (32k) + `effort="xhigh"` → synthesis, tailoring, proposal drafting, job-fit judgment, swarm merge
+  - `STANDARD` (16k) + `effort="max"` → diagnosis, single swarm agent, general reasoning
+  - `LIGHT` (6k) + `effort="max"` → structured extraction, template filling, straightforward classification
   - `ADAPTIVE` → when budget is unknown / let Claude decide
+  - Effort guide: `xhigh` = new Opus 4.7 default (scores > old `max` at 100k tokens); `max` = proofs/audits/exhaustive
 - VPS SSH hostname is `vps`, NOT jcornelius.net
 
 ## Email Sending

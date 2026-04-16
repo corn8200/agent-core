@@ -37,4 +37,4 @@ SKIP_CALENDARS = {"Siri Suggestions", "US Holidays", "Birthdays"}
 
 # --- Misc ---
 GATHER_TTL_SECONDS = 2700  # 45 min cache
-WATCH_SECRET = os.environ.get("WATCH_SECRET", "wc-corn82")
+WATCH_SECRET = os.environ.get("WATCH_SECRET", "")

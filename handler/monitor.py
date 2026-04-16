@@ -112,50 +112,60 @@ def is_quiet_hours(now: datetime | None = None) -> bool:
 
 # --- Anomaly Detection (pure Python, 0 tokens) ---
 
+def _vps_thrifty() -> bool:
+    """Return True if VPS is in thrifty mode (services intentionally killed)."""
+    result = subprocess.run(
+        ["ssh", "-o", "ConnectTimeout=5", "vps", "test -f ~/.thrifty.mode"],
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
 def detect_anomalies(data: dict) -> list[dict]:
     """Check gathered data for anomalies. Returns list of {severity, source, message}."""
     anomalies = []
 
-    # VPS services down
     vps_raw = data.get("vps", {}).get("raw", "")
-    if "=== SERVICES ===" in vps_raw:
-        services_block = vps_raw.split("=== SERVICES ===")[1].split("===")[0]
-        for line in services_block.strip().splitlines():
-            if "inactive" in line or "failed" in line:
-                svc = line.split(":")[0].strip()
-                anomalies.append({
-                    "severity": "high",
-                    "source": "vps",
-                    "message": f"Service down: {svc}",
-                })
+    if not _vps_thrifty():
+        # VPS services down
+        if "=== SERVICES ===" in vps_raw:
+            services_block = vps_raw.split("=== SERVICES ===")[1].split("===")[0]
+            for line in services_block.strip().splitlines():
+                if "inactive" in line or "failed" in line:
+                    svc = line.split(":")[0].strip()
+                    anomalies.append({
+                        "severity": "high",
+                        "source": "vps",
+                        "message": f"Service down: {svc}",
+                    })
 
-    # VPS disk usage
-    if "=== HEALTH ===" in vps_raw:
-        health_block = vps_raw.split("=== HEALTH ===")[1].split("===")[0]
-        for line in health_block.strip().splitlines():
-            if "%" in line and "/" in line:
-                parts = line.split()
-                for p in parts:
-                    if p.endswith("%"):
-                        pct = int(p.rstrip("%"))
-                        if pct > 85:
-                            anomalies.append({
-                                "severity": "high" if pct > 95 else "medium",
-                                "source": "vps",
-                                "message": f"VPS disk at {pct}%",
-                            })
+        # VPS disk usage
+        if "=== HEALTH ===" in vps_raw:
+            health_block = vps_raw.split("=== HEALTH ===")[1].split("===")[0]
+            for line in health_block.strip().splitlines():
+                if "%" in line and "/" in line:
+                    parts = line.split()
+                    for p in parts:
+                        if p.endswith("%"):
+                            pct = int(p.rstrip("%"))
+                            if pct > 85:
+                                anomalies.append({
+                                    "severity": "high" if pct > 95 else "medium",
+                                    "source": "vps",
+                                    "message": f"VPS disk at {pct}%",
+                                })
 
-    # VPS errors in last 24h
-    if "=== ERRORS ===" in vps_raw:
-        errors_block = vps_raw.split("=== ERRORS ===")[1].split("===")[0].strip()
-        if errors_block and len(errors_block) > 10:
-            error_count = len(errors_block.splitlines())
-            if error_count > 3:
-                anomalies.append({
-                    "severity": "medium",
-                    "source": "vps",
-                    "message": f"{error_count} errors in last 24h",
-                })
+        # VPS errors in last 24h
+        if "=== ERRORS ===" in vps_raw:
+            errors_block = vps_raw.split("=== ERRORS ===")[1].split("===")[0].strip()
+            if errors_block and len(errors_block) > 10:
+                error_count = len(errors_block.splitlines())
+                if error_count > 3:
+                    anomalies.append({
+                        "severity": "medium",
+                        "source": "vps",
+                        "message": f"{error_count} errors in last 24h",
+                    })
 
     # Mac disk
     mac = data.get("mac", {})

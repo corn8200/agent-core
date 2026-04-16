@@ -555,16 +555,8 @@ async def gather_mail_recent(days: int = 7) -> list[dict]:
 
 async def gather_weather() -> dict:
     """Pirate Weather forecast for Harpers Ferry, next 24h."""
-    key = os.environ.get("PIRATE_WEATHER_API_KEY", "")
-    if not key:
-        # try secrets file
-        try:
-            for line in Path.home().joinpath(".config/secrets.env").read_text().splitlines():
-                if line.startswith("PIRATE_WEATHER_API_KEY="):
-                    key = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    break
-        except Exception:
-            pass
+    from core.vault import get_secret
+    key = os.environ.get("PIRATE_WEATHER_API_KEY", "") or get_secret("PIRATE_WEATHER_API_KEY") or ""
     if not key:
         return {"error": "no API key"}
 

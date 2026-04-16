@@ -55,7 +55,9 @@ uptime
 echo '=== SERVICES ==='
 # Only long-running services (daemons). Timer-triggered oneshots are NORMALLY
 # inactive between runs — checking them creates false positives.
-for svc in sentry-dashboard sentry-formhandler sentry-mailqueue-web mailgw-idle mailgw-web caddy prepper-v2 jobsignal-dashboard weather-poller weather-app; do
+# 2026-04-16: removed weather-poller, weather-app — services deleted from VPS,
+# were triggering false anomaly alerts every 30 min.
+for svc in sentry-dashboard sentry-formhandler sentry-mailqueue-web mailgw-idle mailgw-web caddy prepper-v2 jobsignal-dashboard; do
   status=$(systemctl is-active $svc 2>/dev/null)
   echo "$svc: $status"
 done

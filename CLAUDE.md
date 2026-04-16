@@ -15,15 +15,24 @@ core/
   hooks.py          — guard_hook (blocks destructive cmds) + audit_hook (logs to ~/logs/agent-audit.jsonl)
   thinking.py       — Extended thinking presets: HEAVY / STANDARD / LIGHT / ADAPTIVE / OFF
   agents.py         — 9 AgentDefinitions: Scout, Forge, Wrench, Dispatch, Ledger, Toolsmith, Titan, Anvil, Critic
-  gather.py         — Parallel data gathering incl gather_schedule() (30-min cache at /tmp/claude-gather.json)
+  agent_cp_client.py — Control plane telemetry (events, kill switches). Silent-fail. Reads APPLE_BRIDGE_TOKEN from env or secrets.env.legacy.
+  vault.py          — 1Password MachineAuto loader: hydrate_env(), get_secret(). Billing guard excludes ANTHROPIC_* keys.
+  sdk_guard.py      — Structural rate-limit guard. Auto-patches query() via sitecustomize.py.
+  modes.py          — Thrifty mode helpers (check/enter/exit thrifty state)
+  browser.py        — Playwright persistent sessions: with_site(), capture_session(), list_sites()
+  safari.py         — Safari osascript+JS helpers for interactive browser mode
   constants.py      — HOME, PERSONAL_EMAIL, VPS_SSH, IPs, DB paths, SKIP_CALENDARS
   calendar.py       — Calendar service: get_events, create_event, availability, conflicts, schedule/week views
   message_db.py     — SQLite schema + helpers for ~/logs/message_bus.db (inbound + outbound)
   message_bus.py    — Unified outbound: send_message() with tiers, attribution, retry
   message_reader.py — Inbound chat.db poller via tmux relay, subscriber pattern
   message_router.py — 3-layer router: short-codes → prefix → Opus intent classification w/ full context
+home_ops/
+  engine.py         — Consolidated daily brief (6:30 AM + 8 PM). Gather→synthesize(opus)→email+TTS+iMessage audio
+  gather.py         — Parallel data gathering incl gather_schedule() (30-min cache at /tmp/claude-gather.json)
+  prompts.py        — Brief system prompts (weather, sleep, business, calendar, infra, reminders)
 briefs/
-  morning_brief.py  — 5:30 AM cron. Gather→synthesize(opus)→email+TTS
+  morning_brief.py  — LEGACY (LaunchAgent disabled 2026-04-15, replaced by home_ops)
 handler/
   monitor.py        — Every 30 min. Pure Python anomaly detection → SDK diagnosis on alert
 swarm/
@@ -48,7 +57,6 @@ nudge/
 
 ## Consumers (import from core/)
 - `~/bin/watch-commander.py` — imports core.message_bus + core.hooks via sys.path
-- `~/research-chain/orchestrator.py` — uses agent-core venv + SDK patterns
 - `~/Projects/job-agent/docgen/tailor.py` — SDK query() for tailoring
 - `daemon/imessage_daemon.py` — unified iMessage bus (reader + router + retry)
 - `nudge/engine.py` — calendar nudge engine
@@ -59,6 +67,9 @@ nudge/
 - `/tmp/claude-gather.json` — gather cache (30 min TTL)
 
 ## LaunchAgents
+- `com.john.home-ops` — Daily brief: 6:30 AM (morning) + 8 PM (evening). Email + iMessage audio.
+- `com.john.handler-agent` — Every 30 min anomaly detection (Mac-side, VPS has matching timer)
+- `com.john.watch-commander` — Always-on, SDK Opus, iMessage bus
 - `com.john.imessage-bus` — KeepAlive daemon, polls chat.db, routes to agents
 - `com.john.nudge-engine` — every 5 min, calendar nudges via iMessage
 

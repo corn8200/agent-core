@@ -308,6 +308,21 @@ If the context already contains enough information to answer (e.g. schedule ques
 MESSAGE: {message}"""
 
 
+_FALLBACK_CLASSIFICATION = {"intents": ["quick"], "can_answer_directly": False, "prompt": ""}
+
+
+def _is_api_error(obj: dict) -> bool:
+    if obj.get("is_error"):
+        return True
+    if obj.get("type") == "error" and "error" in obj:
+        return True
+    return False
+
+
+def _validate_classification(obj: dict) -> bool:
+    return isinstance(obj.get("intents"), list) and len(obj["intents"]) > 0
+
+
 async def _classify_with_opus(msg: InboundMessage) -> dict:
     """Classify message intent using Opus with full context injection."""
     context = await _build_context(msg)
@@ -318,7 +333,8 @@ async def _classify_with_opus(msg: InboundMessage) -> dict:
         message=msg.text,
     )
 
-    # Use claude CLI for classification (Max subscription, free Opus)
+    fallback = {**_FALLBACK_CLASSIFICATION, "prompt": msg.text}
+
     try:
         proc = await asyncio.create_subprocess_exec(
             "/opt/homebrew/bin/claude", "-p", prompt,
@@ -330,32 +346,61 @@ async def _classify_with_opus(msg: InboundMessage) -> dict:
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         output = stdout.decode().strip()
+        err_output = stderr.decode().strip()
 
-        # Parse the JSON response (may be wrapped in claude CLI output)
-        # Try to extract JSON from the response
+        if proc.returncode != 0:
+            print(f"[router] Opus CLI exited {proc.returncode}: {err_output[:300]}", flush=True)
+            return fallback
+
         try:
             result = json.loads(output)
-            # claude CLI json output has a "result" key
-            if "result" in result:
-                text = result["result"]
-                # Find JSON in the text
-                json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
-                if json_match:
-                    return json.loads(json_match.group())
-            return result
         except json.JSONDecodeError:
-            # Try to find JSON block in raw output
             json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', output, re.DOTALL)
             if json_match:
-                return json.loads(json_match.group())
-            return {"intents": ["quick"], "can_answer_directly": False, "prompt": msg.text}
+                try:
+                    result = json.loads(json_match.group())
+                except json.JSONDecodeError:
+                    print(f"[router] Opus returned unparseable output: {output[:300]}", flush=True)
+                    return fallback
+            else:
+                print(f"[router] Opus returned no JSON: {output[:300]}", flush=True)
+                return fallback
+
+        if _is_api_error(result):
+            err_detail = result.get("error", {})
+            err_type = err_detail.get("type", "unknown") if isinstance(err_detail, dict) else str(err_detail)
+            err_msg = err_detail.get("message", "") if isinstance(err_detail, dict) else ""
+            print(f"[router] Opus API error ({err_type}): {err_msg}", flush=True)
+            return fallback
+
+        if "result" in result:
+            text = result["result"]
+            json_match = re.search(r'\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}', text, re.DOTALL)
+            if json_match:
+                try:
+                    parsed = json.loads(json_match.group())
+                    if _is_api_error(parsed):
+                        print(f"[router] Opus API error in result: {json_match.group()[:300]}", flush=True)
+                        return fallback
+                    if _validate_classification(parsed):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+            print(f"[router] Opus result has no valid classification JSON: {text[:300]}", flush=True)
+            return fallback
+
+        if _validate_classification(result):
+            return result
+
+        print(f"[router] Opus response missing intents: {json.dumps(result)[:300]}", flush=True)
+        return fallback
 
     except asyncio.TimeoutError:
-        print("[router] Opus classification timed out (60s)")
-        return {"intents": ["quick"], "can_answer_directly": False, "prompt": msg.text}
+        print("[router] Opus classification timed out (60s)", flush=True)
+        return fallback
     except Exception as e:
-        print(f"[router] Opus classification error: {e}")
-        return {"intents": ["quick"], "can_answer_directly": False, "prompt": msg.text}
+        print(f"[router] Opus classification error: {e}", flush=True)
+        return fallback
 
 
 # --- Dispatch ---

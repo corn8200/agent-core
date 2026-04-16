@@ -31,7 +31,6 @@ from pathlib import Path
 VPS_URL = "http://100.118.21.64:8767"
 LOCAL_DB = Path("/srv/apps/agent-cp/events.db")
 LOCAL_FLAGS = Path("/srv/apps/agent-cp/flags")
-SECRETS = Path.home() / ".config" / "secrets.env"
 
 _TOKEN_CACHE: str | None = None
 _KILL_CACHE: dict[str, tuple[float, bool]] = {}
@@ -42,18 +41,8 @@ def _token() -> str:
     global _TOKEN_CACHE
     if _TOKEN_CACHE is not None:
         return _TOKEN_CACHE
-    tok = os.environ.get("APPLE_BRIDGE_TOKEN", "")
-    if not tok and SECRETS.exists():
-        try:
-            for line in SECRETS.read_text().splitlines():
-                line = line.strip()
-                if line.startswith("APPLE_BRIDGE_TOKEN="):
-                    tok = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    break
-        except Exception:
-            pass
-    _TOKEN_CACHE = tok
-    return tok
+    _TOKEN_CACHE = os.environ.get("APPLE_BRIDGE_TOKEN", "")
+    return _TOKEN_CACHE
 
 
 def _on_vps() -> bool:

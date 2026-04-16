@@ -104,14 +104,16 @@ async def deliver_tts(brief_text: str) -> bool:
     except Exception as e:
         print(f"R2 upload error: {e}", file=sys.stderr)
 
-    try:
-        from core.tools import send_imessage_reliable
-        url = r2_url or "http://100.122.35.56:8080/brief.m4a"
-        first_line = brief_text.split("\n", 1)[0][:180]
-        msg = f"Morning Brief: {url}\n\n{first_line}"
-        await send_imessage_reliable(PERSONAL_EMAIL, msg)
-    except Exception as e:
-        print(f"iMessage delivery failed: {e}", file=sys.stderr)
+    if r2_url:
+        try:
+            from core.tools import send_imessage_reliable
+            first_line = brief_text.split("\n", 1)[0][:180]
+            msg = f"Morning Brief: {r2_url}\n\n{first_line}"
+            await send_imessage_reliable(PERSONAL_EMAIL, msg)
+        except Exception as e:
+            print(f"iMessage delivery failed: {e}", file=sys.stderr)
+    else:
+        print("R2 upload failed -- skipping iMessage audio delivery", file=sys.stderr)
     return True
 
 

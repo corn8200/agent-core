@@ -8,7 +8,6 @@ without changing any caller code.
 """
 
 import asyncio
-from datetime import datetime
 
 from core.constants import PERSONAL_EMAIL
 from core.message_db import log_outbound, mark_sent, mark_failed, get_retry_queue

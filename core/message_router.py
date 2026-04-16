@@ -11,9 +11,9 @@ Opus (free on Max plan) handles ambiguous, natural language, and multi-intent me
 import asyncio
 import json
 import re
+import os
 import subprocess
 import tempfile
-import urllib.error
 import urllib.request
 from datetime import datetime
 from pathlib import Path
@@ -29,7 +29,6 @@ from core.message_db import update_inbound_route, get_recent_outbound
 PREFIXES = ("research:", "quick:", "compare:", "local:")
 SELF_CHATS = ("corn82@icloud.com", "+13042684985")
 APPROVAL_QUEUE_URL = "http://100.118.21.64:8766/api/respond"
-SECRETS_ENV = Path.home() / ".config/secrets.env"
 SHORT_CODE_RE = re.compile(r"^\s*([AD])(\d+)\s*$", re.IGNORECASE)
 EDIT_CODE_RE = re.compile(r"^\s*E(\d+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 
@@ -53,15 +52,7 @@ INTENT_TO_AGENT = {
 # --- Short-code handling (ported from research-chain/main.py) ---
 
 def _load_apple_bridge_token() -> Optional[str]:
-    try:
-        for line in SECRETS_ENV.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("APPLE_BRIDGE_TOKEN="):
-                val = line.split("=", 1)[1].strip()
-                return val.strip("'").strip('"')
-    except FileNotFoundError:
-        pass
-    return None
+    return os.environ.get("APPLE_BRIDGE_TOKEN", "") or None
 
 
 def _post_approval(code: str, action: str, payload: dict | None = None) -> bool:

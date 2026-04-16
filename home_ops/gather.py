@@ -18,6 +18,7 @@ import json
 import os
 import sqlite3
 import subprocess
+from contextlib import closing
 import sys
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -479,24 +480,23 @@ def _read_chat_db_direct(days: int = 7) -> list[dict]:
     """
     out = []
     try:
-        conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
-        conn.row_factory = sqlite3.Row
-        for row in conn.execute(sql, (f"-{days} days",)):
-            text = row["text"] or ""
-            if not text and row["attributedBody"]:
-                text = _extract_attributed_body(row["attributedBody"])
-            text = text.strip()
-            if not text:
-                continue
-            out.append({
-                "ts": row["ts"],
-                "from_me": bool(row["is_from_me"]),
-                "sender": row["sender_id"] or "",
-                "chat": row["chat_identifier"] or "",
-                "chat_name": row["display_name"] or "",
-                "text": text[:600],
-            })
-        conn.close()
+        with closing(sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)) as conn:
+            conn.row_factory = sqlite3.Row
+            for row in conn.execute(sql, (f"-{days} days",)):
+                text = row["text"] or ""
+                if not text and row["attributedBody"]:
+                    text = _extract_attributed_body(row["attributedBody"])
+                text = text.strip()
+                if not text:
+                    continue
+                out.append({
+                    "ts": row["ts"],
+                    "from_me": bool(row["is_from_me"]),
+                    "sender": row["sender_id"] or "",
+                    "chat": row["chat_identifier"] or "",
+                    "chat_name": row["display_name"] or "",
+                    "text": text[:600],
+                })
     except Exception as e:
         return [{"_error": str(e)}]
     return out

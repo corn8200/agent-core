@@ -53,18 +53,10 @@ CREATE VIRTUAL TABLE IF NOT EXISTS memory_vss USING vec0(
 
 
 def _load_secrets() -> dict[str, str]:
-    """Parse ~/.config/secrets.env into a dict. Ignores comments and blank lines."""
-    secrets_file = Path.home() / ".config" / "secrets.env"
-    env: dict[str, str] = {}
-    if not secrets_file.exists():
-        return env
-    for line in secrets_file.read_text().splitlines():
-        line = line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        k, _, v = line.partition("=")
-        env[k.strip()] = v.strip().strip('"').strip("'")
-    return env
+    """Return env-sourced secrets (vault hydrates os.environ at startup)."""
+    return {
+        "OPENAI_API_KEY": os.environ.get("OPENAI_API_KEY", ""),
+    }
 
 
 class MemoryStore:

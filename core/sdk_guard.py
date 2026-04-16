@@ -82,18 +82,8 @@ def _record_and_check() -> tuple[int, bool]:
 
 def _pushover_alert(count: int) -> None:
     try:
-        secrets = Path.home() / ".config" / "secrets.env"
-        env: dict[str, str] = {}
-        for line in secrets.read_text().splitlines():
-            line = line.strip()
-            if line.startswith("export "):
-                line = line[7:]
-            if "=" in line and not line.startswith("#"):
-                k, _, v = line.partition("=")
-                env[k.strip()] = v.strip().strip('"').strip("'")
-
-        token = env.get("PUSHOVER_APP_TOKEN") or os.environ.get("PUSHOVER_APP_TOKEN")
-        user = env.get("PUSHOVER_USER_KEY") or os.environ.get("PUSHOVER_USER_KEY")
+        token = os.environ.get("PUSHOVER_APP_TOKEN", "")
+        user = os.environ.get("PUSHOVER_USER_KEY", "")
         if not token or not user:
             return
 

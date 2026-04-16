@@ -62,7 +62,7 @@ def set_active_context(ctx: SwarmContext):
 # --- tmux relay for GUI-dependent commands (iMessage, etc.) ---
 
 _TMUX = "/opt/homebrew/bin/tmux"
-_RELAY_SESSIONS = ["research-listener", "claude", "main"]
+_RELAY_SESSIONS = ["claude", "main"]
 
 
 async def _tmux_relay_osascript(script: str, timeout: float = 30.0) -> tuple[bool, str]:

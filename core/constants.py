@@ -25,8 +25,8 @@ WIFE_EMAIL = "cornash89@gmail.com"
 NOTIFY_EMAIL = "Cornelius Family <notify@jcornelius.net>"
 
 # --- Pushover ---
-PUSHOVER_USER = os.environ.get("PUSHOVER_USER_KEY", "ur9bv8fhxgtkfmwxvnho2v77wi4qhj")
-PUSHOVER_TOKEN = os.environ.get("PUSHOVER_APP_TOKEN", "azyfddsu352o62r15jccgvdvp9ewtt")
+PUSHOVER_USER = os.environ.get("PUSHOVER_USER_KEY", "")
+PUSHOVER_TOKEN = os.environ.get("PUSHOVER_APP_TOKEN", "")
 
 # --- Databases ---
 MESSAGE_BUS_DB = HOME / "logs" / "message_bus.db"
@@ -37,4 +37,4 @@ SKIP_CALENDARS = {"Siri Suggestions", "US Holidays", "Birthdays"}
 
 # --- Misc ---
 GATHER_TTL_SECONDS = 2700  # 45 min cache
-WATCH_SECRET = "wc-corn82"
+WATCH_SECRET = os.environ.get("WATCH_SECRET", "wc-corn82")

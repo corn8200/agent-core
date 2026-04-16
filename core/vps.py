@@ -7,7 +7,6 @@ from pathlib import Path
 import httpx
 
 BASE_URL = "http://100.118.21.64:8080"
-SECRETS_FILE = Path.home() / ".config" / "secrets.env"
 
 TOKEN_KEYS = [
     "SANDBOX_AUTH_TOKEN",
@@ -20,19 +19,7 @@ TOKEN_KEYS = [
 
 @lru_cache(maxsize=1)
 def _load_tokens() -> dict[str, str]:
-    tokens = {k: os.environ.get(k, "") for k in TOKEN_KEYS}
-    if all(tokens.values()):
-        return tokens
-    if SECRETS_FILE.exists():
-        for line in SECRETS_FILE.read_text().splitlines():
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, _, val = line.partition("=")
-            key = key.strip()
-            if key in TOKEN_KEYS and not tokens.get(key):
-                tokens[key] = val.strip().strip("'\"")
-    return tokens
+    return {k: os.environ.get(k, "") for k in TOKEN_KEYS}
 
 
 def _token(name: str) -> str:

@@ -42,6 +42,16 @@ def _token() -> str:
     if _TOKEN_CACHE is not None:
         return _TOKEN_CACHE
     _TOKEN_CACHE = os.environ.get("APPLE_BRIDGE_TOKEN", "")
+    if not _TOKEN_CACHE:
+        # LaunchAgents don't have this in env — read from secrets file
+        try:
+            secrets = Path.home() / ".config" / "secrets.env.legacy"
+            for line in secrets.read_text().splitlines():
+                if line.startswith("APPLE_BRIDGE_TOKEN="):
+                    _TOKEN_CACHE = line.split("=", 1)[1].strip().strip("'\"")
+                    break
+        except Exception:
+            pass
     return _TOKEN_CACHE
 
 

@@ -145,11 +145,21 @@ class Swarm:
         model = sa.model or (agent_def.model if agent_def else "opus")
         session_id = str(uuid.uuid4())
 
+        recall_block = ""
+        try:
+            from core.recall import get_context
+            # Capitalize agent name so AGENT_OVERRIDES (Titan/Critic) can match.
+            agent_name = sa.agent.capitalize() if sa.agent else None
+            recall_block = get_context(sa.prompt, kind="agent", agent_name=agent_name)
+        except Exception:
+            recall_block = ""
+        agent_prompt = f"{recall_block}\n\n{sa.prompt}" if recall_block else sa.prompt
+
         try:
             result_text = ""
             try:
                 async for msg in query(
-                    prompt=sa.prompt,
+                    prompt=agent_prompt,
                     options=ClaudeAgentOptions(
                         model=model,
                         permission_mode="bypassPermissions",

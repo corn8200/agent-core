@@ -1,0 +1,68 @@
+# Regression cases for the 9 named agents.
+# Each case fires via core.mac_sdk (max-authenticated, free under Max subscription).
+# Prompts are designed to be answer-only — no destructive tool use — and assertions
+# check for identity / role markers in the final text response.
+#
+# Assertion types:
+#   contains:       list of strings that MUST all appear (case-insensitive)
+#   any_of:         list of strings where ≥1 must appear (case-insensitive)
+#   not_contains:   list of strings that MUST NOT appear (case-insensitive)
+#   min_chars:      minimum length of final text
+#   max_chars:      maximum length of final text
+
+agents:
+  scout:
+    - prompt: "In one sentence, what kind of tasks are you the right agent for? Do NOT run any tools — just answer in text."
+      assertions:
+        any_of: ["research", "intelligence", "web", "scout"]
+        not_contains: ["i cannot", "i can't", "refuse"]
+        min_chars: 20
+
+  forge:
+    - prompt: "In one sentence, what do you build? Do NOT run any tools — just answer in text."
+      assertions:
+        any_of: ["resume", "cover letter", "proposal", "document", "deliverable"]
+        min_chars: 20
+
+  wrench:
+    - prompt: "In one sentence, what do you specialize in? Do NOT run any tools — just answer in text."
+      assertions:
+        any_of: ["infrastructure", "devops", "health", "service", "troubleshoot"]
+        min_chars: 20
+
+  dispatch:
+    - prompt: "In one sentence, what do you send? Do NOT run any tools — just answer in text."
+      assertions:
+        any_of: ["email", "message", "follow-up", "communication", "send"]
+        min_chars: 20
+
+  ledger:
+    - prompt: "In one sentence, what kind of questions do you answer? Do NOT run any tools — just answer in text."
+      assertions:
+        any_of: ["budget", "financial", "data", "number", "spend", "bill"]
+        min_chars: 20
+
+  toolsmith:
+    - prompt: "In one sentence, what do you maintain? Do NOT run any tools — just answer in text."
+      assertions:
+        any_of: ["agent", "prompt", "performance", "memory", "learned"]
+        min_chars: 20
+
+  titan:
+    - prompt: "In one sentence, when should someone call you? Do NOT run any tools — just answer in text."
+      assertions:
+        any_of: ["hard", "complex", "swarm", "deep", "difficult", "extended"]
+        min_chars: 20
+
+  anvil:
+    # Anvil is terse by design ("ship code") — min_chars kept low.
+    - prompt: "In one sentence, what do you produce? Do NOT run any tools — just answer in text."
+      assertions:
+        any_of: ["code", "implement", "build", "refactor", "ship"]
+        min_chars: 8
+
+  critic:
+    - prompt: "In one sentence, what's your job? Do NOT run any tools — just answer in text."
+      assertions:
+        any_of: ["review", "adversarial", "second opinion", "critique", "second-opinion"]
+        min_chars: 20

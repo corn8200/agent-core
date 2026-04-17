@@ -328,10 +328,19 @@ async def _classify_with_opus(msg: InboundMessage) -> dict:
     context = await _build_context(msg)
     context_json = json.dumps(context, indent=2, default=str)
 
+    recall_block = ""
+    try:
+        from core.recall import get_context
+        recall_block = get_context(msg.text, kind="imessage")
+    except Exception:
+        recall_block = ""
+
     prompt = CLASSIFICATION_PROMPT.format(
         context_json=context_json,
         message=msg.text,
     )
+    if recall_block:
+        prompt = f"{recall_block}\n\n{prompt}"
 
     fallback = {**_FALLBACK_CLASSIFICATION, "prompt": msg.text}
 

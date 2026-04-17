@@ -253,9 +253,16 @@ async def diagnose_anomalies(anomalies: list[dict], data: dict, heal_context: st
 
     heal_section = f"\n\nAuto-remediation results:\n{heal_context}" if heal_context else ""
 
+    anomaly_query = ' '.join(a.get('message', '') for a in anomalies[:3]) or 'infrastructure anomaly'
+    try:
+        from core.recall import get_context
+        recall_block = get_context(anomaly_query, kind="handler")
+    except Exception:
+        recall_block = ""
+    recall_section = f"\n\n{recall_block}" if recall_block else ""
+
     try:
         from core.memory import search as memory_search
-        anomaly_query = ' '.join(a.get('message', '') for a in anomalies[:3])
         past_diagnoses = memory_search(anomaly_query, k=3, agent='handler', category='diagnosis')
         if past_diagnoses:
             history_text = '\n'.join(f"- [{d['timestamp'][:10]}] {d['content'][:200]}" for d in past_diagnoses)
@@ -269,7 +276,7 @@ async def diagnose_anomalies(anomalies: list[dict], data: dict, heal_context: st
     prompt = f"""You are a systems handler for John's infrastructure. Anomalies detected:
 
 {json.dumps(anomalies, indent=2)}
-{heal_section}{history_section}
+{heal_section}{recall_section}{history_section}
 
 Raw system data:
 {json.dumps(data, indent=2, default=str)[:8000]}

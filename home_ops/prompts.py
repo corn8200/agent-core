@@ -371,6 +371,34 @@ def _shrink_payload(payload: dict, limit: int = 24000) -> tuple[str, dict]:
     return blob, info
 
 
+def _build_recall_query(gather: dict) -> str:
+    """Build a concise recall query from today's signals.
+
+    Pulls: today's calendar titles + reminder titles + top mail subjects.
+    Kept short (~400 chars) so the embedding captures intent, not noise.
+    """
+    parts: list[str] = []
+    cal = gather.get("calendar_7d") or []
+    for ev in cal[:8]:
+        t = (ev.get("title") or ev.get("summary") or "").strip()
+        if t:
+            parts.append(t)
+    rem = gather.get("reminders") or {}
+    for bucket in ("overdue", "due_today", "due_this_week"):
+        items = rem.get(bucket) or []
+        for r in items[:5]:
+            t = (r.get("title") or r.get("name") or "").strip()
+            if t:
+                parts.append(t)
+    mails = gather.get("mail_7d") or []
+    for m in mails[:8]:
+        s = (m.get("subject") or "").strip()
+        if s:
+            parts.append(s)
+    q = " | ".join(parts)
+    return q[:400]
+
+
 def build_user_prompt(gather: dict, mode: str) -> tuple[str, dict]:
     """Build the user prompt. Returns (prompt, shrink_info).
 
@@ -407,7 +435,18 @@ def build_user_prompt(gather: dict, mode: str) -> tuple[str, dict]:
         "think 'what does today look like and what's first'."
     )
 
+    recall_block = ""
+    try:
+        from core.recall import get_context
+        rq = _build_recall_query(gather)
+        if rq:
+            recall_block = get_context(rq, kind="brief")
+    except Exception:
+        recall_block = ""
+    recall_section = f"{recall_block}\n\n" if recall_block else ""
+
     prompt = (
+        f"{recall_section}"
         f"{FEW_SHOT_EXAMPLES}\n\n"
         f"--- END EXAMPLES ---\n\n"
         f"{mode_hint}\n\n"

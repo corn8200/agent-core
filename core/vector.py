@@ -46,20 +46,41 @@ def _embed(client: OpenAI, text: str) -> list[float]:
     return resp.data[0].embedding
 
 
+_RERANKER = None
+
+
+def _get_reranker():
+    global _RERANKER
+    if _RERANKER is None:
+        from sentence_transformers import CrossEncoder
+
+        model = os.environ.get("RERANK_MODEL", "BAAI/bge-reranker-v2-m3")
+        _RERANKER = CrossEncoder(model, max_length=512, trust_remote_code=False)
+    return _RERANKER
+
+
 def search(
     query: str,
     source_types: Optional[list[str]] = None,
     limit: int = 10,
     min_similarity: float = 0.3,
+    rerank: bool = False,
+    rerank_pool: int = 40,
 ) -> list[dict]:
     """Semantic search across Apple data + emails indexed in pgvector.
 
     Returns [{source_type, source_id, content, metadata, similarity}, ...]
-    sorted by descending cosine similarity.
+    sorted by descending cosine similarity (or rerank_score if rerank=True).
+
+    When rerank=True: pgvector returns `rerank_pool` candidates (default 40),
+    BGE cross-encoder scores each (query, content) pair, top `limit` returned
+    sorted by rerank_score. First call loads ~568MB model into RAM.
     """
     client = _openai()
     qvec = _embed(client, query)
     qvec_s = "[" + ",".join(str(x) for x in qvec) + "]"
+
+    fetch_limit = max(rerank_pool, limit) if rerank else limit
 
     with _pg() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         where = ""
@@ -68,7 +89,7 @@ def search(
             where = "WHERE source_type = ANY(%s)"
             params.append(source_types)
         params.append(qvec_s)
-        params.append(limit)
+        params.append(fetch_limit)
         cur.execute(
             f"""
             SELECT source_type, source_id, chunk_idx, content, metadata,
@@ -82,7 +103,18 @@ def search(
         )
         rows = cur.fetchall()
 
-    return [dict(r) for r in rows if r["similarity"] >= min_similarity]
+    hits = [dict(r) for r in rows if r["similarity"] >= min_similarity]
+
+    if rerank and hits:
+        model = _get_reranker()
+        pairs = [(query, (h.get("content") or "")[:2000]) for h in hits]
+        scores = model.predict(pairs, batch_size=32, show_progress_bar=False)
+        for h, s in zip(hits, scores):
+            h["rerank_score"] = float(s)
+        hits.sort(key=lambda h: -h["rerank_score"])
+        hits = hits[:limit]
+
+    return hits
 
 
 def enqueue_index(

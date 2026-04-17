@@ -187,8 +187,18 @@ async def maybe_enqueue_thread(chat_identifier: str) -> str:
         return "too_short"
 
     last_msg_ts = filtered[-1].get("timestamp") or datetime.now(timezone.utc).isoformat()
+    # Bucket by ISO year-week so each thread accumulates one row per week
+    # instead of overwriting a single chat_identifier row on every enqueue.
+    try:
+        bucket_date = datetime.fromisoformat(last_msg_ts)
+    except Exception:
+        bucket_date = datetime.now()
+    iso_year, iso_week, _ = bucket_date.isocalendar()
+    source_id = f"{chat_identifier}::{iso_year}-W{iso_week:02d}"
     metadata = {
         "participants": [chat_identifier],
+        "chat_identifier": chat_identifier,
+        "iso_week": f"{iso_year}-W{iso_week:02d}",
         "last_msg_at": last_msg_ts,
         "msg_count": len(filtered),
         "synced_at": datetime.now(timezone.utc).isoformat(),
@@ -199,7 +209,7 @@ async def maybe_enqueue_thread(chat_identifier: str) -> str:
         q.enqueue(
             "tasks.vector.embed_and_index",
             "imessage_thread",
-            chat_identifier,
+            source_id,
             transcript,
             metadata,
             job_timeout=120,

@@ -105,6 +105,18 @@ def init_db() -> None:
             );
             CREATE UNIQUE INDEX IF NOT EXISTS idx_learned_facts_fact
                 ON learned_facts(LOWER(fact));
+
+            CREATE TABLE IF NOT EXISTS shrink_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                mode TEXT NOT NULL,
+                fired_at TEXT NOT NULL,
+                fired_date TEXT NOT NULL,
+                original_size INTEGER NOT NULL,
+                final_size INTEGER NOT NULL,
+                cleared INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_shrink_events_date
+                ON shrink_events(fired_date);
             """
         )
 
@@ -371,6 +383,31 @@ def get_learned_facts(category: str | None = None, limit: int = 100) -> list[dic
 def forget_fact(fact: str) -> None:
     with closing(_connect()) as conn, conn:
         conn.execute("DELETE FROM learned_facts WHERE LOWER(fact) = LOWER(?)", (fact,))
+
+
+def log_shrink_event(
+    mode: str, original_size: int, final_size: int, cleared: bool
+) -> None:
+    now = _now()
+    today = datetime.now().date().isoformat()
+    with closing(_connect()) as conn, conn:
+        conn.execute(
+            "INSERT INTO shrink_events "
+            "(mode, fired_at, fired_date, original_size, final_size, cleared) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (mode, now, today, original_size, final_size, 1 if cleared else 0),
+        )
+
+
+def shrink_fired_yesterday() -> bool:
+    """True if any shrink event exists for yesterday's date."""
+    from datetime import timedelta
+    y = (datetime.now().date() - timedelta(days=1)).isoformat()
+    with closing(_connect()) as conn:
+        row = conn.execute(
+            "SELECT 1 FROM shrink_events WHERE fired_date = ? LIMIT 1", (y,)
+        ).fetchone()
+        return row is not None
 
 
 if __name__ == "__main__":

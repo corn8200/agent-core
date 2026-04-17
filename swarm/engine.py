@@ -45,7 +45,7 @@ for _leak_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_U
                   "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"):
     os.environ.pop(_leak_var, None)
 
-from claude_agent_sdk import query, ClaudeAgentOptions
+from core.mac_sdk import query, ClaudeAgentOptions
 
 from core.agents import ALL_AGENTS
 from core.tools import create_core_server, SwarmContext, set_active_context

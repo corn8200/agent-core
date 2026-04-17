@@ -296,10 +296,30 @@ def _build_day_labels() -> str:
     return "\n".join(lines)
 
 
-def _shrink_payload(payload: dict, limit: int = 24000) -> str:
+def _shrink_payload(payload: dict, limit: int = 24000) -> tuple[str, dict]:
+    """Shrink payload to fit within limit. Returns (blob, info).
+
+    info: {
+      "fired": bool — True if any shrink step ran
+      "cleared": bool — True if final fallback (clearing imessages+mail) was used
+      "original_size": int — blob size before shrink
+      "final_size": int — blob size after shrink
+      "limit": int — threshold that triggered shrinking
+    }
+    """
     blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+    original_size = len(blob)
+    info = {
+        "fired": False,
+        "cleared": False,
+        "original_size": original_size,
+        "final_size": original_size,
+        "limit": limit,
+    }
     if len(blob) <= limit:
-        return blob
+        return blob, info
+
+    info["fired"] = True
 
     w = payload.get("weather")
     if isinstance(w, dict) and isinstance(w.get("hours"), list) and len(w["hours"]) > 12:
@@ -345,11 +365,18 @@ def _shrink_payload(payload: dict, limit: int = 24000) -> str:
         payload["imessages_7d"] = []
         payload["mail_7d"] = []
         blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+        info["cleared"] = True
 
-    return blob
+    info["final_size"] = len(blob)
+    return blob, info
 
 
-def build_user_prompt(gather: dict, mode: str) -> str:
+def build_user_prompt(gather: dict, mode: str) -> tuple[str, dict]:
+    """Build the user prompt. Returns (prompt, shrink_info).
+
+    shrink_info is the dict returned from _shrink_payload — callers that
+    don't care can just unpack and ignore the second element.
+    """
     mode = (mode or "").lower().strip()
     if mode not in {"evening", "morning"}:
         mode = "evening"
@@ -369,7 +396,7 @@ def build_user_prompt(gather: dict, mode: str) -> str:
         "learned_facts": gather.get("learned_facts") or [],
     }
 
-    blob = _shrink_payload(payload, limit=24000)
+    blob, shrink_info = _shrink_payload(payload, limit=24000)
     day_labels = _build_day_labels()
 
     mode_hint = (
@@ -380,7 +407,7 @@ def build_user_prompt(gather: dict, mode: str) -> str:
         "think 'what does today look like and what's first'."
     )
 
-    return (
+    prompt = (
         f"{FEW_SHOT_EXAMPLES}\n\n"
         f"--- END EXAMPLES ---\n\n"
         f"{mode_hint}\n\n"
@@ -389,3 +416,4 @@ def build_user_prompt(gather: dict, mode: str) -> str:
         f"{blob}\n\n"
         f"Write the {mode} brief now. Plain text only. No preamble. No signoff."
     )
+    return prompt, shrink_info

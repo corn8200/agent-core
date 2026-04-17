@@ -96,7 +96,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 async def synthesize(data: dict) -> str:
     """Use SDK to write the brief from gathered data."""
-    from claude_agent_sdk import query, ClaudeAgentOptions
+    from core.mac_sdk import query, ClaudeAgentOptions
     from core.hooks import AGENT_HOOKS
     from core.thinking import HEAVY
 
@@ -183,71 +183,9 @@ def deliver_email(html: str) -> bool:
 
 
 async def deliver_tts(brief_text: str) -> bool:
-    """Convert brief to speech (via brief-deliver.py) and deliver the audio link
-    via iMessage using the tmux relay (send_imessage_reliable).
-
-    brief-deliver.py is called with --no-imessage because its bare osascript
-    iMessage path hangs when invoked from launchd context (Messages.app GUI
-    session unreachable). We do the iMessage send here instead, using the
-    tmux relay which works from any context.
-    """
-    BRIEF_TEXT_PATH.write_text(brief_text)
-    deliver_script = HOME / "claude-config" / "scripts" / "brief-deliver.py"
-    audio_ok = False
-
-    if deliver_script.exists():
-        try:
-            result = subprocess.run(
-                [
-                    str(HOME / "Projects" / "agent-core" / ".venv" / "bin" / "python3"),
-                    str(deliver_script),
-                    str(BRIEF_TEXT_PATH),
-                    "--no-imessage",
-                ],
-                capture_output=True, text=True, timeout=120,
-            )
-            audio_ok = result.returncode == 0
-            if not audio_ok:
-                print(f"brief-deliver.py failed: {result.stderr[:400]}", file=sys.stderr)
-        except subprocess.TimeoutExpired:
-            print("brief-deliver.py timed out at 120s", file=sys.stderr)
-            audio_ok = Path("/tmp/brief-audio.m4a").exists()
-    else:
-        # Fallback: macOS say (no iMessage delivery in this branch)
-        try:
-            subprocess.run(["say", "-v", "Alex", "-f", str(BRIEF_TEXT_PATH)], timeout=120)
-            return True
-        except Exception:
-            return False
-
-    # Upload audio to R2 and deliver HTTPS link via iMessage
-    if audio_ok:
-        audio_path = Path("/tmp/brief-audio.m4a")
-        r2_url = None
-        try:
-            upload = subprocess.run(
-                ["wrangler", "r2", "object", "put", "audio-share/brief.m4a",
-                 "--file", str(audio_path), "--content-type", "audio/mp4", "--remote"],
-                capture_output=True, text=True, timeout=60,
-            )
-            if upload.returncode == 0:
-                r2_url = "https://pub-a5fc31bf3f0b42c69a2565c407a447cd.r2.dev/brief.m4a"
-            else:
-                print(f"R2 upload failed: {upload.stderr[:200]}", file=sys.stderr)
-        except Exception as e:
-            print(f"R2 upload error: {e}", file=sys.stderr)
-
-        if r2_url:
-            try:
-                from core.tools import send_imessage_reliable
-                first_line = brief_text.split("\n", 1)[0][:180]
-                msg = f"Morning Brief: {r2_url}\n\n{first_line}"
-                await send_imessage_reliable(PERSONAL_EMAIL, msg)
-            except Exception as e:
-                print(f"iMessage delivery failed: {e}", file=sys.stderr)
-        else:
-            print("R2 upload failed -- skipping iMessage audio delivery", file=sys.stderr)
-    return audio_ok
+    """Thin wrapper over core.tts_delivery.deliver_brief_tts."""
+    from core.tts_delivery import deliver_brief_tts
+    return await deliver_brief_tts(brief_text, msg_prefix="Morning Brief")
 
 
 async def main():

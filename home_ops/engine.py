@@ -54,77 +54,46 @@ BRIEF_TEXT_PATH = Path("/tmp/home-ops-brief.txt")
 
 
 async def deliver_tts(brief_text: str) -> bool:
-    """Generate audio brief, upload to R2, deliver URL via iMessage.
-
-    Ported from briefs/morning_brief.py when the two daily briefs were
-    consolidated (2026-04-15). brief-deliver.py runs with --no-imessage
-    because its bare osascript path hangs under launchd; we send via
-    the tmux relay here instead.
-    """
-    import subprocess
-    from core.constants import PERSONAL_EMAIL
-
-    BRIEF_TEXT_PATH.write_text(brief_text)
-    deliver_script = HOME / "claude-config" / "scripts" / "brief-deliver.py"
-    if not deliver_script.exists():
-        return False
-
-    try:
-        result = subprocess.run(
-            [
-                str(HOME / "Projects" / "agent-core" / ".venv" / "bin" / "python3"),
-                str(deliver_script),
-                str(BRIEF_TEXT_PATH),
-                "--no-imessage",
-            ],
-            capture_output=True, text=True, timeout=120,
-        )
-        audio_ok = result.returncode == 0
-        if not audio_ok:
-            print(f"brief-deliver.py failed: {result.stderr[:400]}", file=sys.stderr)
-    except subprocess.TimeoutExpired:
-        print("brief-deliver.py timed out at 120s", file=sys.stderr)
-        audio_ok = Path("/tmp/brief-audio.m4a").exists()
-
-    if not audio_ok:
-        return False
-
-    audio_path = Path("/tmp/brief-audio.m4a")
-    r2_url = None
-    try:
-        upload = subprocess.run(
-            ["wrangler", "r2", "object", "put", "audio-share/brief.m4a",
-             "--file", str(audio_path), "--content-type", "audio/mp4", "--remote"],
-            capture_output=True, text=True, timeout=60,
-        )
-        if upload.returncode == 0:
-            r2_url = "https://pub-a5fc31bf3f0b42c69a2565c407a447cd.r2.dev/brief.m4a"
-        else:
-            print(f"R2 upload failed: {upload.stderr[:200]}", file=sys.stderr)
-    except Exception as e:
-        print(f"R2 upload error: {e}", file=sys.stderr)
-
-    if r2_url:
-        try:
-            from core.tools import send_imessage_reliable
-            first_line = brief_text.split("\n", 1)[0][:180]
-            msg = f"Morning Brief: {r2_url}\n\n{first_line}"
-            await send_imessage_reliable(PERSONAL_EMAIL, msg)
-        except Exception as e:
-            print(f"iMessage delivery failed: {e}", file=sys.stderr)
-    else:
-        print("R2 upload failed -- skipping iMessage audio delivery", file=sys.stderr)
-    return True
+    """Thin wrapper over core.tts_delivery.deliver_brief_tts."""
+    from core.tts_delivery import deliver_brief_tts
+    return await deliver_brief_tts(brief_text, msg_prefix="Morning Brief")
 
 
-async def synthesize(gather: dict, mode: str) -> str:
-    """Single-pass Opus call. Returns plain-text brief."""
-    from claude_agent_sdk import query, ClaudeAgentOptions
+async def _pushover_shrink_alert(
+    mode: str, orig: int, final: int, lim: int, cleared: bool
+) -> None:
+    """Fire P0 Pushover when shrink fires 2 days in a row. HARD RULE: P0 only."""
+    import asyncio as _asyncio
+    from core.constants import PUSHOVER_USER, PUSHOVER_TOKEN
+
+    title = f"home-ops shrink 2 days in a row ({mode})"
+    msg = (
+        f"Shrink fired today AND yesterday. Today: {orig}→{final}B "
+        f"(limit {lim}). Cleared={cleared}. Payload growing; investigate "
+        f"home_ops/prompts.py _shrink_payload reason."
+    )
+    proc = await _asyncio.create_subprocess_exec(
+        "curl", "-s", "-o", "/dev/null", "--max-time", "10",
+        "-F", f"token={PUSHOVER_TOKEN}",
+        "-F", f"user={PUSHOVER_USER}",
+        "-F", f"title={title}",
+        "-F", f"message={msg}",
+        "-F", "priority=0",
+        "https://api.pushover.net/1/messages.json",
+        stdout=_asyncio.subprocess.PIPE,
+        stderr=_asyncio.subprocess.PIPE,
+    )
+    await _asyncio.wait_for(proc.communicate(), timeout=12)
+
+
+async def synthesize(gather: dict, mode: str) -> tuple[str, dict]:
+    """Single-pass Opus call. Returns (brief_text, shrink_info)."""
+    from core.mac_sdk import query, ClaudeAgentOptions
     from core.hooks import AGENT_HOOKS
     from core.thinking import HEAVY
 
     system_prompt = prompts_mod.SYSTEM_PROMPT
-    user_prompt = prompts_mod.build_user_prompt(gather, mode)
+    user_prompt, shrink_info = prompts_mod.build_user_prompt(gather, mode)
 
     brief_text = ""
     try:
@@ -167,7 +136,7 @@ async def synthesize(gather: dict, mode: str) -> str:
                 f"(last_line={last_line!r})",
                 file=sys.stderr,
             )
-    return brief_text
+    return brief_text, shrink_info
 
 
 _DAY_START_RE = re.compile(
@@ -261,10 +230,41 @@ async def run(mode: str, dry_run: bool = False, gather_only: bool = False,
 
     # Stage 2: synthesize
     print(f"[{datetime.now():%H:%M:%S}] synthesizing brief (opus, HEAVY)...")
-    brief_text = await synthesize(data, mode)
+    brief_text, shrink_info = await synthesize(data, mode)
     if not brief_text:
         print("FAIL: synthesizer returned empty", file=sys.stderr)
         return 1
+
+    # Stage 2b: shrink visibility — if the payload shrinker fired, prepend a
+    # marker to the brief body (so I can see it in email/iMessage) AND log to
+    # state.py. If shrink also fired yesterday → Pushover P0 (S2.5, 2026-04-17).
+    if shrink_info.get("fired"):
+        orig = shrink_info["original_size"]
+        final = shrink_info["final_size"]
+        lim = shrink_info["limit"]
+        cleared = shrink_info.get("cleared", False)
+        cleared_note = " [imessages+mail CLEARED]" if cleared else ""
+        marker = (
+            f"⚠ SHRINK FIRED: payload {orig}→{final}B "
+            f"(limit {lim}){cleared_note}\n\n"
+        )
+        brief_text = marker + brief_text
+        print(
+            f"[{datetime.now():%H:%M:%S}] shrink fired: "
+            f"{orig}→{final} bytes (limit {lim}, cleared={cleared})",
+            file=sys.stderr,
+        )
+        try:
+            state_mod.log_shrink_event(mode, orig, final, cleared)
+        except Exception as e:
+            print(f"shrink log error: {e}", file=sys.stderr)
+
+        if state_mod.shrink_fired_yesterday():
+            try:
+                await _pushover_shrink_alert(mode, orig, final, lim, cleared)
+            except Exception as e:
+                print(f"pushover shrink alert error: {e}", file=sys.stderr)
+
     BRIEF_TEXT_PATH.write_text(brief_text)
     print(f"[{datetime.now():%H:%M:%S}] brief: {len(brief_text)} chars → {BRIEF_TEXT_PATH}")
 

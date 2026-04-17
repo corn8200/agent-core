@@ -247,7 +247,7 @@ async def send_alert_email(anomalies: list[dict], data: dict):
 
 async def diagnose_anomalies(anomalies: list[dict], data: dict, heal_context: str = "") -> str:
     """Use SDK to diagnose anomalies and suggest fixes."""
-    from claude_agent_sdk import query, ClaudeAgentOptions
+    from core.mac_sdk import query, ClaudeAgentOptions
     from core.hooks import AGENT_HOOKS
     from core.thinking import STANDARD
 
@@ -442,7 +442,7 @@ async def quick_check(dry_run: bool = False):
 
 async def full_handler():
     """Full handler briefing (every 4 hrs). SDK-powered."""
-    from claude_agent_sdk import query, ClaudeAgentOptions
+    from core.mac_sdk import query, ClaudeAgentOptions
     from core.tools import create_core_server
     from core.hooks import AGENT_HOOKS
     from core.thinking import HEAVY

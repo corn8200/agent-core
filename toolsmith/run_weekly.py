@@ -40,7 +40,7 @@ Rules:
 
 async def run():
     try:
-        from claude_agent_sdk import query, ClaudeAgentOptions
+        from core.mac_sdk import query, ClaudeAgentOptions
     except ImportError as e:
         msg = f"[Toolsmith] Import failed: {e}"
         print(msg, file=sys.stderr)
@@ -90,6 +90,7 @@ Review these results and give me the weekly Toolsmith report."""
                 model="opus",
                 permission_mode="bypassPermissions",
                 max_turns=3,
+                max_budget_usd=0.20,
                 cwd=str(HOME),
                 hooks=AGENT_HOOKS,
                 thinking=STANDARD,

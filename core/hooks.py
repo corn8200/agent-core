@@ -15,12 +15,13 @@ They MUST:
 import json
 import os
 import re
+import sys
 from datetime import datetime, timezone
 from typing import Any
 
-from claude_agent_sdk import HookMatcher
+from claude_agent_sdk import HookMatcher  # allow-direct-sdk: type symbol only
 
-AUDIT_LOG = os.path.expanduser("~/logs/agent-audit.jsonl")
+AUDIT_LOG = os.environ.get("AGENT_AUDIT_LOG") or os.path.expanduser("~/logs/agent-audit.jsonl")
 
 # --- Destructive command patterns ---
 DESTRUCTIVE_PATTERNS = [
@@ -50,13 +51,22 @@ def _safe_get(obj: Any, key: str, default: Any = "") -> Any:
 
 
 def _write_audit(entry: dict):
-    """Append a JSON entry to the audit log. Never raises."""
+    """Append a JSON entry to the audit log. Never raises, but prints to stderr on failure."""
     try:
         os.makedirs(os.path.dirname(AUDIT_LOG), exist_ok=True)
         with open(AUDIT_LOG, "a") as f:
             f.write(json.dumps(entry, default=str) + "\n")
-    except Exception:
-        pass  # Audit failure must never crash the stream
+    except Exception as e:
+        print(f"[audit] write failed to {AUDIT_LOG}: {e}", file=sys.stderr)
+
+
+def audit_write(entry: dict) -> None:
+    """Public helper for writing to the agent audit log.
+
+    Used by audit heartbeat and any code that wants to log a structured event
+    without going through a full tool_use hook. Never raises.
+    """
+    _write_audit(entry)
 
 
 async def audit_hook(input: Any, tool_use_id: str | None, context: Any) -> dict:

@@ -27,7 +27,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.vault import hydrate_env  # noqa: E402
 hydrate_env()
 
-from claude_agent_sdk import query, ClaudeAgentOptions
+from core.mac_sdk import query, ClaudeAgentOptions
 from core.hooks import AGENT_HOOKS
 from core.thinking import HEAVY
 

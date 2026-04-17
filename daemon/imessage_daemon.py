@@ -16,6 +16,13 @@ from pathlib import Path
 # Force unbuffered stdout for launchd log capture
 os.environ["PYTHONUNBUFFERED"] = "1"
 
+# Billing guard: Max subscription routing requires these to be absent before any
+# Anthropic SDK import. router-v2 attachment vision (Sonnet) and clarifying
+# dispatch both spawn SDK clients from this process. Without scrub the SDK
+# silently falls back to pay-as-you-go.
+for _k in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN"):
+    os.environ.pop(_k, None)
+
 # Ensure agent-core is on path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

@@ -216,6 +216,10 @@ def get_secret(key: str, *, vault: str = "MachineAuto") -> str | None:
     if val:
         _cache[key] = val
         return val
+    val = _load_machine_cache().get(key)
+    if val:
+        _cache[key] = val
+        return val
     val = _op_read(key, vault=vault)
     if val:
         _cache[key] = val
@@ -238,13 +242,18 @@ def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAuto") ->
     result: dict[str, bool] = {}
 
     token = _service_account_token()
-    if not token or not keys:
+    launchd = _is_launchd_context()
+    # In launchd context, NEVER invoke op — it will hang on a TCC prompt.
+    # Fall through to machine cache + legacy file, which together cover every
+    # key any LaunchAgent needs.
+    if not token or not keys or launchd:
+        machine_cache = _load_machine_cache()
         legacy = _load_legacy()
         for k in keys:
             if k in os.environ:
                 result[k] = True
                 continue
-            v = legacy.get(k)
+            v = machine_cache.get(k) or legacy.get(k)
             if v:
                 os.environ[k] = v
                 _cache[k] = v
@@ -277,11 +286,12 @@ def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAuto") ->
                     result[k] = True
                 else:
                     result[k] = False
+            machine_cache = _load_machine_cache()
             legacy = _load_legacy()
             for k in keys:
                 if result.get(k):
                     continue
-                v = legacy.get(k)
+                v = machine_cache.get(k) or legacy.get(k)
                 if v and k not in os.environ:
                     os.environ[k] = v
                     _cache[k] = v
@@ -292,12 +302,13 @@ def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAuto") ->
     except Exception:
         pass
 
+    machine_cache = _load_machine_cache()
     legacy = _load_legacy()
     for k in keys:
         if k in os.environ:
             result[k] = True
             continue
-        v = _op_read(k, vault=vault) or legacy.get(k)
+        v = machine_cache.get(k) or _op_read(k, vault=vault) or legacy.get(k)
         if v:
             os.environ[k] = v
             _cache[k] = v

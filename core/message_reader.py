@@ -15,6 +15,10 @@ from typing import Awaitable, Callable
 from core.message_db import log_inbound
 from core.tools import tmux_relay_shell
 
+# Deferred import to avoid circular: message_vector imports get_recent_messages
+# from this module. Only needed in poll_loop, not at module import time.
+_maybe_enqueue_thread = None
+
 
 # Leading-garbage-tolerant match for bus attribution: "[AgentName]".
 # The attributedBody hex extractor sometimes pastes a junk char before the
@@ -254,6 +258,19 @@ class MessageReader:
                             await callback(msg)
                         except Exception as e:
                             print(f"[reader] Subscriber error: {e}")
+
+                    # Enqueue thread for semantic indexing (debounced, per-thread).
+                    # Additive — never affect routing if the enqueue fails.
+                    try:
+                        global _maybe_enqueue_thread
+                        if _maybe_enqueue_thread is None:
+                            from core.message_vector import maybe_enqueue_thread as _m
+                            _maybe_enqueue_thread = _m
+                        status = await _maybe_enqueue_thread(msg.chat_identifier)
+                        if status == "enqueued":
+                            print(f"[reader] vector: enqueued thread {msg.chat_identifier}")
+                    except Exception as e:
+                        print(f"[reader] vector enqueue error: {e}")
 
                     # Save after processing each message
                     self._save_rowid(msg.rowid)

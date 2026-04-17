@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import asyncio
+import os
 import sqlite3
 import sys
 from datetime import datetime, timedelta
@@ -108,6 +109,30 @@ def log_nudge(event_uid: str, summary: str, start: str, tier: str, message: str)
 def _should_skip(event) -> bool:
     """Skip all-day events and non-schedulable calendars."""
     return event.all_day or event.calendar in SKIP_CALENDARS
+
+
+def _nudge_recall(event_title: str) -> str:
+    """Return a one-line prior-context hint for an event, or "".
+
+    Gated behind NUDGE_RECALL=1 — nudges are short alerts, so we only append
+    the most-relevant single hit, trimmed to ~120 chars. Default OFF until
+    we've validated the signal-to-noise in the wild.
+    """
+    if os.environ.get("NUDGE_RECALL") != "1":
+        return ""
+    if not event_title:
+        return ""
+    try:
+        from core.recall import raw_search
+        hits = raw_search(event_title, kind="nudge", limit=1)
+    except Exception:
+        return ""
+    if not hits:
+        return ""
+    content = (hits[0].get("content") or "").strip().replace("\n", " ")
+    if not content:
+        return ""
+    return f"Prior: {content[:120]}"
 
 
 async def _send_nudge(message: str, dry_run: bool = False):
@@ -217,6 +242,9 @@ async def run_nudges(dry_run: bool = False):
                 msg = f"Meeting in {int(minutes_away)} min: {event.summary} ({event.start.strftime('%-I:%M %p')})"
                 if event.location:
                     msg += f"\nLocation: {event.location}"
+                hint = _nudge_recall(event.summary)
+                if hint:
+                    msg += f"\n{hint}"
                 print(f"[nudge] fifteen_min: {msg[:100]}")
                 await _send_nudge(msg, dry_run)
                 log_nudge(uid, event.summary, event.start.isoformat(), "fifteen_min", msg)
@@ -231,6 +259,9 @@ async def run_nudges(dry_run: bool = False):
                         msg += f"\n{event.location}"
                     if event.notes:
                         msg += f"\nNotes: {event.notes[:200]}"
+                    hint = _nudge_recall(event.summary)
+                    if hint:
+                        msg += f"\n{hint}"
                     print(f"[nudge] five_min: {msg[:100]}")
                     await _send_nudge(msg, dry_run)
                     log_nudge(uid, event.summary, event.start.isoformat(), "five_min", msg)

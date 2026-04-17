@@ -546,11 +546,93 @@ async def create_calendar_event(args: dict[str, Any]) -> dict:
         return {"content": [{"type": "text", "text": f"create_calendar_event error: {e}"}]}
 
 
+# --- Apple Reminders ---
+# John's 6 owned lists (see CLAUDE.md "Apple Reminders — Canonical Lists").
+# J&A Reminders and Store are SHARED with wife — NEVER write to them.
+REMINDER_LISTS = {"Home", "Health", "Work", "Sentry AI", "Claude", "Someday"}
+REMINDER_LIST_GUIDE = (
+    "Home=personal/domestic/family/chores; "
+    "Health=medical only (appts, shots, Rx); "
+    "Work=day job (TAMKO); "
+    "Sentry AI=business/federal/tax/SAM.gov/client work; "
+    "Claude=tech action items Claude creates for manual execution (Touch ID etc); "
+    "Someday=no-date aspirational backlog"
+)
+
+
+@tool(
+    "add_reminder",
+    "Add an Apple Reminder to one of John's owned lists. "
+    f"list MUST be one of: Home, Health, Work, Sentry AI, Claude, Someday. {REMINDER_LIST_GUIDE}. "
+    "due is ISO 8601 (e.g. 2026-04-18T09:00:00) — if omitted, defaults to tomorrow 9am "
+    "so the item surfaces in Apple's built-in Today smart view. "
+    "NEVER use list 'J&A Reminders' or 'Store' (shared with wife).",
+    {"name": str, "list": str, "body": str, "due": str},
+)
+async def add_reminder(args: dict[str, Any]) -> dict:
+    try:
+        from datetime import datetime, timedelta
+
+        name = (args.get("name") or "").strip()
+        list_name = (args.get("list") or "").strip()
+        body = args.get("body") or ""
+        due = (args.get("due") or "").strip()
+
+        if not name:
+            return {"content": [{"type": "text", "text": "add_reminder error: name is required"}]}
+        if list_name not in REMINDER_LISTS:
+            return {"content": [{"type": "text", "text": (
+                f"add_reminder error: list must be one of {sorted(REMINDER_LISTS)} — got '{list_name}'. "
+                f"NEVER write to 'J&A Reminders' or 'Store' (shared w/ wife). Domain guide: {REMINDER_LIST_GUIDE}"
+            )}]}
+
+        if due:
+            try:
+                due_dt = datetime.fromisoformat(due)
+            except ValueError:
+                return {"content": [{"type": "text", "text": (
+                    f"add_reminder error: due must be ISO 8601 (e.g. 2026-04-18T09:00:00), got '{due}'"
+                )}]}
+        else:
+            tomorrow_9am = datetime.now().replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
+            due_dt = tomorrow_9am
+
+        due_applescript = due_dt.strftime('%B %d, %Y %I:%M:%S %p')
+
+        def _esc(s: str) -> str:
+            return s.replace('\\', '\\\\').replace('"', '\\"')
+
+        props = f'name:"{_esc(name)}", due date:date "{due_applescript}"'
+        if body:
+            props += f', body:"{_esc(body)}"'
+
+        script = (
+            f'tell application "Reminders"\n'
+            f'  tell list "{_esc(list_name)}"\n'
+            f'    make new reminder with properties {{{props}}}\n'
+            f'  end tell\n'
+            f'end tell\n'
+        )
+
+        proc = await asyncio.create_subprocess_exec(
+            "osascript", "-e", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=10.0)
+        if proc.returncode != 0:
+            return {"content": [{"type": "text", "text": f"add_reminder failed: {stderr.decode().strip()}"}]}
+        due_display = due_dt.strftime('%a %b %d at %I:%M %p').replace(' 0', ' ')
+        return {"content": [{"type": "text", "text": f"Reminder added → {list_name}: '{name}' (due {due_display})"}]}
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"add_reminder error: {e}"}]}
+
+
 def create_core_server():
     """Create the in-process MCP server with all core tools + swarm context."""
     return create_sdk_mcp_server(
         name="core-tools",
-        version="1.2.0",
+        version="1.3.0",
         tools=[
             ssh_command,
             send_imessage,
@@ -562,6 +644,7 @@ def create_core_server():
             get_week_view_tool,
             check_calendar,
             create_calendar_event,
+            add_reminder,
             swarm_context_write,
             swarm_context_read,
             swarm_context_list,

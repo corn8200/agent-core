@@ -306,7 +306,7 @@ async def run(mode: str, dry_run: bool = False, gather_only: bool = False,
     # Auto-resolve loose ends not seen in 30 days
     state_mod.mark_stale_loose_ends(days=30)
 
-    # Morning brief only: spoken audio via iMessage (ported from old morning-brief)
+    # Morning brief only: spoken audio via iMessage
     if audio and mode == "morning":
         print(f"[{datetime.now():%H:%M:%S}] TTS delivery...")
         tts_ok = await deliver_tts(brief_text)

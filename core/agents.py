@@ -61,9 +61,9 @@ wrench = AgentDefinition(
 )
 
 dispatch = AgentDefinition(
-    description="Communications & sending specialist — email drafting, follow-ups, contact coordination via sentry-mailqueue (business) and SMTP (personal). Uses Bash + Read/Write to compose and ship messages, plus Mail.app via osascript for inbox checks. Pick when the deliverable is a sent message, not research. No web search, no Edit — composes from given facts. 10-turn budget, opus.",
+    description="Communications & sending specialist — email drafting, follow-ups, contact coordination via sentry-mailqueue (business) and SMTP (personal). Uses Bash + Read/Write to compose and ship messages, plus Mail.app via osascript for inbox checks. Pick when the deliverable is a sent message, not research. No web search, no Edit — composes from given facts. 10-turn budget, sonnet.",
     prompt=_load_prompt("dispatch"),
-    model="opus",
+    model="sonnet",
     tools=["Bash", "Read", "Write"],
     maxTurns=10,
     permissionMode="bypassPermissions",
@@ -83,9 +83,9 @@ ledger = AgentDefinition(
 )
 
 toolsmith = AgentDefinition(
-    description="Meta-agent for reviewing agent performance logs and pruning memory — reads agent_performance.json, groups failures by pattern, proposes surgical prompt improvements for recurring issues, audits learned/*.md entries. Uses Read/Write/Edit/Grep/Glob only — no Bash, no web, no shell side effects. Pick when fixing recurring agent failures or curating learning files. 15-turn budget, opus, surgical scope.",
+    description="Meta-agent for reviewing agent performance logs and pruning memory — reads agent_performance.json, groups failures by pattern, proposes surgical prompt improvements for recurring issues, audits learned/*.md entries. Uses Read/Write/Edit/Grep/Glob only — no Bash, no web, no shell side effects. Pick when fixing recurring agent failures or curating learning files. 15-turn budget, sonnet, surgical scope.",
     prompt=_load_prompt("toolsmith"),
-    model="opus",
+    model="sonnet",
     tools=["Read", "Write", "Edit", "Grep", "Glob"],
     maxTurns=15,
     permissionMode="bypassPermissions",
@@ -126,6 +126,17 @@ critic = AgentDefinition(
     memory="project",
 )
 
+herald = AgentDefinition(
+    description="Brand & deliverable QC — reads brand-kit (3 tiers: Professional/Family/Sentry AI Thermal), enforces John's taste + industry-standard quality rules on resumes, proposals, decks, client reports, websites, emails, and any other artifact. Runs mechanical QC (page count, fill ratio, section-across-page splits, ATS text extraction via pdftotext, brand-token drift) and auto-fixes mechanical violations by editing content (compress/expand bullets, restructure sections, adjust page breaks). Blocks + reports on subjective violations: images in ATS resumes, wrong tier tokens, fancy fonts where plain is required, brand voice drift, factual errors (UEI/CAGE/phone). Uses Read/Write/Edit/Bash/Grep/Glob. Pick for any pre-delivery review or brand-consistency check. 25-turn budget, opus, max effort.",
+    prompt=_load_prompt("herald"),
+    model="opus",
+    tools=["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
+    maxTurns=25,
+    permissionMode="bypassPermissions",
+    effort="max",
+    memory="project",
+)
+
 # Convenience dict for lookups by name
 ALL_AGENTS = {
     "scout": scout,
@@ -137,4 +148,27 @@ ALL_AGENTS = {
     "titan": titan,
     "anvil": anvil,
     "critic": critic,
+    "herald": herald,
 }
+
+
+def prepend_recall(agent_name: str, task: str) -> str:
+    """Return task prompt with pgvector-recall block prepended.
+
+    Direct-invocation callers that build their own SDK ClaudeAgentOptions
+    should wrap their task prompt with this helper. Matches the injection
+    pattern used by `swarm/engine.py::_run_agent` so behavior stays uniform.
+
+    Uses `kind="agent"` with the agent name for AGENT_OVERRIDES (Titan/Critic
+    get rerank=True, limit=10). Never raises — falls back to the raw task
+    on any recall failure.
+    """
+    if not task or not task.strip():
+        return task
+    try:
+        from core.recall import get_context
+        cap = agent_name.capitalize() if agent_name else None
+        block = get_context(task, kind="agent", agent_name=cap)
+    except Exception:
+        block = ""
+    return f"{block}\n\n{task}" if block else task

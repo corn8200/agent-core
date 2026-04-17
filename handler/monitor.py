@@ -26,8 +26,9 @@ _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'core'))
 import agent_cp_client as cp  # noqa: E402
 CP_AGENT = 'handler-agent'
 
-# ⚠️ Scrub API billing vars before importing claude_agent_sdk. See morning_brief.py
-# for full rationale. Prevents silent pay-as-you-go billing when Max is intended.
+# ⚠️ Scrub API billing vars before importing claude_agent_sdk. See
+# ~/Projects/anthropic-update-watcher/watcher.py:182-183 for rationale.
+# Prevents silent pay-as-you-go billing when Max is intended.
 for _leak_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
                   "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"):
     os.environ.pop(_leak_var, None)

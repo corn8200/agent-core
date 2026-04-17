@@ -40,7 +40,8 @@ from pathlib import Path
 from typing import Optional
 
 # ⚠️ Scrub API billing vars before importing claude_agent_sdk. See
-# briefs/morning_brief.py for full rationale (ralph leak 2026-04-12).
+# ~/Projects/anthropic-update-watcher/watcher.py:182-183 for rationale
+# (ralph leak 2026-04-12).
 for _leak_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
                   "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"):
     os.environ.pop(_leak_var, None)

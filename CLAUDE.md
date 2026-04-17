@@ -14,7 +14,7 @@ core/
   tools.py          — 12 MCP tools: SSH, iMessage, email, osascript, Pushover, calendar (4), swarm context (3)
   hooks.py          — guard_hook (blocks destructive cmds) + audit_hook (logs to ~/logs/agent-audit.jsonl)
   thinking.py       — Extended thinking presets: HEAVY / STANDARD / LIGHT / ADAPTIVE / OFF
-  agents.py         — 9 AgentDefinitions: Scout, Forge, Wrench, Dispatch, Ledger, Toolsmith, Titan, Anvil, Critic
+  agents.py         — 10 AgentDefinitions: Scout, Forge, Wrench, Dispatch, Ledger, Toolsmith, Titan, Anvil, Critic, Herald
   agent_cp_client.py — Control plane telemetry (events, kill switches). Silent-fail. Reads APPLE_BRIDGE_TOKEN from env or secrets.env.legacy.
   vault.py          — 1Password MachineAuto loader: hydrate_env(), get_secret(). Billing guard excludes ANTHROPIC_* keys.
   sdk_guard.py      — Structural rate-limit guard. Auto-patches query() via sitecustomize.py.
@@ -31,8 +31,6 @@ home_ops/
   engine.py         — Consolidated daily brief (6:30 AM + 8 PM). Gather→synthesize(opus)→email+TTS+iMessage audio
   gather.py         — Parallel data gathering incl gather_schedule() (30-min cache at /tmp/claude-gather.json)
   prompts.py        — Brief system prompts (weather, sleep, business, calendar, infra, reminders)
-briefs/
-  morning_brief.py  — LEGACY (LaunchAgent disabled 2026-04-15, replaced by home_ops)
 handler/
   monitor.py        — Every 30 min. Pure Python anomaly detection → SDK diagnosis on alert
 swarm/

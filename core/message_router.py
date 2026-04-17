@@ -22,6 +22,7 @@ from typing import Optional
 from core.message_reader import InboundMessage, get_recent_messages
 from core.message_bus import send_message
 from core.message_db import update_inbound_route, get_recent_outbound
+from core.agents import ALL_AGENTS
 
 
 # --- Constants ---
@@ -347,7 +348,7 @@ async def _classify_with_opus(msg: InboundMessage) -> dict:
     try:
         proc = await asyncio.create_subprocess_exec(
             "/opt/homebrew/bin/claude", "-p", prompt,
-            "--model", "opus",
+            "--model", "haiku",
             "--max-turns", "1",
             "--output-format", "json",
             stdout=asyncio.subprocess.PIPE,
@@ -427,6 +428,9 @@ async def _dispatch_to_agent(agent_name: str, prompt: str) -> str:
     pfile.close()
 
     VENV_PYTHON = str(Path.home() / "Projects/agent-core/.venv/bin/python3")
+    # Resolve model from the agent's own config; default to opus for unknown names.
+    agent_def = ALL_AGENTS.get(agent_name.lower())
+    model = agent_def.model if agent_def else "opus"
     # Use a small dispatcher script that runs the agent and sends the result via message bus
     dispatch_script = f'''
 import asyncio, sys, json
@@ -440,7 +444,7 @@ Path("{pfile.name}").unlink(missing_ok=True)
 async def run():
     import subprocess
     proc = subprocess.run(
-        ["/opt/homebrew/bin/claude", "-p", prompt, "--model", "opus", "--max-turns", "10"],
+        ["/opt/homebrew/bin/claude", "-p", prompt, "--model", "{model}", "--max-turns", "10"],
         capture_output=True, text=True, timeout=300,
     )
     result = proc.stdout.strip()

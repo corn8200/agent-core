@@ -15,7 +15,7 @@ Resolution order per key:
     3. ~/.config/secrets.env.legacy (transition window, ~7 days)
 
 Hard rule: this module NEVER sets ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN
-in os.environ. The SDK scrub block (morning_brief.py lines 24-32) pops those
+in os.environ. The SDK scrub block (~/Projects/anthropic-update-watcher/watcher.py:182-183) pops those
 names so the CLI uses Max subscription billing. Repopulating them would silently
 route SDK calls to pay-as-you-go API billing. The renamed sibling
 ANTHROPIC_CONSOLE_KEY is fine to hydrate — the SDK doesn't look at that name.
@@ -189,7 +189,7 @@ def _load_legacy() -> dict[str, str]:
     return out
 
 
-def _op_read(key: str, vault: str = "MachineAuto") -> str | None:
+def _op_read(key: str, vault: str = "MachineAutoBiz") -> str | None:
     if _is_launchd_context():
         return None
     token = _service_account_token()
@@ -208,7 +208,7 @@ def _op_read(key: str, vault: str = "MachineAuto") -> str | None:
     return None
 
 
-def get_secret(key: str, *, vault: str = "MachineAuto") -> str | None:
+def get_secret(key: str, *, vault: str = "MachineAutoBiz") -> str | None:
     """Return secret value or None if not found. Caches per-process."""
     if key in _cache:
         return _cache[key]
@@ -229,7 +229,7 @@ def get_secret(key: str, *, vault: str = "MachineAuto") -> str | None:
     return val
 
 
-def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAuto") -> dict[str, bool]:
+def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAutoBiz") -> dict[str, bool]:
     """Populate os.environ from vault for known keys. Returns {key: found}.
 
     Uses `op inject` for a single-round-trip batch fetch. Falls back to

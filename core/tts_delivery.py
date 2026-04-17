@@ -1,6 +1,6 @@
 """Shared TTS delivery: brief text -> audio -> R2 -> iMessage URL.
 
-Consolidated 2026-04-17. Both home_ops/engine.py and briefs/morning_brief.py
+Consolidated 2026-04-17. Both home_ops/engine.py and the retired brief script
 previously held near-identical copies of this pipeline; callers now import
 `deliver_brief_tts` from here.
 

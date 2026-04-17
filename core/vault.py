@@ -105,6 +105,54 @@ def _service_account_token() -> str | None:
 
 
 @functools.cache
+def _is_launchd_context() -> bool:
+    """True when running under launchd (LaunchAgent/LaunchDaemon).
+
+    launchd-spawned processes can't safely invoke `op` — the 1Password CLI
+    probes for desktop-app integration via the kTCCServiceSystemPolicyAppData
+    TCC service, which LaunchAgents don't inherit, triggering repeated
+    "op would like to access data from other apps" prompts that hang the
+    process. Interactive Terminal/iTerm/SSH sessions have that grant and
+    op runs fine.
+    """
+    if os.environ.get("VAULT_FORCE_OP") == "1":
+        return False
+    if os.environ.get("VAULT_SKIP_OP") == "1":
+        return True
+    if os.environ.get("TERM_PROGRAM"):  # Terminal, iTerm, VS Code
+        return False
+    if os.environ.get("SSH_TTY") or os.environ.get("SSH_CONNECTION"):
+        return False
+    try:
+        if os.isatty(0) or os.isatty(1):
+            return False
+    except Exception:
+        pass
+    return True
+
+
+_MACHINE_CACHE: Final = Path.home() / ".config" / "machine-secrets.cache"
+
+
+@functools.cache
+def _load_machine_cache() -> dict[str, str]:
+    if not _MACHINE_CACHE.exists():
+        return {}
+    out: dict[str, str] = {}
+    try:
+        for line in _MACHINE_CACHE.read_text().splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if v:
+                out[k] = v
+    except Exception:
+        return {}
+    return out
+
+
+@functools.cache
 def _load_legacy() -> dict[str, str]:
     """Parse secrets.env.legacy (or secrets.env during transition). Uses bash
     to source the file exactly as shell scripts do, handling quotes, shell
@@ -142,6 +190,8 @@ def _load_legacy() -> dict[str, str]:
 
 
 def _op_read(key: str, vault: str = "MachineAuto") -> str | None:
+    if _is_launchd_context():
+        return None
     token = _service_account_token()
     if not token:
         return None

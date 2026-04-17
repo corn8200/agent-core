@@ -23,10 +23,12 @@ core/
   safari.py         — Safari osascript+JS helpers for interactive browser mode
   constants.py      — HOME, PERSONAL_EMAIL, VPS_SSH, IPs, DB paths, SKIP_CALENDARS
   calendar.py       — Calendar service: get_events, create_event, availability, conflicts, schedule/week views
-  message_db.py     — SQLite schema + helpers for ~/logs/message_bus.db (inbound + outbound)
-  message_bus.py    — Unified outbound: send_message() with tiers, attribution, retry
-  message_reader.py — Inbound chat.db poller via tmux relay, subscriber pattern
-  message_router.py — 3-layer router: short-codes → prefix → Opus intent classification w/ full context
+  message_db.py     — SQLite schema + helpers for ~/logs/message_bus.db (inbound + outbound + sessions)
+  message_bus.py    — Unified outbound: send_message() with tiers, attribution, retry, reply_tag, batch_window
+  message_reader.py — Inbound chat.db poller via tmux relay, subscriber pattern, attachment enrichment
+  message_router.py — Layered router: VPS-tag → short-codes → prefix → session-resume → LLM classification
+  message_attachments.py — Task A: image (Sonnet vision) + audio (whisper) enrichment for inbound
+  message_batch.py  — Task D: per-chat batching window with force-flush on overflow
 home_ops/
   engine.py         — Consolidated daily brief (6:30 AM + 8 PM). Gather→synthesize(opus)→email+TTS+iMessage audio
   gather.py         — Parallel data gathering incl gather_schedule() (30-min cache at /tmp/claude-gather.json)
@@ -60,9 +62,15 @@ nudge/
 - `nudge/engine.py` — calendar nudge engine
 
 ## Databases
-- `~/logs/message_bus.db` — inbound + outbound message audit trail
+- `~/logs/message_bus.db` — inbound + outbound message audit trail + resumable `sessions` table (router-v2)
 - `~/logs/nudge-state.db` — nudge dedup (event_uid + tier unique index)
 - `/tmp/claude-gather.json` — gather cache (30 min TTL)
+
+## iMessage Router v2 Patterns
+- **Layer 0 — VPS reply tag:** `[V:<service>:<ref>] <reply>` (service ∈ {sentinel, mailtriage, jobagent, notify}) is POSTed to `http://100.118.21.64:8767/imessage-reply/<service>` with `APPLE_BRIDGE_TOKEN`. On non-2xx, falls through to normal routing. VPS services originate these threads by calling `send_message(..., reply_tag="<service>:<ref>")` which prepends `[V:...]`. Never swallow a user message on HTTP failure.
+- **Sessions (Task B):** every dispatch creates a `sessions` row with `sdk_session_id` (UUID pinned via `claude --session-id <uuid>`). Agents end a turn with `CLARIFY: <question>` to pause; the router parks the session as `awaiting_reply` and the user's next non-shortcode reply in <30 min resumes the agent via `claude --resume <sdk_session_id>`. Concurrent dispatches on the same chat get `[session locked on <agent>]`. Stale sessions are swept on daemon start (`on_daemon_start`) and opportunistically via `expire_stale_sessions()`.
+- **Attachment enrichment (Task A):** `core/message_attachments.py` extracts via `message_attachment_join` + `attachment` tables through `tmux_relay_shell`, stages to `/tmp/ab-attach-<uuid>/<file>`, describes images via Sonnet 4.6 vision and transcribes audio via OpenAI Whisper (falls back to local `whisper`). Output `[image: <desc>]` / `[voice: <transcript>]` / `[attachment: <name> — unsupported]` is prepended to text before routing.
+- **Batching (Task D):** `send_message(..., batch_window=N)` queues per-recipient and flushes after `N` seconds (sliding window, capped at 120s, force-flush at queue > 10). Default `None` = instant delivery; no existing caller is affected. Batched deliveries are joined with `\n\n— — —\n\n` and prefixed `[batched: N messages from a,b,c]`. `core.message_batch.flush_all()` is called from the daemon shutdown path.
 
 ## LaunchAgents
 - `com.john.home-ops` — Daily brief: 6:30 AM (morning) + 8 PM (evening). Email + iMessage audio.

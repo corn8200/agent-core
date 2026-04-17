@@ -20,6 +20,13 @@ from core.tools import tmux_relay_shell
 _maybe_enqueue_thread = None
 
 
+# Task A attachment enrichment — resolved lazily so tests can monkeypatch
+# the module-level binding without touching core.message_attachments.
+async def _enrich_with_attachments(rowid: int, text: str) -> str:
+    from core.message_attachments import enrich_message_text
+    return await enrich_message_text(rowid, text)
+
+
 # Leading-garbage-tolerant match for bus attribution: "[AgentName]".
 # The attributedBody hex extractor sometimes pastes a junk char before the
 # real text, so we allow any non-letter prefix followed by "[Word]".
@@ -201,25 +208,33 @@ class MessageReader:
 
             # Extract text from attributedBody if needed
             if not text and hex_body:
-                text = extract_text_from_attributed_body(hex_body)
-
-            if not text:
-                # Save rowid to skip empty messages
-                self._save_rowid(rowid)
-                continue
+                text = extract_text_from_attributed_body(hex_body) or ""
 
             # Drop the bot's own outbound messages. The message bus prepends
             # an [AgentName] attribution tag — if we see one in a
             # from-me message in a self-chat, it's a reply we just sent and
             # must not be re-routed (feedback loop).
-            if is_from_me and _looks_like_bot_attribution(text):
+            if is_from_me and text and _looks_like_bot_attribution(text):
+                self._save_rowid(rowid)
+                continue
+
+            # Task A: enrich with attachment descriptions. Pure-attachment
+            # messages (no text body) are still valid — don't drop them here.
+            try:
+                enriched = await _enrich_with_attachments(rowid, text)
+            except Exception as e:
+                print(f"[reader] attachment enrich error rowid={rowid}: {e}")
+                enriched = text
+
+            if not enriched:
+                # Truly empty (no text, no attachment) — skip and advance.
                 self._save_rowid(rowid)
                 continue
 
             messages.append(InboundMessage(
                 rowid=rowid,
                 chat_identifier=chat_id,
-                text=text,
+                text=enriched,
                 timestamp=timestamp,
                 is_from_me=is_from_me,
             ))

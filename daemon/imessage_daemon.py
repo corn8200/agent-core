@@ -20,9 +20,10 @@ os.environ["PYTHONUNBUFFERED"] = "1"
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.message_reader import MessageReader
-from core.message_router import route
+from core.message_router import route, on_daemon_start
 from core.message_bus import retry_loop
 from core.message_db import init_db
+from core.message_batch import flush_all as batch_flush_all
 import core.agent_cp_client as cp  # noqa: E402
 CP_AGENT = "imessage-daemon"
 
@@ -31,6 +32,10 @@ async def _kill_watchdog():
     while True:
         if cp.is_killed(CP_AGENT):
             print(f"[daemon] {CP_AGENT} killed via agent-cp, exiting", flush=True)
+            try:
+                await batch_flush_all()
+            except Exception:
+                pass
             import os as _os; _os._exit(0)
         await _a.sleep(60)
 
@@ -41,15 +46,28 @@ async def main():
     except Exception: pass
     init_db()
 
+    # router-v2 Task B: expire sessions that were open when the daemon died.
+    try:
+        await on_daemon_start()
+    except Exception as e:
+        print(f"[daemon] on_daemon_start failed: {e}", flush=True)
+
     reader = MessageReader(poll_interval=5)
     reader.subscribe(route)
 
     print("[daemon] Reader + Router + Retry loop active")
-    await asyncio.gather(
-        reader.poll_loop(),
-        retry_loop(interval=30.0),
-        _kill_watchdog(),
-    )
+    try:
+        await asyncio.gather(
+            reader.poll_loop(),
+            retry_loop(interval=30.0),
+            _kill_watchdog(),
+        )
+    finally:
+        # Best-effort: flush any batched messages before we exit.
+        try:
+            await batch_flush_all()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

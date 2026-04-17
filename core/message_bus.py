@@ -50,6 +50,8 @@ async def send_message(
     recipient: str = "",
     tier: str = "normal",
     attribution: bool = True,
+    reply_tag: str | None = None,
+    batch_window: int | None = None,
 ) -> tuple[bool, str]:
     """Send a message through the unified bus.
 
@@ -59,9 +61,19 @@ async def send_message(
         recipient: iMessage buddy. Defaults to PERSONAL_EMAIL.
         tier: "critical" (iMessage+Pushover), "normal" (iMessage), "archive" (DB only).
         attribution: If True, prepend [AgentName] to the message.
+        reply_tag: Optional VPS reply tag. Format "<service>:<ref>", e.g.
+            "sentinel:abc12". When set, "[V:<tag>] " is prepended so the user's
+            reply routes back to the VPS service via Layer 0 of the router.
+            (router-v2 Task C, Mac side of Mac+VPS interface.)
+        batch_window: If an int (seconds), queue this message and flush after
+            the window expires along with any sibling messages bound for the
+            same recipient. Default None = instant delivery (unchanged).
+            Caps at 120s. Max queue length 10. (router-v2 Task D.)
 
     Returns:
-        (success, status_description)
+        (success, status_description). For batched messages, returns
+        (True, "Queued (batch_window=Ns)") immediately; delivery happens
+        asynchronously.
     """
     recipient = recipient or PERSONAL_EMAIL
 
@@ -70,6 +82,11 @@ async def send_message(
     if attribution:
         message = f"[{display_name}] {message}"
 
+    # Task C: VPS reply tag. Prepended AFTER attribution so the tag is the
+    # first token on the line — VPS detects "^[V:<service>:<ref>]" exactly.
+    if reply_tag:
+        message = f"[V:{reply_tag}] {message}"
+
     # Archive tier — log only, no send
     if tier == "archive":
         log_outbound(agent=agent, recipient=recipient, message=message, tier=tier)
@@ -77,6 +94,24 @@ async def send_message(
 
     # Log to DB (pending status)
     row_id = log_outbound(agent=agent, recipient=recipient, message=message, tier=tier)
+
+    # Task D: batching. Log the intent, hand off to the batch window, return.
+    # Delivery (or re-log as 'batched' on send) happens inside message_batch.
+    if batch_window is not None and batch_window > 0:
+        try:
+            from core.message_batch import enqueue as _batch_enqueue
+            await _batch_enqueue(
+                recipient=recipient,
+                message=message,
+                tier=tier,
+                agent=agent,
+                log_id=row_id,
+                window=batch_window,
+            )
+            return True, f"Queued (batch_window={batch_window}s)"
+        except Exception as e:
+            # Fall through to instant delivery if batching itself fails.
+            print(f"[message_bus] batch enqueue fell back: {e}")
 
     # Send via transport
     ok, result = await _deliver(recipient, message, tier)

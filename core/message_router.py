@@ -1,11 +1,17 @@
 """Intent classification and dispatch for inbound iMessages.
 
-Three-layer routing:
-1. Short-code check — A1/D1/E1 approval-queue replies (zero cost)
-2. Prefix match — research:/quick:/compare:/local: (zero cost)
-3. Opus LLM — full context injection, intent classification + dispatch plan
+Layered routing (router-v2):
+0. VPS reply tag — `[V:<service>:<ref>] <reply>` -> POST to agent-cp, done.
+1. Short-code check — A1/D1/E1 approval-queue replies (zero cost).
+2. Prefix match — research:/quick:/compare:/local: (zero cost).
+2.5 Active session check — non-shortcode replies on a chat with an active
+   agent session resume that session instead of starting a new one.
+3. LLM classification — full context injection, intent -> dispatch plan.
 
-Opus (free on Max plan) handles ambiguous, natural language, and multi-intent messages.
+Agents can end a turn with `CLARIFY: <question>` to ask a follow-up; the
+router captures the question, sends it to the user, and parks the session
+as `awaiting_reply`. The user's next message within SESSION_IDLE_TIMEOUT_MIN
+resumes that agent via Claude CLI --resume <sdk_session_id>.
 """
 
 import asyncio
@@ -15,14 +21,22 @@ import os
 import subprocess
 import tempfile
 import urllib.request
+import uuid as _uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 from core.message_reader import InboundMessage, get_recent_messages
 from core.message_bus import send_message
-from core.message_db import update_inbound_route, get_recent_outbound
-from core.agents import ALL_AGENTS
+from core.message_db import (
+    update_inbound_route,
+    get_recent_outbound,
+    create_session,
+    get_active_session,
+    touch_session,
+    close_session,
+    expire_stale_sessions,
+)
 
 
 # --- Constants ---
@@ -30,8 +44,23 @@ from core.agents import ALL_AGENTS
 PREFIXES = ("research:", "quick:", "compare:", "local:")
 SELF_CHATS = ("corn82@icloud.com", "+13042684985")
 APPROVAL_QUEUE_URL = "http://100.118.21.64:8766/api/respond"
+
+# Task C: VPS reply tag interface.
+# Format (fixed by Mac+VPS coordination): "[V:<service>:<ref>] <reply text>"
+# service is lowercase letters; ref is short alphanumeric assigned by the service.
+VPS_HOST_IP = "100.118.21.64"
+VPS_REPLY_BASE_URL = f"http://{VPS_HOST_IP}:8767"
+VPS_REPLY_SERVICES = {"sentinel", "mailtriage", "jobagent", "notify"}
+VPS_TAG_RE = re.compile(
+    r"^\s*\[\s*v\s*:\s*(?P<service>[a-zA-Z]+)\s*:\s*(?P<ref>[A-Za-z0-9_-]+)\s*\]\s*",
+    re.IGNORECASE,
+)
+
 SHORT_CODE_RE = re.compile(r"^\s*([AD])(\d+)\s*$", re.IGNORECASE)
 EDIT_CODE_RE = re.compile(r"^\s*E(\d+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+# Agents can ask a follow-up question by ending their response with this sentinel.
+CLARIFY_RE = re.compile(r"^\s*CLARIFY\s*:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
 
 INTENT_TO_AGENT = {
     "research": "scout",
@@ -50,11 +79,94 @@ INTENT_TO_AGENT = {
 }
 
 
-# --- Short-code handling (ported from research-chain/main.py) ---
+# --- Layer 0: VPS reply tag -------------------------------------------------
 
 def _load_apple_bridge_token() -> Optional[str]:
-    return os.environ.get("APPLE_BRIDGE_TOKEN", "") or None
+    tok = os.environ.get("APPLE_BRIDGE_TOKEN", "") or None
+    if tok:
+        return tok
+    # LaunchAgents don't have env — read secrets file.
+    try:
+        secrets = Path.home() / ".config" / "secrets.env.legacy"
+        for line in secrets.read_text().splitlines():
+            if line.startswith("APPLE_BRIDGE_TOKEN="):
+                return line.split("=", 1)[1].strip().strip("'\"")
+    except Exception:
+        pass
+    return None
 
+
+def _post_vps_reply(service: str, ref: str, reply: str, chat_identifier: str,
+                    timestamp: str) -> tuple[bool, int, str]:
+    """POST a VPS reply. Returns (ok, status_code, body_preview)."""
+    token = _load_apple_bridge_token()
+    if not token:
+        print("[router] APPLE_BRIDGE_TOKEN missing; cannot POST VPS reply")
+        return False, 0, "no token"
+    url = f"{VPS_REPLY_BASE_URL}/imessage-reply/{service}"
+    body = {
+        "ref": ref,
+        "reply": reply,
+        "from": chat_identifier,
+        "timestamp": timestamp,
+    }
+    data = json.dumps(body).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            resp_body = resp.read().decode("utf-8", errors="replace")
+            status = resp.status
+            print(f"[router] VPS reply {service}/{ref} -> {status} {resp_body[:200]}")
+            return 200 <= status < 300, status, resp_body[:200]
+    except urllib.error.HTTPError as e:
+        body_text = ""
+        try:
+            body_text = e.read().decode("utf-8", errors="replace")[:200]
+        except Exception:
+            pass
+        print(f"[router] VPS reply {service}/{ref} HTTP {e.code}: {body_text}")
+        return False, e.code, body_text
+    except Exception as e:
+        print(f"[router] VPS reply {service}/{ref} error: {e}")
+        return False, 0, str(e)[:200]
+
+
+async def _handle_vps_reply(msg: InboundMessage) -> Optional[str]:
+    """Layer 0: If message opens with [V:<service>:<ref>], forward to VPS.
+
+    Returns the handler name on success. On HTTP failure, returns None so the
+    router falls through — we never swallow a user's message.
+    """
+    m = VPS_TAG_RE.match(msg.text)
+    if not m:
+        return None
+    service = m.group("service").lower()
+    ref = m.group("ref")
+    if service not in VPS_REPLY_SERVICES:
+        print(f"[router] Unknown VPS service '{service}' in tag — falling through")
+        return None
+    reply_body = msg.text[m.end():].strip()
+    ok, status, _ = await asyncio.to_thread(
+        _post_vps_reply, service, ref, reply_body,
+        msg.chat_identifier, msg.timestamp,
+    )
+    if not ok:
+        # Non-2xx (incl. 404 unknown ref): fall through to normal routing so
+        # the message isn't silently eaten if the VPS side is down.
+        return None
+    handler = f"vps:{service}"
+    update_inbound_route(msg.rowid, handler, "vps-tag")
+    return handler
+
+
+# --- Layer 1: Short-codes ---------------------------------------------------
 
 def _post_approval(code: str, action: str, payload: dict | None = None) -> bool:
     token = _load_apple_bridge_token()
@@ -116,7 +228,13 @@ async def _handle_short_code(msg: InboundMessage) -> Optional[str]:
     return None
 
 
-# --- Prefix matching ---
+def _looks_like_shortcode(text: str) -> bool:
+    """Quick pre-check used by Layer 2.5 to avoid trapping A1/D1 replies."""
+    t = text.strip()
+    return bool(SHORT_CODE_RE.match(t) or EDIT_CODE_RE.match(t))
+
+
+# --- Layer 2: Prefixes ------------------------------------------------------
 
 async def _handle_prefix(msg: InboundMessage) -> Optional[str]:
     """Check for research-chain prefixes. Returns handler name or None."""
@@ -150,29 +268,22 @@ async def _handle_prefix(msg: InboundMessage) -> Optional[str]:
     return None
 
 
-# --- Opus LLM classification with context injection ---
+# --- Context for LLM classification ----------------------------------------
 
 async def _build_context(msg: InboundMessage) -> dict:
-    """Build the rich context packet for Opus classification."""
+    """Build the rich context packet for LLM classification."""
     now = datetime.now()
 
     # Parallel context gathering
     thread_task = get_recent_messages(msg.chat_identifier, limit=5)
-
-    # Email context from mailtriage DB on VPS
     email_task = _get_email_context()
-
-    # Calendar context
     cal_task = _get_calendar_context()
-
-    # Reminders context
     reminder_task = _get_reminder_context()
 
     thread, email, calendar, reminders = await asyncio.gather(
         thread_task, email_task, cal_task, reminder_task,
     )
 
-    # Recent agent activity
     recent_outbound = get_recent_outbound(limit=3)
 
     hour = now.hour
@@ -204,7 +315,6 @@ async def _build_context(msg: InboundMessage) -> dict:
 
 
 async def _get_email_context() -> dict:
-    """Pull email context from mailtriage DB on VPS."""
     try:
         proc = await asyncio.create_subprocess_exec(
             "ssh", "vps",
@@ -236,7 +346,6 @@ async def _get_email_context() -> dict:
 
 
 async def _get_calendar_context() -> dict:
-    """Pull calendar context from the calendar service."""
     try:
         from core.calendar_service import get_schedule_view, get_week_view
         view, week = await asyncio.gather(
@@ -258,7 +367,6 @@ async def _get_calendar_context() -> dict:
 
 
 async def _get_reminder_context() -> dict:
-    """Pull reminder context from gather."""
     try:
         from home_ops.gather import gather_reminders
         reminders = await gather_reminders()
@@ -301,7 +409,7 @@ RESPOND with valid JSON only:
   "prompt": "the task to give the agent (rewritten for clarity)",
   "can_answer_directly": true/false,
   "direct_answer": "if can_answer_directly, the answer using context above",
-  "sub_intents": []  // only if multi — list of {{intent, prompt}} objects
+  "sub_intents": []
 }}
 
 If the context already contains enough information to answer (e.g. schedule questions when calendar data is in context), set can_answer_directly=true and provide the answer. Only route to an agent when the task requires action beyond what's in the context.
@@ -325,7 +433,7 @@ def _validate_classification(obj: dict) -> bool:
 
 
 async def _classify_with_opus(msg: InboundMessage) -> dict:
-    """Classify message intent using Opus with full context injection."""
+    """Classify message intent using LLM with full context injection."""
     context = await _build_context(msg)
     context_json = json.dumps(context, indent=2, default=str)
 
@@ -413,64 +521,202 @@ async def _classify_with_opus(msg: InboundMessage) -> dict:
         return fallback
 
 
-# --- Dispatch ---
+# --- Dispatch (with resumable sessions — Task B) ---------------------------
 
-async def _dispatch_to_agent(agent_name: str, prompt: str) -> str:
-    """Dispatch a task to a named agent via claude CLI in a tmux session."""
+def _resolve_agent_model(agent_name: str) -> str:
+    """Resolve an agent name to its Claude model. Defaults to opus."""
+    try:
+        from core.agents import ALL_AGENTS
+        agent_def = ALL_AGENTS.get(agent_name.lower())
+        if agent_def and getattr(agent_def, "model", None):
+            return agent_def.model
+    except Exception:
+        pass
+    return "opus"
+
+
+def _new_sdk_session_id() -> str:
+    """UUID for Claude CLI --session-id pinning."""
+    return str(_uuid.uuid4())
+
+
+def _build_dispatch_script(
+    prompt_path: str,
+    agent_name: str,
+    model: str,
+    chat_identifier: str,
+    session_id: str,
+    sdk_session_id: str,
+    resume: bool,
+) -> str:
+    """Emit the small Python dispatcher used inside the tmux session.
+
+    The dispatcher:
+      1. Reads prompt from temp file and unlinks it.
+      2. Runs `claude -p <prompt> --model <m> --session-id <sdk> [--resume <sdk>] --max-turns 10`.
+      3. Captures stdout.
+      4. If the output ends with `CLARIFY: <question>`, splits and sends just the
+         question to the user, marks session awaiting_reply + records last_question.
+         Otherwise, sends the full result and closes the session.
+    """
+    session_flag = f'"--resume", "{sdk_session_id}"' if resume else f'"--session-id", "{sdk_session_id}"'
+    return f'''
+import asyncio, sys, re, os
+sys.path.insert(0, "{Path.home() / 'Projects/agent-core'}")
+from pathlib import Path
+
+# Scrub Anthropic env vars so CLI uses Max subscription, not pay-as-you-go API.
+os.environ.pop("ANTHROPIC_API_KEY", None)
+os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
+
+from core.message_bus import send_message
+from core.message_db import touch_session, close_session
+
+CLARIFY_RE = re.compile(r"^\\s*CLARIFY\\s*:\\s*(.+)$", re.MULTILINE | re.IGNORECASE)
+
+prompt = Path("{prompt_path}").read_text()
+Path("{prompt_path}").unlink(missing_ok=True)
+
+async def run():
+    import subprocess
+    proc = subprocess.run(
+        ["/opt/homebrew/bin/claude", "-p", prompt,
+         "--model", "{model}", {session_flag}, "--max-turns", "10"],
+        capture_output=True, text=True, timeout=300,
+    )
+    result = proc.stdout.strip()
+    if not result:
+        result = "Agent returned no output."
+
+    # CLARIFY sentinel on the LAST non-empty line?
+    question = None
+    # Walk lines from the end to find a CLARIFY line at the tail.
+    lines = [ln for ln in result.splitlines() if ln.strip()]
+    if lines:
+        m = re.match(r"\\s*CLARIFY\\s*:\\s*(.+)$", lines[-1], re.IGNORECASE)
+        if m:
+            question = m.group(1).strip()
+
+    if question:
+        # Send just the question; park the session.
+        out = f"[{agent_name}] {{question}}"
+        if len(out) > 1800:
+            out = out[:1800] + "\\n[truncated]"
+        await send_message(question, agent="{agent_name}", recipient="{chat_identifier}")
+        touch_session("{session_id}", status="awaiting_reply", last_question=question)
+    else:
+        # Full result. Truncate for iMessage.
+        if len(result) > 1800:
+            result = result[:1800] + "\\n[truncated]"
+        await send_message(result, agent="{agent_name}", recipient="{chat_identifier}")
+        close_session("{session_id}")
+
+asyncio.run(run())
+'''
+
+
+async def _spawn_dispatch(
+    agent_name: str,
+    prompt: str,
+    chat_identifier: str,
+    session_id: str,
+    sdk_session_id: str,
+    resume: bool,
+) -> None:
+    """Write script + prompt to temp files and spawn via tmux."""
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-    session_name = f"agent-{agent_name}-{ts}"
+    session_name = f"agent-{agent_name}-{ts}-{session_id[:6]}"
 
-    # Write prompt to temp file
     pfile = tempfile.NamedTemporaryFile(
         mode="w", suffix=".txt", delete=False, prefix=f"{agent_name}-",
     )
     pfile.write(prompt)
     pfile.close()
 
-    VENV_PYTHON = str(Path.home() / "Projects/agent-core/.venv/bin/python3")
-    # Resolve model from the agent's own config; default to opus for unknown names.
-    agent_def = ALL_AGENTS.get(agent_name.lower())
-    model = agent_def.model if agent_def else "opus"
-    # Use a small dispatcher script that runs the agent and sends the result via message bus
-    dispatch_script = f'''
-import asyncio, sys, json
-sys.path.insert(0, "{Path.home() / 'Projects/agent-core'}")
-from core.message_bus import send_message
-from pathlib import Path
-
-prompt = Path("{pfile.name}").read_text()
-Path("{pfile.name}").unlink(missing_ok=True)
-
-async def run():
-    import subprocess
-    proc = subprocess.run(
-        ["/opt/homebrew/bin/claude", "-p", prompt, "--model", "{model}", "--max-turns", "10"],
-        capture_output=True, text=True, timeout=300,
+    model = _resolve_agent_model(agent_name)
+    script = _build_dispatch_script(
+        prompt_path=pfile.name,
+        agent_name=agent_name,
+        model=model,
+        chat_identifier=chat_identifier,
+        session_id=session_id,
+        sdk_session_id=sdk_session_id,
+        resume=resume,
     )
-    result = proc.stdout.strip()
-    if not result:
-        result = "Agent returned no output."
-    # Truncate for iMessage (max ~2000 chars)
-    if len(result) > 1800:
-        result = result[:1800] + "\\n[truncated]"
-    await send_message(result, agent="{agent_name}")
 
-asyncio.run(run())
-'''
     script_file = tempfile.NamedTemporaryFile(
         mode="w", suffix=".py", delete=False, prefix=f"dispatch-{agent_name}-",
     )
-    script_file.write(dispatch_script)
+    script_file.write(script)
     script_file.close()
 
+    VENV_PYTHON = str(Path.home() / "Projects/agent-core/.venv/bin/python3")
     cmd = f'{VENV_PYTHON} {script_file.name}; rm -f {script_file.name}'
     subprocess.Popen(["tmux", "new-session", "-d", "-s", session_name, cmd])
-    print(f"[router] Dispatched to {agent_name}: {prompt[:80]}")
+
+
+async def _dispatch_to_agent(
+    agent_name: str, prompt: str, chat_identifier: str,
+) -> str:
+    """Fresh dispatch: creates a session row, spawns the claude CLI with
+    --session-id <uuid>. Returns the handler name (agent_name)."""
+    # Block concurrent sessions on the same chat — user can only converse
+    # with one agent at a time.
+    existing = get_active_session(chat_identifier)
+    if existing and existing["status"] in ("open", "awaiting_reply"):
+        await send_message(
+            f"[session locked on {existing['agent_name']}]",
+            agent="router",
+            recipient=chat_identifier,
+        )
+        return f"blocked:{existing['agent_name']}"
+
+    sdk_session_id = _new_sdk_session_id()
+    session_id = create_session(
+        chat_identifier=chat_identifier,
+        agent_name=agent_name,
+        sdk_session_id=sdk_session_id,
+        initial_prompt=prompt,
+        status="open",
+    )
+
+    await _spawn_dispatch(
+        agent_name=agent_name,
+        prompt=prompt,
+        chat_identifier=chat_identifier,
+        session_id=session_id,
+        sdk_session_id=sdk_session_id,
+        resume=False,
+    )
+    print(f"[router] Dispatched to {agent_name} (session {session_id[:8]}): {prompt[:80]}")
     return agent_name
 
 
+async def _resume_session(session: dict, user_reply: str) -> str:
+    """Continue an existing session: reuse sdk_session_id + --resume."""
+    agent_name = session["agent_name"]
+    sdk_session_id = session["sdk_session_id"]
+    if not sdk_session_id:
+        # Session predates session_id pinning — can't resume. Close and fall through.
+        close_session(session["session_id"])
+        return ""
+
+    touch_session(session["session_id"], prompt=user_reply, status="open",
+                  last_question=None)
+
+    await _spawn_dispatch(
+        agent_name=agent_name,
+        prompt=user_reply,
+        chat_identifier=session["chat_identifier"],
+        session_id=session["session_id"],
+        sdk_session_id=sdk_session_id,
+        resume=True,
+    )
+    print(f"[router] Resumed {agent_name} (session {session['session_id'][:8]}): {user_reply[:80]}")
+    return f"resume:{agent_name}"
+
+
 async def _handle_direct_answer(classification: dict, msg: InboundMessage) -> str:
-    """Handle messages that can be answered directly from context."""
     answer = classification.get("direct_answer", "")
     if answer:
         await send_message(answer, agent="router")
@@ -478,23 +724,39 @@ async def _handle_direct_answer(classification: dict, msg: InboundMessage) -> st
     return "router:empty"
 
 
-# --- Main route function ---
+# --- Main route function ----------------------------------------------------
 
 async def route(msg: InboundMessage) -> str:
     """Classify and dispatch an inbound message. Returns the handler name for audit."""
 
-    # Layer 1: Short-code check
+    # Layer 0: VPS reply tag (Task C). Must come before anything else so
+    # tag-prefixed replies never leak into short-code or session matching.
+    result = await _handle_vps_reply(msg)
+    if result:
+        return result
+
+    # Layer 1: Short-code check (approval queue A1/D1/E1).
     result = await _handle_short_code(msg)
     if result:
         return result
 
-    # Layer 2: Prefix match
+    # Layer 2: Prefix match (research:, quick:, etc.)
     result = await _handle_prefix(msg)
     if result:
         return result
 
-    # Layer 3: Opus classification with full context
-    print(f"[router] Classifying with Opus: {msg.text[:80]}")
+    # Layer 2.5: Active session resume (Task B). If a session is open for
+    # this chat and the reply isn't a shortcode/prefix, resume it.
+    if not _looks_like_shortcode(msg.text):
+        active = get_active_session(msg.chat_identifier)
+        if active and active["sdk_session_id"]:
+            handler = await _resume_session(active, msg.text)
+            if handler:
+                update_inbound_route(msg.rowid, handler, "session-resume")
+                return handler
+
+    # Layer 3: LLM classification with full context
+    print(f"[router] Classifying with LLM: {msg.text[:80]}")
     classification = await _classify_with_opus(msg)
     print(f"[router] Classification: {json.dumps(classification, indent=2)[:500]}")
 
@@ -506,14 +768,17 @@ async def route(msg: InboundMessage) -> str:
         update_inbound_route(msg.rowid, handler, "llm")
         return handler
 
-    # Multi-intent: dispatch each sub-intent
+    # Multi-intent: dispatch each sub-intent (Task B: each gets its own session,
+    # but we block on chat-level concurrency — first wins, rest get warned).
     if "multi" in intents:
         sub_intents = classification.get("sub_intents", [])
         handlers = []
         for sub in sub_intents:
             agent = INTENT_TO_AGENT.get(sub.get("intent", ""), "scout")
             if agent:
-                h = await _dispatch_to_agent(agent, sub.get("prompt", msg.text))
+                h = await _dispatch_to_agent(
+                    agent, sub.get("prompt", msg.text), msg.chat_identifier,
+                )
                 handlers.append(h)
         handler = "multi:" + "+".join(handlers)
         update_inbound_route(msg.rowid, handler, "llm")
@@ -524,17 +789,15 @@ async def route(msg: InboundMessage) -> str:
     prompt = classification.get("prompt", msg.text)
 
     if primary and primary in INTENT_TO_AGENT.values():
-        handler = await _dispatch_to_agent(primary, prompt)
+        handler = await _dispatch_to_agent(primary, prompt, msg.chat_identifier)
     elif intents[0] in INTENT_TO_AGENT:
         agent = INTENT_TO_AGENT[intents[0]]
         if agent:
-            handler = await _dispatch_to_agent(agent, prompt)
+            handler = await _dispatch_to_agent(agent, prompt, msg.chat_identifier)
         else:
-            # Inline-handled intents (schedule, status, reminder, note)
             handler = await _handle_inline(intents[0], msg, classification)
     else:
-        # Fallback: send to scout
-        handler = await _dispatch_to_agent("scout", prompt)
+        handler = await _dispatch_to_agent("scout", prompt, msg.chat_identifier)
 
     update_inbound_route(msg.rowid, handler, "llm")
     return handler
@@ -543,12 +806,10 @@ async def route(msg: InboundMessage) -> str:
 async def _handle_inline(intent: str, msg: InboundMessage, classification: dict) -> str:
     """Handle intents that don't need a full agent (schedule, status, reminder, note)."""
     if intent == "schedule":
-        # Already have calendar data in context — ask Opus to synthesize
         direct = classification.get("direct_answer", "")
         if direct:
             await send_message(direct, agent="calendar")
         else:
-            # Pull fresh schedule and send
             try:
                 from core.calendar_service import get_schedule_view
                 view = await get_schedule_view()
@@ -566,7 +827,6 @@ async def _handle_inline(intent: str, msg: InboundMessage, classification: dict)
         return "calendar:inline"
 
     elif intent == "status":
-        # Send a status summary
         await send_message(
             classification.get("direct_answer", "Checking status..."),
             agent="status",
@@ -574,7 +834,6 @@ async def _handle_inline(intent: str, msg: InboundMessage, classification: dict)
         return "status:inline"
 
     elif intent == "reminder":
-        # Create or check reminders via osascript
         await send_message(
             classification.get("direct_answer", "Reminder noted."),
             agent="reminder",
@@ -589,3 +848,14 @@ async def _handle_inline(intent: str, msg: InboundMessage, classification: dict)
         return "note:inline"
 
     return f"{intent}:unhandled"
+
+
+# --- Daemon lifecycle hook --------------------------------------------------
+
+
+async def on_daemon_start() -> int:
+    """Called by imessage_daemon at startup. Expire any stale sessions."""
+    n = expire_stale_sessions()
+    if n:
+        print(f"[router] Expired {n} stale session(s) on daemon start")
+    return n

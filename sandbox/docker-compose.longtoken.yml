@@ -1,0 +1,42 @@
+services:
+  longtoken:
+    image: agent-core/watcher-pilot:latest
+    container_name: sandbox-longtoken
+    user: "1001:1001"
+    init: true
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+      - /home/agent/.npm:size=16m,mode=0755
+    environment:
+      ANTHROPIC_API_KEY: ""
+      ANTHROPIC_AUTH_TOKEN: ""
+      ANTHROPIC_CONSOLE_KEY: ""
+      HOME: /home/agent
+      PYTHONDONTWRITEBYTECODE: "1"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - type: bind
+        source: ${HOME}/.claude
+        target: /home/agent/.claude
+        read_only: false
+      - type: bind
+        source: ${HOME}/.claude.json
+        target: /home/agent/.claude.json
+        read_only: false
+      - type: bind
+        source: ${HOME}/bin
+        target: /app
+        read_only: true
+    working_dir: /app
+    command: ["bash", "/app/claude-longtoken-check.sh"]
+    networks:
+      - default
+
+networks:
+  default:
+    driver: bridge

@@ -6,7 +6,9 @@ single listener process. Uses tmux_relay_shell for FDA-protected chat.db access.
 
 import asyncio
 import base64
+import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +16,9 @@ from typing import Awaitable, Callable
 
 from core.message_db import log_inbound
 from core.tools import tmux_relay_shell
+
+HEARTBEAT_PATH = Path.home() / "logs" / "imessage-bus.heartbeat"
+CONSECUTIVE_FAIL_THRESHOLD = 2
 
 # Deferred import to avoid circular: message_vector imports get_recent_messages
 # from this module. Only needed in poll_loop, not at module import time.
@@ -241,6 +246,19 @@ class MessageReader:
 
         return messages
 
+    def _touch_heartbeat(self) -> None:
+        """Bump the heartbeat file each outer loop iteration.
+
+        External watchdog (~/bin/imessage-bus-watchdog.sh) reads mtime;
+        if >5 min stale it kickstarts the LaunchAgent. Silent on error —
+        never let heartbeat failure break the loop.
+        """
+        try:
+            HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            HEARTBEAT_PATH.touch()
+        except OSError:
+            pass
+
     async def poll_loop(self):
         """Main loop. Reads chat.db via tmux relay, fans out to subscribers."""
         print(f"[reader] Started — polling every {self._poll_interval}s")
@@ -248,9 +266,15 @@ class MessageReader:
         print(f"[reader] State file: {STATE_FILE}")
 
         poll_count = 0
+        consecutive_failures = 0
         while True:
+            self._touch_heartbeat()
             try:
-                messages = await self._poll_once()
+                messages = await asyncio.wait_for(
+                    self._poll_once(),
+                    timeout=60.0,
+                )
+                consecutive_failures = 0
                 poll_count += 1
 
                 if poll_count <= 3 or messages:
@@ -290,8 +314,34 @@ class MessageReader:
                     # Save after processing each message
                     self._save_rowid(msg.rowid)
 
+            except asyncio.TimeoutError:
+                consecutive_failures += 1
+                print(
+                    f"[reader] Poll timeout (consecutive={consecutive_failures}/"
+                    f"{CONSECUTIVE_FAIL_THRESHOLD})",
+                    flush=True,
+                )
+                if consecutive_failures >= CONSECUTIVE_FAIL_THRESHOLD:
+                    print(
+                        "[reader] Consecutive poll timeouts hit threshold — "
+                        "exiting so launchd restarts us",
+                        flush=True,
+                    )
+                    sys.exit(1)
             except Exception as e:
-                print(f"[reader] Error: {e}")
+                consecutive_failures += 1
+                print(
+                    f"[reader] Error (consecutive={consecutive_failures}/"
+                    f"{CONSECUTIVE_FAIL_THRESHOLD}): {e}",
+                    flush=True,
+                )
+                if consecutive_failures >= CONSECUTIVE_FAIL_THRESHOLD:
+                    print(
+                        "[reader] Consecutive poll failures hit threshold — "
+                        "exiting so launchd restarts us",
+                        flush=True,
+                    )
+                    sys.exit(1)
 
             await asyncio.sleep(self._poll_interval)
 

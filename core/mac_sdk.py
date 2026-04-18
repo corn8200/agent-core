@@ -150,16 +150,30 @@ def _apply_defaults(options: ClaudeAgentOptions | None) -> ClaudeAgentOptions:
     return options
 
 
-async def query(prompt, options: ClaudeAgentOptions | None = None):
+async def query(
+    prompt,
+    options: ClaudeAgentOptions | None = None,
+    *,
+    skip_ambient: bool = False,
+):
     """Guarded async generator wrapping claude_agent_sdk.query.
 
     - Enforces 50/hr HARD cap via SDKQuotaExceeded
     - Back-fills AGENT_HOOKS when options has none
     - Builds a sane default ClaudeAgentOptions when options is None
     - Forwards all messages from the underlying SDK query
+
+    skip_ambient: when True, callers signal that they do NOT want this
+    prompt prefixed with ambient-context (home/weather/calendar snapshot).
+    mac_sdk.query does not itself inject ambient today, but sub-agent
+    dispatchers (Forge/Anvil via _fix_agent_runner, herald_loop fan-out)
+    should pass skip_ambient=True so session titles / prompt caches
+    don't accidentally read like ambient text if a future revision adds
+    injection here. Tailor's `_call_claude` already honors the same flag.
     """
     _check_and_record_call()
     options = _apply_defaults(options)
+    _ = skip_ambient
     async for msg in _real_query(prompt=prompt, options=options):
         yield msg
 

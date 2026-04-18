@@ -296,7 +296,7 @@ def _build_day_labels() -> str:
     return "\n".join(lines)
 
 
-def _shrink_payload(payload: dict, limit: int = 24000) -> tuple[str, dict]:
+def _shrink_payload(payload: dict, limit: int = 200000) -> tuple[str, dict]:
     """Shrink payload to fit within limit. Returns (blob, info).
 
     info: {

@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg git tini unzip \
+      ca-certificates curl gnupg git tini unzip poppler-utils \
  && mkdir -p /etc/apt/keyrings \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
@@ -34,7 +34,9 @@ RUN pip install --no-cache-dir \
       'requests>=2.31' \
       'beautifulsoup4>=4.12' \
       'feedparser>=6.0' \
-      'pushover-complete>=1.1'
+      'pushover-complete>=1.1' \
+      'PyPDF2>=3.0' \
+      'Pillow>=10.0'
 
 RUN groupadd --gid 1001 agent \
  && useradd --uid 1001 --gid 1001 --create-home --shell /bin/bash agent \

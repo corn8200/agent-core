@@ -26,6 +26,12 @@ fi
 
 cd "${REPO_DIR}"
 
+env -i \
+  HOME="${HOME}" \
+  PATH="/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin" \
+  DOCKER_HOST="${DOCKER_HOST:-}" \
+  "${DOCKER}" compose -f "${COMPOSE_FILE}" build "${SERVICE}" >&2
+
 if [[ $# -eq 0 ]]; then
   exec env -i \
     HOME="${HOME}" \

@@ -527,6 +527,97 @@ def test_batch_flush_all_drains(monkeypatch):
     assert len(sent) == 1
 
 
+# --------------------------------------------------------- Prefix -> Scout
+
+
+def test_prefix_dispatches_scout_via_sdk(monkeypatch):
+    """`research: foo bar` should dispatch to Scout and return handler `scout:research`."""
+    from core import message_router as mr
+    from core.message_reader import InboundMessage
+
+    captured = {}
+
+    async def fake_dispatch(agent_name, prompt, chat_identifier):
+        captured["agent"] = agent_name
+        captured["prompt"] = prompt
+        captured["chat"] = chat_identifier
+        return agent_name
+
+    monkeypatch.setattr(mr, "_dispatch_to_agent", fake_dispatch)
+
+    msg = InboundMessage(
+        rowid=9001,
+        chat_identifier="prefix@test",
+        text="research: foo bar",
+        timestamp="2026-04-18 09:00:00",
+        is_from_me=False,
+    )
+    handler = _run(mr._handle_prefix(msg))
+    assert handler == "scout:research"
+    assert captured["agent"] == "scout"
+    assert captured["chat"] == "prefix@test"
+    assert "foo bar" in captured["prompt"]
+
+
+def test_prefix_all_tags_dispatch_scout(monkeypatch):
+    from core import message_router as mr
+    from core.message_reader import InboundMessage
+
+    async def fake_dispatch(agent_name, prompt, chat_identifier):
+        return agent_name
+
+    monkeypatch.setattr(mr, "_dispatch_to_agent", fake_dispatch)
+
+    for tag in ("research", "quick", "compare", "local"):
+        msg = InboundMessage(
+            rowid=9100,
+            chat_identifier="prefix@test",
+            text=f"{tag}: the topic",
+            timestamp="2026-04-18 09:00:00",
+            is_from_me=False,
+        )
+        handler = _run(mr._handle_prefix(msg))
+        assert handler == f"scout:{tag}", f"expected scout:{tag}, got {handler}"
+
+
+def test_prefix_empty_question_returns_none(monkeypatch):
+    from core import message_router as mr
+    from core.message_reader import InboundMessage
+
+    async def boom(*a, **kw):
+        raise AssertionError("should not dispatch on empty question")
+
+    monkeypatch.setattr(mr, "_dispatch_to_agent", boom)
+
+    msg = InboundMessage(
+        rowid=9200,
+        chat_identifier="prefix@test",
+        text="research: ",
+        timestamp="2026-04-18 09:00:00",
+        is_from_me=False,
+    )
+    assert _run(mr._handle_prefix(msg)) is None
+
+
+def test_prefix_non_prefix_returns_none(monkeypatch):
+    from core import message_router as mr
+    from core.message_reader import InboundMessage
+
+    async def boom(*a, **kw):
+        raise AssertionError("should not dispatch on non-prefix")
+
+    monkeypatch.setattr(mr, "_dispatch_to_agent", boom)
+
+    msg = InboundMessage(
+        rowid=9300,
+        chat_identifier="prefix@test",
+        text="hello there",
+        timestamp="2026-04-18 09:00:00",
+        is_from_me=False,
+    )
+    assert _run(mr._handle_prefix(msg)) is None
+
+
 # --------------------------------------------------------- Router layer order
 
 

@@ -103,7 +103,7 @@ def _detect_brief_streak(conn: sqlite3.Connection) -> tuple[str, int] | None:
     rows = _fetch(
         conn,
         "SELECT content FROM memories "
-        "WHERE agent='morning_brief' AND category='brief' "
+        "WHERE agent='home_ops' AND category='brief' "
         "ORDER BY timestamp DESC LIMIT 5",
         (),
     )

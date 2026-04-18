@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Unified iMessage daemon — single process for inbound reader + router + outbound retry.
 
-Replaces research-chain/main.py as the sole iMessage listener.
-Run as LaunchAgent: com.john.imessage-bus.plist
+Sole iMessage listener. Run as LaunchAgent: com.john.imessage-bus.plist
 
 Usage:
     python3 daemon/imessage_daemon.py

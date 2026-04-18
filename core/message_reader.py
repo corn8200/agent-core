@@ -1,7 +1,7 @@
 """Unified inbound iMessage reader — polls chat.db via tmux relay.
 
-One reader, multiple subscribers. Replaces research-chain/main.py as the
-single listener process. Uses tmux_relay_shell for FDA-protected chat.db access.
+One reader, multiple subscribers. Sole listener process for inbound iMessages.
+Uses tmux_relay_shell for FDA-protected chat.db access.
 """
 
 import asyncio
@@ -83,10 +83,7 @@ class InboundMessage:
 
 
 def extract_text_from_attributed_body(hex_str: str) -> str | None:
-    """Extract plain text from hex-encoded attributedBody (typedstream format).
-
-    Ported from research-chain/main.py — proven extraction logic.
-    """
+    """Extract plain text from hex-encoded attributedBody (typedstream format)."""
     if not hex_str:
         return None
     try:

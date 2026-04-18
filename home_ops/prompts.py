@@ -1,6 +1,7 @@
 """home-ops synthesizer prompts."""
 from __future__ import annotations
 import json
+import re
 import sys
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
@@ -23,6 +24,7 @@ VOICE — follow these rules exactly:
 12. Business section pulls from mail_7d (categorized as 'personal'/'action') and gather.vps.raw if it has sentry-mailqueue stats. Call out hot leads (clicks), new quote requests, bounces, SAM.gov matches. Skip if the pipeline is quiet.
 13. Infra section only shows red. If Mac/VPS/Pi/Docker/services are all green, drop the section entirely. If vps_auth.status is 'fail', put it in Urgent too.
 14. Urgent section = things that must happen today or bad things happen. Overdue reminders, VPS auth broken, unanswered hot client email > 24h, bill due today. Skip if nothing urgent.
+15. CALENDAR ↔ MAIL CROSS-REFERENCE — before finalizing the schedule, reason through each of today's and tomorrow's calendar events against the last 72 hours of mail (mail_7d from mailtriage AND mail_gmail_7d from the gmail burner). This is natural-language reasoning, not keyword matching. You are looking for: cancellations, reschedules, time/location changes, delays, confirmation nudges, or anything that plausibly invalidates or alters an event still sitting on the calendar. Match on sender domain (e.g. `honehealth.com` for "Hone Health" events, `calendly.com`/`acuityscheduling.com`/`doxy.me`/`zocdoc.com` for telehealth, airline/hotel domains for travel, bank domains for bill commitments on calendar, school domains for kids' events), subject keywords (Reschedule, Canceled, Cancellation, New Time, Updated Appointment, Confirm, Verification, Delayed, Postponed), and body/reasoning content. Note: forwarded burner mail appears in mail_7d with `from_addr=corn82@gmail.com` — the real sender is visible in the matching mail_gmail_7d row. Cross-reference both lists by subject + timestamp when from_addr is the forwarder. If an email plausibly signals an event is canceled/rescheduled/changed, say so inline on the event line (e.g., "2:00pm — Hone telehealth (reschedule email came in last night — confirm before logging in)"). Don't silently report an event as happening if the mail contradicts it.
 
 MODE:
 - evening (8 PM): focus is tomorrow prep and the day after. "What am I forgetting for tomorrow morning?" Gear, departure times, who's driving, what's the weather, anything due.
@@ -198,6 +200,33 @@ def _filter_imessages(msgs):
     return cleaned[:80]
 
 
+_CAL_SIGNAL_CATEGORIES = {
+    "medical", "follow_up_needed", "action_needed", "urgent_personal",
+    "urgent_bill", "commitment_tracking", "kids_school",
+}
+_CAL_SIGNAL_SUBJECT_RE = re.compile(
+    r"\b(reschedul\w*|cancel\w*|postpon\w*|delay\w*|new\s+time|"
+    r"updat\w+\s+appointment|confirm\w*\s+appointment|verif\w+\s+appointment)\b",
+    re.IGNORECASE,
+)
+
+
+def _has_calendar_signal(m: dict) -> bool:
+    """True if this mail row plausibly alters a calendar event (cancel/reschedule/etc).
+
+    The synthesizer's calendar↔mail cross-reference step needs these rows visible
+    regardless of mailtriage's urgency score — the Hone Health reschedule landed
+    as category=unknown urgency=0 on 2026-04-17 and still needed to surface.
+    """
+    cat = (m.get("category") or "").strip().lower()
+    if cat in _CAL_SIGNAL_CATEGORIES:
+        return True
+    subj = m.get("subject") or ""
+    if _CAL_SIGNAL_SUBJECT_RE.search(subj):
+        return True
+    return False
+
+
 def _filter_mail(mails):
     if not mails:
         return []
@@ -210,9 +239,19 @@ def _filter_mail(mails):
     def score(m):
         return (urg_val(m), m.get("ts") or "")
     prioritized = [m for m in mails if urg_val(m) >= 0.3]
+    signal = [m for m in mails if _has_calendar_signal(m) and m not in prioritized]
     pool = prioritized if prioritized else sorted(mails, key=score, reverse=True)[:40]
-    pool = sorted(pool, key=score, reverse=True)
-    return pool[:40]
+    pool = sorted(pool + signal, key=score, reverse=True)
+    # Dedup by (ts, subject)
+    seen = set()
+    out = []
+    for m in pool:
+        k = (m.get("ts"), m.get("subject"))
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(m)
+    return out[:50]
 
 
 def _truncate_text(val, limit):
@@ -246,9 +285,35 @@ def _slim_mail(mails):
             "subject": _truncate_text(m.get("subject"), 160),
             "category": m.get("category"),
             "urgency": m.get("urgency") or m.get("urgency_score"),
+            "reasoning": _truncate_text(m.get("reasoning"), 180),
             "preview": _truncate_text(m.get("preview"), 220),
         })
     return slim
+
+
+def _slim_mail_gmail(mails):
+    """Slim mailgw GMAIL-IMPORTANT rows. Only important/borderline survive the query."""
+    slim = []
+    for m in mails:
+        slim.append({
+            "ts": m.get("ts"),
+            "from": m.get("from") or m.get("from_name"),
+            "from_addr": m.get("from_addr"),
+            "subject": _truncate_text(m.get("subject"), 160),
+            "classification": m.get("classification"),
+            "snippet": _truncate_text(m.get("snippet"), 220),
+        })
+    return slim
+
+
+def _filter_mail_gmail(mails):
+    """Light filter — drop anything older than 7 days (already DB-limited) and cap at 20."""
+    if not mails:
+        return []
+    # Already sorted by DB; prefer `important` over `borderline` when capping.
+    important = [m for m in mails if m.get("classification") == "important"]
+    borderline = [m for m in mails if m.get("classification") == "borderline"]
+    return (important + borderline)[:20]
 
 
 def _slim_contacts(contacts):
@@ -338,6 +403,12 @@ def _shrink_payload(payload: dict, limit: int = 200000) -> tuple[str, dict]:
         payload["mail_7d"] = mails
         blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
 
+    gmails = payload.get("mail_gmail_7d") or []
+    while len(blob) > limit and len(gmails) > 8:
+        gmails = gmails[: max(8, int(len(gmails) * 0.75))]
+        payload["mail_gmail_7d"] = gmails
+        blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
+
     contacts = payload.get("contacts") or []
     while len(blob) > limit and len(contacts) > 15:
         contacts = contacts[: max(15, int(len(contacts) * 0.75))]
@@ -359,11 +430,12 @@ def _shrink_payload(payload: dict, limit: int = 200000) -> tuple[str, dict]:
     if len(blob) > limit:
         print(
             f"WARN: home_ops prompt payload still {len(blob)} > {limit} after shrink; "
-            "clearing imessages_7d + mail_7d",
+            "clearing imessages_7d + mail_7d + mail_gmail_7d",
             file=sys.stderr,
         )
         payload["imessages_7d"] = []
         payload["mail_7d"] = []
+        payload["mail_gmail_7d"] = []
         blob = json.dumps(payload, indent=2, default=str, ensure_ascii=False)
         info["cleared"] = True
 
@@ -419,6 +491,7 @@ def build_user_prompt(gather: dict, mode: str) -> tuple[str, dict]:
         "contacts": _slim_contacts(_filter_contacts(gather.get("contacts") or [])),
         "imessages_7d": _slim_messages(_filter_imessages(gather.get("imessages_7d") or [])),
         "mail_7d": _slim_mail(_filter_mail(gather.get("mail_7d") or [])),
+        "mail_gmail_7d": _slim_mail_gmail(_filter_mail_gmail(gather.get("mail_gmail_7d") or [])),
         "weather": _slim_weather(gather.get("weather")),
         "loose_ends": gather.get("loose_ends") or [],
         "learned_facts": gather.get("learned_facts") or [],

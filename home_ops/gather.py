@@ -511,16 +511,29 @@ async def gather_imessages(days: int = 7) -> list[dict]:
 
 async def gather_mail_recent(days: int = 7) -> list[dict]:
     """Query mailtriage.db on VPS over SSH. Returns last N days of inbox messages.
-    Uses sqlite3 -json + base64-piped SQL to dodge nested-quote hell.
+
+    Widened 2026-04-18 for calendar↔mail reasoning — includes `unknown` (where the
+    mailtriage classifier routinely drops forwarded appointment changes, e.g. the
+    Hone Health reschedule) plus urgency_score >= 5 as an OR-clause. Pulls
+    `reasoning` so the synthesizer has real context to cross-reference against
+    calendar events, not just subject lines.
+
+    Schema verified 2026-04-18: table `messages`, cols include
+    date_received, category, body_preview, reasoning, urgency_score.
     """
     import base64
     sql = (
         "SELECT date_received, from_name, from_addr, subject, "
-        "category, urgency_score, substr(body_preview,1,400) AS preview "
+        "category, urgency_score, reasoning, "
+        "substr(body_preview,1,400) AS preview "
         "FROM messages "
         f"WHERE date_received > datetime('now','-{days} days') "
-        "AND (urgency_score >= 3 OR category IN ('action','personal')) "
-        "ORDER BY date_received DESC LIMIT 30;"
+        "AND (urgency_score >= 3 "
+        "     OR category IN ('action_needed','urgent_personal','urgent_bill',"
+        "                      'medical','commitment_tracking','follow_up_needed',"
+        "                      'kids_school','unknown') "
+        "     OR urgency_score >= 5) "
+        "ORDER BY date_received DESC LIMIT 60;"
     )
     sql_b64 = base64.b64encode(sql.encode()).decode()
     cmd = (
@@ -546,7 +559,57 @@ async def gather_mail_recent(days: int = 7) -> list[dict]:
             "subject": _decode_mime_header((r.get("subject") or "").strip())[:120],
             "category": (r.get("category") or "unknown").strip(),
             "urgency": int(urgency) if isinstance(urgency, (int, str)) and str(urgency).isdigit() else 0,
+            "reasoning": (r.get("reasoning") or "").strip()[:240],
             "preview": (r.get("preview") or "").strip()[:300],
+        })
+    return out
+
+
+async def gather_mailgw_recent(days: int = 7) -> list[dict]:
+    """Query mailgw.db on VPS — `important` classifications from the corn82@gmail.com
+    burner forwarder. Catches mail that arrived at gmail and was forwarded to iCloud,
+    including items mailtriage may have misclassified on the iCloud side.
+
+    Forwarded burner mail appears in mailtriage with from_addr=corn82@gmail.com — the
+    REAL sender is only visible in this mailgw row. The synthesizer should cross-
+    reference both lists by subject/timestamp when from_addr is the forwarder.
+
+    Schema verified 2026-04-18: table `emails`, cols received_at, classification,
+    from_addr, subject, snippet, forwarded.
+    """
+    import base64
+    sql = (
+        "SELECT received_at, from_addr, from_name, subject, snippet, "
+        "classification, forwarded "
+        "FROM emails "
+        f"WHERE received_at > datetime('now','-{days} days') "
+        "AND classification IN ('important','borderline') "
+        "ORDER BY received_at DESC LIMIT 40;"
+    )
+    sql_b64 = base64.b64encode(sql.encode()).decode()
+    cmd = (
+        f"ssh -o ConnectTimeout=10 {VPS_SSH} "
+        f"\"echo {sql_b64} | base64 -d | sqlite3 -json /srv/apps/mailgw/data/mailgw.db\""
+    )
+    raw = await _run(cmd, timeout=25)
+    if not raw:
+        return []
+    try:
+        rows = json.loads(raw)
+    except Exception as e:
+        return [{"_error": f"json parse: {e}", "_raw": raw[:200]}]
+    out = []
+    for r in rows:
+        from_name = (r.get("from_name") or "").strip()
+        from_addr = (r.get("from_addr") or "").strip()
+        out.append({
+            "ts": r.get("received_at", ""),
+            "from": _decode_mime_header(from_name) or from_addr,
+            "from_addr": from_addr,
+            "subject": _decode_mime_header((r.get("subject") or "").strip())[:120],
+            "classification": (r.get("classification") or "").strip(),
+            "forwarded": bool(r.get("forwarded")),
+            "snippet": (r.get("snippet") or "").strip()[:300],
         })
     return out
 
@@ -611,7 +674,7 @@ async def gather_all(force: bool = False) -> dict:
 
     started = datetime.now()
     (
-        cal_7d, rem, contacts, msgs, mail_recent, pirate_wx,
+        cal_7d, rem, contacts, msgs, mail_recent, mail_gmail, pirate_wx,
         mail_unread, vps_full, mac_health, pi_health, wttr_wx,
     ) = await asyncio.gather(
         gather_calendar_7d(),
@@ -619,6 +682,7 @@ async def gather_all(force: bool = False) -> dict:
         gather_contacts(),
         gather_imessages(7),
         gather_mail_recent(7),
+        gather_mailgw_recent(7),
         gather_weather(),
         gather_mail_unread(),
         gather_vps_full(),
@@ -649,6 +713,7 @@ async def gather_all(force: bool = False) -> dict:
         "contacts": _ok(contacts, []),
         "imessages_7d": _ok(msgs, []),
         "mail_7d": _ok(mail_recent, []),
+        "mail_gmail_7d": _ok(mail_gmail, []),
         "apple": {
             "calendar": calendar_today_tomorrow,
             "reminders": rem,
@@ -669,6 +734,7 @@ async def gather_all(force: bool = False) -> dict:
             "contacts": str(contacts) if isinstance(contacts, BaseException) else None,
             "imessages": str(msgs) if isinstance(msgs, BaseException) else None,
             "mail": str(mail_recent) if isinstance(mail_recent, BaseException) else None,
+            "mail_gmail": str(mail_gmail) if isinstance(mail_gmail, BaseException) else None,
             "weather": str(pirate_wx) if isinstance(pirate_wx, BaseException) else None,
         },
     }

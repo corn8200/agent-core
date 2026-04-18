@@ -25,6 +25,7 @@ services:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: "/agent-core:/job-agent:/app"
       OP_SERVICE_ACCOUNT_TOKEN_FILE: "/run/secrets/op-sa-token"
+      HERALD_MCP_CONFIG: "/agent-core/sandbox/mcp-empty.json"
     volumes:
       - type: bind
         source: ${HOME}/.claude

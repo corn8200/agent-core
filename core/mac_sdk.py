@@ -58,6 +58,8 @@ DEFAULT_MAX_BUDGET_USD = 1.00
 
 _OPTIONS_SUPPORTS_BUDGET = "max_budget_usd" in inspect.signature(ClaudeAgentOptions).parameters
 
+_EMPTY_MCP_CONFIG = str(Path(__file__).resolve().parent / "mcp-empty.json")
+
 
 class SDKQuotaExceeded(RuntimeError):
     """Raised when the hourly SDK call ceiling is reached. HARD stop."""
@@ -129,7 +131,7 @@ def _entry_ts(entry: dict) -> float:
 
 def _apply_defaults(options: ClaudeAgentOptions | None) -> ClaudeAgentOptions:
     if options is None:
-        kwargs: dict = {"hooks": AGENT_HOOKS}
+        kwargs: dict = {"hooks": AGENT_HOOKS, "mcp_servers": _EMPTY_MCP_CONFIG}
         if _OPTIONS_SUPPORTS_BUDGET:
             kwargs["max_budget_usd"] = DEFAULT_MAX_BUDGET_USD
         return ClaudeAgentOptions(**kwargs)
@@ -137,6 +139,12 @@ def _apply_defaults(options: ClaudeAgentOptions | None) -> ClaudeAgentOptions:
     if getattr(options, "hooks", None) is None:
         try:
             options.hooks = AGENT_HOOKS
+        except (AttributeError, TypeError):
+            pass
+
+    if not getattr(options, "mcp_servers", None):
+        try:
+            options.mcp_servers = _EMPTY_MCP_CONFIG
         except (AttributeError, TypeError):
             pass
     return options

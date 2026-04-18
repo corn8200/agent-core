@@ -27,8 +27,6 @@ AGENT_NAMES = {
     "foreman": "Foreman",
     "watch-commander": "WC",
     "wc": "WC",
-    "research-chain": "RC",
-    "rc": "RC",
     "nudge": "Nudge",
     "brief": "Brief",
     "handler": "Handler",

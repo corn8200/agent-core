@@ -3,7 +3,7 @@
 Layered routing (router-v2):
 0. VPS reply tag — `[V:<service>:<ref>] <reply>` -> POST to agent-cp, done.
 1. Short-code check — A1/D1/E1 approval-queue replies (zero cost).
-2. Prefix match — research:/quick:/compare:/local: (zero cost).
+2. Prefix match — research:/quick:/compare:/local: dispatched to Scout via SDK.
 2.5 Active session check — non-shortcode replies on a chat with an active
    agent session resume that session instead of starting a new one.
 3. LLM classification — full context injection, intent -> dispatch plan.
@@ -424,8 +424,31 @@ async def _handle_more_code(short_id: int, chat_identifier: str) -> str:
 
 # --- Layer 2: Prefixes ------------------------------------------------------
 
+_SCOUT_TAG_INSTRUCTIONS = {
+    "research": "Conduct thorough, multi-source research.",
+    "quick": "Give a fast, direct answer using no more than two sources.",
+    "compare": "Compare the options side-by-side on price, features, and fit.",
+    "local": "Focus on local/regional sources (Eastern WV, Western MD, Northern VA).",
+}
+
+
+def build_scout_prefix_prompt(tag: str, question: str) -> str:
+    """Compose the Scout prompt for a `research:` / `quick:` / `compare:` / `local:` message.
+
+    Shared between the iMessage router (Layer 2) and watch-commander's
+    /cmd research|quick|compare|local so both call sites dispatch through
+    the same Scout path.
+    """
+    instruction = _SCOUT_TAG_INSTRUCTIONS.get(tag, _SCOUT_TAG_INSTRUCTIONS["research"])
+    return f"{instruction}\n\nTopic: {question}"
+
+
 async def _handle_prefix(msg: InboundMessage) -> Optional[str]:
-    """Check for research-chain prefixes. Returns handler name or None."""
+    """Check for scout prefixes (research:/quick:/compare:/local:).
+
+    Dispatches to the Scout agent via SDK (same path as LLM-classified
+    research intent). Returns handler name `scout:{tag}` or None.
+    """
     text = msg.text.strip().lower()
     for prefix in PREFIXES:
         if text.startswith(prefix):
@@ -434,24 +457,13 @@ async def _handle_prefix(msg: InboundMessage) -> Optional[str]:
                 return None
 
             tag = prefix.rstrip(":")
-            ts = datetime.now().strftime("%Y%m%d-%H%M%S")
-            session_name = f"research-{ts}"
-
-            # Write question to temp file to avoid shell quoting issues
-            qfile = tempfile.NamedTemporaryFile(
-                mode="w", suffix=".txt", delete=False, prefix="rc-",
-            )
-            qfile.write(question)
-            qfile.close()
-
-            ORCHESTRATOR = str(Path.home() / "research-chain/orchestrator.py")
-            VENV_PYTHON = str(Path.home() / "Projects/agent-core/.venv/bin/python3")
-            cmd = f'Q=$(cat {qfile.name}); rm {qfile.name}; {VENV_PYTHON} {ORCHESTRATOR} {tag} "$Q"'
-            subprocess.Popen(["tmux", "new-session", "-d", "-s", session_name, cmd])
+            prompt = build_scout_prefix_prompt(tag, question)
+            dispatched = await _dispatch_to_agent("scout", prompt, msg.chat_identifier)
             print(f"[router] Dispatched prefix: {tag} -> {question[:80]}")
 
-            update_inbound_route(msg.rowid, f"research-chain:{tag}", "prefix")
-            return f"research-chain:{tag}"
+            handler = f"scout:{tag}" if dispatched == "scout" else dispatched
+            update_inbound_route(msg.rowid, handler, "prefix")
+            return handler
 
     return None
 

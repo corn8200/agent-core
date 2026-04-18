@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Benchmark: Managed Agents vs in-process SDK on a real agent-core task.
 
-Runs the research-chain enrichment prompt (structured JSON extraction)
-through both code paths with the same input, reports latency + output parity.
+Runs an enrichment-shaped prompt (structured JSON extraction) through
+both code paths with the same input, reports latency + output parity.
 
 Usage:
     .venv/bin/python tests/bench_managed_vs_sdk.py
@@ -29,10 +29,10 @@ assert _console_key, "need ANTHROPIC_CONSOLE_KEY in ~/.config/secrets.env for ma
 os.environ["ANTHROPIC_API_KEY"] = _console_key
 
 from core.managed import managed_query  # noqa: E402
-from claude_agent_sdk import query, ClaudeAgentOptions  # noqa: E402
+from claude_agent_sdk import query, ClaudeAgentOptions  # noqa: E402  # allow-direct-sdk
 from core.hooks import AGENT_HOOKS  # noqa: E402
 
-# A realistic enrichment-style prompt — exactly the shape research-chain uses
+# A realistic enrichment-style prompt — exactly the shape the old research pipeline used
 SAMPLE_RESEARCH = """The DJI Matrice 30T is a commercial thermal drone with a 640x512 radiometric thermal
 sensor and 48MP wide-angle camera. Weight 3.77 lbs, flight time 41 minutes, transmission range
 15 km. MSRP $13,999 for base package. Popular with power line inspection and search-and-rescue.

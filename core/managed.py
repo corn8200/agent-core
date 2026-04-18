@@ -4,8 +4,8 @@ Why this exists:
     Some workflows (esp. code exec, PDF rendering, CSV analysis, anything needing
     a real container with state) benefit from Anthropic's hosted Managed Agents
     runtime over the in-process Claude Agent SDK. This module exposes a thin
-    async helper that matches the shape of research-chain's `sdk_pass()` so any
-    pure text-in/text-out pass can be swapped over with a one-line change.
+    async helper that matches the shape of a single SDK pass so any pure
+    text-in/text-out pass can be swapped over with a one-line change.
 
     For pure-LLM passes there's no advantage — that's an intentional finding of
     the 2026-04-09 benchmark (see docs/managed_vs_sdk.md). Use this for

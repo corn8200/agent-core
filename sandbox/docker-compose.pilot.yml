@@ -22,6 +22,8 @@ services:
       HOME: /home/agent
       PYTHONDONTWRITEBYTECODE: "1"
       PYTHONUNBUFFERED: "1"
+      PYTHONPATH: "/agent-core:/app"
+      OP_SERVICE_ACCOUNT_TOKEN_FILE: "/run/secrets/op-sa-token"
     volumes:
       - type: bind
         source: ${HOME}/.claude
@@ -34,6 +36,14 @@ services:
       - type: bind
         source: ${HOME}/Projects/anthropic-update-watcher
         target: /app
+        read_only: true
+      - type: bind
+        source: ${HOME}/Projects/agent-core
+        target: /agent-core
+        read_only: true
+      - type: bind
+        source: ${HOME}/.config/op-service-account-token
+        target: /run/secrets/op-sa-token
         read_only: true
     working_dir: /app
     networks:

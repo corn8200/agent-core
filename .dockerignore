@@ -1,0 +1,14 @@
+.git
+.git/**
+.venv
+.venv/**
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+**/.pytest_cache
+**/node_modules
+handoff
+/tmp
+logs
+*.log
+.claude/worktrees

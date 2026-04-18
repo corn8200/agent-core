@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates curl gnupg git tini \
+      ca-certificates curl gnupg git tini unzip \
  && mkdir -p /etc/apt/keyrings \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
     | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
@@ -17,7 +17,12 @@ RUN apt-get update \
     > /etc/apt/sources.list.d/nodesource.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends nodejs \
- && apt-get purge -y gnupg \
+ && curl -fsSL https://cache.agilebits.com/dist/1P/op2/pkg/v2.31.1/op_linux_arm64_v2.31.1.zip -o /tmp/op.zip \
+ && unzip /tmp/op.zip -d /tmp/op \
+ && mv /tmp/op/op /usr/local/bin/op \
+ && chmod +x /usr/local/bin/op \
+ && rm -rf /tmp/op /tmp/op.zip \
+ && apt-get purge -y gnupg unzip \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 

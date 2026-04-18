@@ -39,6 +39,28 @@ DESTRUCTIVE_PATTERNS = [
 
 DESTRUCTIVE_RE = re.compile("|".join(DESTRUCTIVE_PATTERNS), re.IGNORECASE)
 
+# --- Outbox-bypass patterns (Universal Outbox enforcement) ---
+# Block bare outbound-message sends that skip the core.outbox preview gate.
+# Any non-John recipient MUST route through queue_or_send() first.
+# guard_hook enforces this on Bash tool_use by scanning the command text.
+OUTBOX_BYPASS_PATTERNS = [
+    r"smtplib\.SMTP[_A-Za-z]*\([^)]*\)\.sendmail",         # smtplib direct sendmail
+    r"\.sendmail\s*\(",                                      # any bound .sendmail(...)
+    r"osascript[^\n]*tell\s+application\s+[\"']Mail[\"'][^\n]*send",  # AppleScript Mail send
+    r"ssh\s+vps\s+[\"']?send-email\b",                       # VPS send-email wrapper
+    r"\bsend-email\s+(?:--from\b|--to\b)",                   # direct send-email CLI
+    r"queue_cli\.py[^\n]*--send-now",                        # sentry-mailqueue direct flush
+]
+OUTBOX_BYPASS_RE = re.compile("|".join(OUTBOX_BYPASS_PATTERNS), re.IGNORECASE | re.DOTALL)
+
+# Opt-out marker: legitimate outbox-gated paths include this token so the
+# guard doesn't block them. Also honored by explicit approval paths
+# (reply-router promoting a pending record with _approved=True).
+OUTBOX_BYPASS_ALLOW = re.compile(
+    r"(OUTBOX_OK|_approved\s*=\s*True|from\s+core\.outbox\s+import|core\.outbox\.queue_or_send)",
+    re.IGNORECASE,
+)
+
 
 def _safe_get(obj: Any, key: str, default: Any = "") -> Any:
     """Safely extract a field from hook input (may be dict or object)."""
@@ -124,6 +146,27 @@ async def guard_hook(input: Any, tool_use_id: str | None, context: Any) -> dict:
             return {
                 "decision": "block",
                 "reason": f"Destructive command blocked: {text[:100]}",
+            }
+
+        # Universal Outbox enforcement: block bare smtplib/Mail/send-email
+        # unless the command is clearly going through the outbox gate.
+        if text and OUTBOX_BYPASS_RE.search(text) and not OUTBOX_BYPASS_ALLOW.search(text):
+            _write_audit({
+                "ts": datetime.now(timezone.utc).isoformat(),
+                "event": "BLOCKED_OUTBOX_BYPASS",
+                "tool": tool_name,
+                "command": text[:200],
+                "session": str(_safe_get(input, "session_id", ""))[:12],
+            })
+            return {
+                "decision": "block",
+                "reason": (
+                    "Outbox bypass blocked — outbound messaging MUST route "
+                    "through core.outbox.queue_or_send() for APPROVE/DENY "
+                    "preview. Use send_imessage_reliable / send_personal_email "
+                    "/ send_business_email, or add an OUTBOX_OK comment if "
+                    "the recipient is John himself."
+                ),
             }
     except Exception:
         pass  # Never crash the stream — fail open on error

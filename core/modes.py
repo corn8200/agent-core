@@ -23,6 +23,8 @@ from pathlib import Path
 
 _ENV_FILE = Path.home() / ".config" / "thrifty.env"
 _STATE_FILE = Path.home() / ".config" / "thrifty.state"
+_SOFT_ENV_FILE = Path.home() / ".config" / "thrifty-soft.env"
+_SOFT_STATE_FILE = Path.home() / ".config" / "thrifty-soft.state"
 
 
 def is_thrifty_on() -> bool:
@@ -34,6 +36,28 @@ def is_thrifty_on() -> bool:
     try:
         for line in _ENV_FILE.read_text().splitlines():
             if line.startswith("export THRIFTY_MODE=") and line.endswith("=1"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def is_thrifty_soft_on() -> bool:
+    """True if THRIFTY_SOFT_MODE is active.
+
+    Soft mode downgrades opus→sonnet only (sonnet + haiku unchanged). Use for
+    burn-rate alerts and 24/7 cost ceilings — keeps Sonnet capability, kills
+    the ~5x opus cost multiplier. Hard thrifty still takes priority.
+    """
+    if is_thrifty_on():
+        return False  # hard thrifty overrides — no double-counting
+    if os.environ.get("THRIFTY_SOFT_MODE") == "1":
+        return True
+    if not _SOFT_ENV_FILE.exists():
+        return False
+    try:
+        for line in _SOFT_ENV_FILE.read_text().splitlines():
+            if line.startswith("export THRIFTY_SOFT_MODE=") and line.endswith("=1"):
                 return True
     except Exception:
         pass
@@ -85,18 +109,21 @@ def thrifty_skip_keys() -> frozenset[str]:
 def thrifty_model(default: str = "opus") -> str:
     """Return the preferred SDK model given current mode. Default is opus.
 
-    During thrifty mode, callers that bypass the sitecustomize downgrade
-    (e.g. direct Anthropic HTTP clients) can call this to pick haiku
-    explicitly. The sitecustomize monkeypatch handles claude_agent_sdk
-    automatically, so agents using query() don't need to check this at all.
+    Hard thrifty forces haiku. Soft thrifty forces sonnet (for opus requests;
+    sonnet and haiku pass through unchanged). No-mode returns the default.
     """
     if is_thrifty_on():
         return "haiku"
+    if is_thrifty_soft_on():
+        if (default or "").lower() == "opus":
+            return "sonnet"
+        return default
     return default
 
 
 __all__ = [
     "is_thrifty_on",
+    "is_thrifty_soft_on",
     "thrifty_expires_at",
     "thrifty_remaining",
     "thrifty_skip_keys",

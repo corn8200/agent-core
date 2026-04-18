@@ -34,12 +34,41 @@ def _thrifty_on() -> bool:
     return False
 
 
+def _thrifty_soft_on() -> bool:
+    if _thrifty_on():
+        return False  # hard wins
+    if os.environ.get("THRIFTY_SOFT_MODE") == "1":
+        return True
+    env_file = Path.home() / ".config" / "thrifty-soft.env"
+    if not env_file.exists():
+        return False
+    try:
+        for line in env_file.read_text().splitlines():
+            if line.startswith("export THRIFTY_SOFT_MODE=") and line.endswith("=1"):
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _downgrade(model: str | None) -> str | None:
+    """Map a model name to its thrifty equivalent.
+
+    Hard thrifty:  opus → haiku, sonnet → haiku
+    Soft thrifty:  opus → sonnet, sonnet → sonnet (unchanged)
+    Neither on:    passthrough
+    """
     if not model:
         return model
     lower = model.lower()
-    if "opus" in lower or "sonnet" in lower:
-        return "haiku"
+    if _thrifty_on():
+        if "opus" in lower or "sonnet" in lower:
+            return "haiku"
+        return model
+    if _thrifty_soft_on():
+        if "opus" in lower:
+            return "sonnet"
+        return model
     return model
 
 
@@ -86,7 +115,7 @@ def patch() -> None:
     wrapped_query = _sdk.query
 
     async def thrifty_query(**kwargs):  # type: ignore[override]
-        if _thrifty_on():
+        if _thrifty_on() or _thrifty_soft_on():
             _rewrite_options(kwargs.get("options"))
         async for msg in wrapped_query(**kwargs):
             yield msg

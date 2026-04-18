@@ -144,9 +144,57 @@ async def _send_nudge(message: str, dry_run: bool = False):
     await send_message(message, agent="nudge", tier="normal", attribution=True)
 
 
+def _in_any_active_window(now: datetime, *, upcoming_events: bool = False) -> bool:
+    """Return True if `now` falls inside any tier's active send window.
+
+    Tiers:
+      - week_ahead:        Sunday 19:00-20:00
+      - day_before:        any day 18:00-20:00
+      - morning_preview:   any day 07:00-08:59
+      - fifteen_min / five_min: gated on `upcoming_events` — only active when
+        there is at least one event in the next hour. The caller fetches the
+        20-minute window itself, but for cheap pre-gating we accept an
+        explicit hint. When `upcoming_events=False` (default) these tiers
+        do NOT open the window; callers that know events are imminent pass
+        True to skip the early-return.
+
+    Rationale: the engine was firing every 5 min (288 runs/day) with ~3800
+    no-op hits queuing gather_reminders()/get_events(). Gating at the top
+    drops ~85% of those runs to a fast "outside window, skip" log line.
+    """
+    hour = now.hour
+    if now.weekday() == 6 and 19 <= hour <= 20:
+        return True
+    if 18 <= hour <= 20:
+        return True
+    if 7 <= hour <= 8:
+        return True
+    if upcoming_events:
+        return True
+    return False
+
+
+async def _has_upcoming_events(now: datetime) -> bool:
+    """Cheap probe: are there any schedulable events in the next hour?"""
+    try:
+        events = await get_events(now, now + timedelta(hours=1))
+    except Exception:
+        return False
+    return any(not _should_skip(e) for e in events)
+
+
 async def run_nudges(dry_run: bool = False):
     now = datetime.now()
     hour = now.hour
+
+    # Top-of-loop gate: if no tier is in an active window AND no event is
+    # imminent, skip all gather_* calls. This is the single biggest lever
+    # for the 3800+ no-op fires/day.
+    if not _in_any_active_window(now):
+        has_events = await _has_upcoming_events(now)
+        if not has_events:
+            print(f"[nudge] outside active window, skipping")
+            return
 
     # --- Week-ahead (Sunday 7-8 PM) ---
     if now.weekday() == 6 and 19 <= hour <= 20:

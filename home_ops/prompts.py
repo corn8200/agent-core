@@ -424,7 +424,7 @@ def build_user_prompt(gather: dict, mode: str) -> tuple[str, dict]:
         "learned_facts": gather.get("learned_facts") or [],
     }
 
-    blob, shrink_info = _shrink_payload(payload, limit=24000)
+    blob, shrink_info = _shrink_payload(payload, limit=200000)
     day_labels = _build_day_labels()
 
     mode_hint = (

@@ -235,20 +235,13 @@ async def run(mode: str, dry_run: bool = False, gather_only: bool = False,
         print("FAIL: synthesizer returned empty", file=sys.stderr)
         return 1
 
-    # Stage 2b: shrink visibility — if the payload shrinker fired, prepend a
-    # marker to the brief body (so I can see it in email/iMessage) AND log to
-    # state.py. If shrink also fired yesterday → Pushover P0 (S2.5, 2026-04-17).
+    # Stage 2b: shrink visibility — silent for the user (no marker in body),
+    # but log to state.py + Pushover-on-repeat so engineering still sees it.
     if shrink_info.get("fired"):
         orig = shrink_info["original_size"]
         final = shrink_info["final_size"]
         lim = shrink_info["limit"]
         cleared = shrink_info.get("cleared", False)
-        cleared_note = " [imessages+mail CLEARED]" if cleared else ""
-        marker = (
-            f"⚠ SHRINK FIRED: payload {orig}→{final}B "
-            f"(limit {lim}){cleared_note}\n\n"
-        )
-        brief_text = marker + brief_text
         print(
             f"[{datetime.now():%H:%M:%S}] shrink fired: "
             f"{orig}→{final} bytes (limit {lim}, cleared={cleared})",

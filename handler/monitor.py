@@ -145,7 +145,7 @@ async def send_imessage_escalation(summary: str):
         print(f"[handler] escalation import failed: {e}", file=sys.stderr)
         return
     try:
-        ok, detail = await send_imessage_reliable("John", summary)
+        ok, detail = await send_imessage_reliable("corn82@icloud.com", summary, _approved=True)
         if ok:
             print("[handler] escalation iMessage sent")
         else:

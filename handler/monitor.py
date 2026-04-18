@@ -44,9 +44,15 @@ from core.constants import HOME, PERSONAL_EMAIL, VPS_SSH
 # --- Dedup State ---
 STATE_FILE = Path.home() / "logs" / "handler-state.json"
 DIAGNOSIS_CACHE_FILE = Path.home() / "logs" / "handler-diagnosis-cache.json"
+ANOMALY_AGE_FILE = Path.home() / "logs" / "handler-anomaly-age.json"
 EMAIL_COOLDOWN = timedelta(hours=6)  # Don't re-email same anomaly set within this window
 DIAGNOSIS_COOLDOWN = timedelta(hours=6)  # Don't re-diagnose same anomaly within this window
 QUIET_HOURS = (22, 7)  # 22:00-07:00 = push-only, no email
+
+# Break dedup silence when a fingerprint has been suppressed for this long
+# with no remediation firing. One iMessage per ESCALATION_COOLDOWN, not spam.
+SUPPRESSED_ANOMALY_MAX_AGE = 24 * 3600
+ESCALATION_COOLDOWN = timedelta(hours=24)
 
 
 def load_state() -> dict:
@@ -100,6 +106,52 @@ def prune_diagnosis_cache(cache: dict, now: datetime) -> dict:
         if (now - ts) < DIAGNOSIS_COOLDOWN:
             fresh[fp] = ts_str
     return fresh
+
+
+def load_anomaly_age() -> dict:
+    if ANOMALY_AGE_FILE.exists():
+        try:
+            return json.loads(ANOMALY_AGE_FILE.read_text())
+        except Exception:
+            pass
+    return {}
+
+
+def save_anomaly_age(age_map: dict):
+    ANOMALY_AGE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    ANOMALY_AGE_FILE.write_text(json.dumps(age_map, indent=2))
+
+
+def prune_anomaly_age(age_map: dict, active_fps: set, now: datetime) -> dict:
+    """Keep entries still active this run, plus anything seen within the last 7 days."""
+    keep = {}
+    for fp, rec in age_map.items():
+        if fp in active_fps:
+            keep[fp] = rec
+            continue
+        try:
+            first = datetime.fromisoformat(rec.get("first_seen", ""))
+        except Exception:
+            continue
+        if (now - first) < timedelta(days=7):
+            keep[fp] = rec
+    return keep
+
+
+async def send_imessage_escalation(summary: str):
+    try:
+        from core.tools import send_imessage_reliable
+    except Exception as e:
+        print(f"[handler] escalation import failed: {e}", file=sys.stderr)
+        return
+    try:
+        ok, detail = await send_imessage_reliable("John", summary)
+        if ok:
+            print("[handler] escalation iMessage sent")
+        else:
+            print(f"[handler] escalation iMessage failed: {detail}", file=sys.stderr)
+    except Exception as e:
+        print(f"[handler] escalation iMessage exception: {e}", file=sys.stderr)
 
 
 def is_quiet_hours(now: datetime | None = None) -> bool:
@@ -412,7 +464,8 @@ async def quick_check(dry_run: bool = False):
     # --- Diagnosis Cooldown (prevents burning Opus credits on unresolved anomalies) ---
     diag_cache = prune_diagnosis_cache(load_diagnosis_cache(), now)
     diag_fp = diagnosis_fingerprint(actionable)
-    if diag_fp in diag_cache:
+    suppressed = diag_fp in diag_cache
+    if suppressed:
         last_diag = datetime.fromisoformat(diag_cache[diag_fp])
         age = now - last_diag
         print(f"[{now:%H:%M:%S}] Skipping diagnosis: same anomaly (fp={diag_fp}) diagnosed {age} ago, cooldown={DIAGNOSIS_COOLDOWN}.")
@@ -423,6 +476,46 @@ async def quick_check(dry_run: bool = False):
         diagnosis = await diagnose_anomalies(actionable, data, heal_context)
         diag_cache[diag_fp] = now.isoformat()
         save_diagnosis_cache(diag_cache)
+
+    # --- Chronic-anomaly escalation ---
+    # Dedup can swallow a recurring anomaly forever if no playbook matches.
+    # Track first_seen per diag_fp; if we've been suppressing for > max_age
+    # and auto-remediation didn't clear it, break silence with one iMessage.
+    age_map = load_anomaly_age()
+    rec = age_map.get(diag_fp) or {"first_seen": now.isoformat(), "last_escalated": None, "fires": 0}
+    rec["fires"] = int(rec.get("fires", 0)) + 1
+    rec["sample"] = actionable[:5]
+    age_map[diag_fp] = rec
+    if suppressed and not healed:
+        try:
+            first_seen = datetime.fromisoformat(rec["first_seen"])
+        except Exception:
+            first_seen = now
+        suppressed_seconds = (now - first_seen).total_seconds()
+        last_esc_str = rec.get("last_escalated")
+        last_esc = None
+        if last_esc_str:
+            try:
+                last_esc = datetime.fromisoformat(last_esc_str)
+            except Exception:
+                last_esc = None
+        escalation_due = (
+            suppressed_seconds > SUPPRESSED_ANOMALY_MAX_AGE
+            and (last_esc is None or (now - last_esc) >= ESCALATION_COOLDOWN)
+        )
+        if escalation_due:
+            hours = int(suppressed_seconds // 3600)
+            summary_msgs = "; ".join(a.get("message", "") for a in actionable[:3])[:180]
+            msg = (
+                f"[handler] Chronic anomaly fp={diag_fp} — {hours}h old, "
+                f"{rec['fires']} fires, no remediation. {summary_msgs}. "
+                "Chronic — add remediation or mark benign."
+            )
+            await send_imessage_escalation(msg)
+            rec["last_escalated"] = now.isoformat()
+            age_map[diag_fp] = rec
+    age_map = prune_anomaly_age(age_map, {diag_fp}, now)
+    save_anomaly_age(age_map)
 
     # Push notification always fires (cheap, silent on phone at night)
     heal_prefix = f"[{len(healed)} auto-healed] " if healed else ""

@@ -62,6 +62,12 @@ VPS_TAG_RE = re.compile(
 SHORT_CODE_RE = re.compile(r"^\s*([AD])(\d+)\s*$", re.IGNORECASE)
 EDIT_CODE_RE = re.compile(r"^\s*E(\d+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
 
+# Outbox approve/deny tokens (Universal Outbox). uuid is 12 hex chars (outbox
+# uses uuid4().hex[:12]). Anchor to start-of-line so a stray APPROVE:xyz in
+# body text of a quoted message doesn't trigger.
+OUTBOX_APPROVE_RE = re.compile(r"^\s*APPROVE\s*:\s*([0-9a-fA-F]{8,32})\s*$", re.IGNORECASE)
+OUTBOX_DENY_RE = re.compile(r"^\s*DENY\s*:\s*([0-9a-fA-F]{8,32})\s*$", re.IGNORECASE)
+
 # Dispatch-control shortcodes (backlog #91). These are matched BEFORE A/D/E
 # because K/S/?/R/M are more specific intents on dispatch sessions.
 KILL_CODE_RE = re.compile(r"^\s*K(\d+)\s*$", re.IGNORECASE)
@@ -180,6 +186,57 @@ async def _handle_vps_reply(msg: InboundMessage) -> Optional[str]:
     return handler
 
 
+# --- Layer 0.5: Outbox APPROVE / DENY --------------------------------------
+
+async def _handle_outbox_token(msg: InboundMessage) -> Optional[str]:
+    """Universal Outbox gate. Replies of the form APPROVE:<uuid> promote the
+    pending record (re-calls the original send_fn with _approved=True). DENY
+    moves it to denied/. Missing uuid is handled gracefully.
+    """
+    text = msg.text.strip()
+    m = OUTBOX_APPROVE_RE.match(text)
+    if m:
+        uid = m.group(1).lower()
+        try:
+            from core.outbox import promote
+            result = await promote(uid)
+        except Exception as e:
+            result = {"status": "error", "uuid": uid, "error": str(e)}
+        status = result.get("status", "error")
+        if status == "sent":
+            reply = f"[outbox] APPROVED {uid} — sent"
+        elif status == "missing":
+            reply = f"[outbox] no pending record for {uid}"
+        else:
+            reply = f"[outbox] APPROVE {uid} {status}: {result.get('error','')}"
+        await send_message(reply, agent="router", recipient=msg.chat_identifier,
+                           attribution=False)
+        update_inbound_route(msg.rowid, f"outbox:approve:{status}", "outbox-token")
+        return f"outbox:approve:{status}"
+
+    m = OUTBOX_DENY_RE.match(text)
+    if m:
+        uid = m.group(1).lower()
+        try:
+            from core.outbox import deny
+            result = await deny(uid)
+        except Exception as e:
+            result = {"status": "error", "uuid": uid, "error": str(e)}
+        status = result.get("status", "error")
+        if status == "denied":
+            reply = f"[outbox] DENIED {uid}"
+        elif status == "missing":
+            reply = f"[outbox] no pending record for {uid}"
+        else:
+            reply = f"[outbox] DENY {uid} {status}: {result.get('error','')}"
+        await send_message(reply, agent="router", recipient=msg.chat_identifier,
+                           attribution=False)
+        update_inbound_route(msg.rowid, f"outbox:deny:{status}", "outbox-token")
+        return f"outbox:deny:{status}"
+
+    return None
+
+
 # --- Layer 1: Short-codes ---------------------------------------------------
 
 def _post_approval(code: str, action: str, payload: dict | None = None) -> bool:
@@ -286,6 +343,8 @@ def _looks_like_shortcode(text: str) -> bool:
         or EXPLAIN_CODE_RE.match(t)
         or RETRY_CODE_RE.match(t)
         or MORE_CODE_RE.match(t)
+        or OUTBOX_APPROVE_RE.match(t)
+        or OUTBOX_DENY_RE.match(t)
     )
 
 
@@ -926,6 +985,12 @@ async def route(msg: InboundMessage) -> str:
     # Layer 0: VPS reply tag (Task C). Must come before anything else so
     # tag-prefixed replies never leak into short-code or session matching.
     result = await _handle_vps_reply(msg)
+    if result:
+        return result
+
+    # Layer 0.5: Outbox APPROVE:<uuid> / DENY:<uuid> tokens. Runs before
+    # short-codes so an APPROVE token is never confused with A1/D1 approvals.
+    result = await _handle_outbox_token(msg)
     if result:
         return result
 

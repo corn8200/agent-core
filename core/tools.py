@@ -13,7 +13,7 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from claude_agent_sdk import tool, create_sdk_mcp_server
+from claude_agent_sdk import tool, create_sdk_mcp_server  # allow-direct-sdk
 
 
 # --- Shared Swarm Context (in-process key-value store) ---
@@ -237,8 +237,34 @@ async def tmux_relay_healthy() -> tuple[bool, str]:
     return False, f"unexpected probe output: {out[:200]}"
 
 
-async def send_imessage_reliable(buddy: str, message: str) -> tuple[bool, str]:
-    """Send iMessage via tmux relay (works from LaunchAgents). Falls back to Pushover."""
+async def send_imessage_reliable(buddy: str, message: str, _approved: bool = False) -> tuple[bool, str]:
+    """Send iMessage via tmux relay (works from LaunchAgents). Falls back to Pushover.
+
+    Third-party recipients route through core.outbox for APPROVE/DENY preview
+    unless _approved=True (reply-router promotion path) or the recipient is one
+    of John's own self-identifiers.
+    """
+    if not _approved:
+        from core.outbox import _is_self, queue_or_send
+        if not _is_self(buddy):
+            result = await queue_or_send(
+                channel="imessage",
+                recipient=buddy,
+                subject=None,
+                body=message,
+                source="send_imessage_reliable",
+                send_fn=send_imessage_reliable,
+                send_fn_module="core.tools",
+                send_fn_name="send_imessage_reliable",
+                send_kwargs={"buddy": buddy, "message": message},
+            )
+            status = result.get("status")
+            if status == "queued":
+                return True, f"outbox queued {result['uuid']}"
+            if status == "sent_direct":
+                inner = result.get("result") or (True, "sent")
+                return inner if isinstance(inner, tuple) else (True, str(inner))
+
     # Pre-warm Messages.app so the first send doesn't cold-start inside the 30s window
     escaped_msg = message.replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34))
     script = (
@@ -329,6 +355,26 @@ async def send_business_email(args: dict[str, Any]) -> dict:
         to_addr = args["to"]
         subject = args["subject"]
         body = args["body"]
+        if not args.get("_approved"):
+            from core.outbox import _is_self, queue_or_send
+            if not _is_self(to_addr):
+                outbox_kwargs = {k: v for k, v in args.items() if k != "_approved"}
+                result = await queue_or_send(
+                    channel="email_business",
+                    recipient=to_addr,
+                    subject=subject,
+                    body=body,
+                    source="send_business_email",
+                    send_fn=send_business_email,
+                    send_fn_module="core.tools",
+                    send_fn_name="send_business_email",
+                    send_kwargs={"args": outbox_kwargs},
+                )
+                status = result.get("status")
+                if status == "queued":
+                    return {"content": [{"type": "text", "text": f"outbox queued {result['uuid']}"}]}
+                if status == "sent_direct":
+                    return result.get("result") or {"content": [{"type": "text", "text": "sent"}]}
         queue_cmd = (
             f"cd /srv/apps/sentry-mailqueue && "
             f".venv/bin/python queue_cli.py --to {shlex.quote(to_addr)} --subject {shlex.quote(subject)} --body {shlex.quote(body)} && "
@@ -361,6 +407,26 @@ async def send_personal_email(args: dict[str, Any]) -> dict:
     to = args["to"]
     subject = args["subject"]
     body = args["body"]
+    if not args.get("_approved"):
+        from core.outbox import _is_self, queue_or_send
+        if not _is_self(to):
+            outbox_kwargs = {k: v for k, v in args.items() if k != "_approved"}
+            result = await queue_or_send(
+                channel="email_personal",
+                recipient=to,
+                subject=subject,
+                body=body,
+                source="send_personal_email",
+                send_fn=send_personal_email,
+                send_fn_module="core.tools",
+                send_fn_name="send_personal_email",
+                send_kwargs={"args": outbox_kwargs},
+            )
+            status = result.get("status")
+            if status == "queued":
+                return {"content": [{"type": "text", "text": f"outbox queued {result['uuid']}"}]}
+            if status == "sent_direct":
+                return result.get("result") or {"content": [{"type": "text", "text": "sent"}]}
     html_flag = "--html" if args.get("html") else ""
     b64 = base64.b64encode(body.encode()).decode()
     cmd = f"send-email --from notify@jcornelius.net --to {shlex.quote(to)} --subject {shlex.quote(subject)} --body-b64 {b64} {html_flag}".strip()

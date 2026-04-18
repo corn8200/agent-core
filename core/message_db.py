@@ -54,7 +54,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     created_at TEXT NOT NULL,
     last_activity_at TEXT NOT NULL,
     last_prompt TEXT,
-    last_question TEXT                    -- question sent via CLARIFY: sentinel
+    last_question TEXT,                   -- question sent via CLARIFY: sentinel
+    short_id INTEGER,                     -- rolling int for K<n>/S/?<n>/R<n>/M<n> shortcodes
+    initial_prompt TEXT,                  -- immutable original prompt (for R<n> retry)
+    tmux_session_name TEXT                -- tmux session name so K<n> can kill it
 );
 
 CREATE INDEX IF NOT EXISTS idx_outbound_pending
@@ -69,6 +72,9 @@ CREATE INDEX IF NOT EXISTS idx_outbound_agent
 CREATE INDEX IF NOT EXISTS idx_sessions_chat_active
     ON sessions(chat_identifier, status, last_activity_at);
 """
+# idx_sessions_short_id is created by _migrate_sessions AFTER the short_id
+# column is added via ALTER TABLE — executescript would fail on pre-migration
+# databases where the column doesn't yet exist.
 
 
 @contextmanager
@@ -96,6 +102,33 @@ def _connect():
 def init_db():
     with _connect() as conn:
         conn.executescript(_SCHEMA)
+        _migrate_sessions(conn)
+
+
+def _migrate_sessions(conn):
+    """Add short_id/initial_prompt/tmux_session_name to existing sessions rows."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(sessions)").fetchall()}
+
+    if "short_id" not in existing:
+        conn.execute("ALTER TABLE sessions ADD COLUMN short_id INTEGER")
+        # Backfill rowid so historic rows are addressable. rowid is 1-based and unique.
+        conn.execute("UPDATE sessions SET short_id = rowid WHERE short_id IS NULL")
+
+    if "initial_prompt" not in existing:
+        conn.execute("ALTER TABLE sessions ADD COLUMN initial_prompt TEXT")
+        conn.execute(
+            "UPDATE sessions SET initial_prompt = last_prompt "
+            "WHERE initial_prompt IS NULL"
+        )
+
+    if "tmux_session_name" not in existing:
+        conn.execute("ALTER TABLE sessions ADD COLUMN tmux_session_name TEXT")
+
+    # Index creation is idempotent but ALTER TABLE above can't include it.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_short_id "
+        "ON sessions(short_id) WHERE short_id IS NOT NULL"
+    )
 
 
 def log_inbound(
@@ -206,18 +239,28 @@ def create_session(
     sdk_session_id: str,
     initial_prompt: str,
     status: str = "open",
-) -> str:
-    """Create a new resumable session. Returns internal session_id (uuid)."""
+) -> tuple[str, int]:
+    """Create a new resumable session.
+
+    Allocates a rolling short_id atomically (same transaction as insert) so
+    concurrent creates can't collide. Returns (session_id, short_id).
+    """
     session_id = uuid.uuid4().hex
     now = datetime.now().isoformat()
     with _connect() as conn:
+        row = conn.execute(
+            "SELECT COALESCE(MAX(short_id), 0) + 1 AS nxt FROM sessions"
+        ).fetchone()
+        short_id = int(row["nxt"])
         conn.execute(
             "INSERT INTO sessions (session_id, chat_identifier, agent_name, "
-            "sdk_session_id, status, created_at, last_activity_at, last_prompt) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (session_id, chat_identifier, agent_name, sdk_session_id, status, now, now, initial_prompt),
+            "sdk_session_id, status, created_at, last_activity_at, last_prompt, "
+            "initial_prompt, short_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (session_id, chat_identifier, agent_name, sdk_session_id, status,
+             now, now, initial_prompt, initial_prompt, short_id),
         )
-    return session_id
+    return session_id, short_id
 
 
 def get_active_session(
@@ -303,6 +346,37 @@ def list_sessions(chat_identifier: str | None = None, limit: int = 20) -> list[d
                 "SELECT * FROM sessions ORDER BY last_activity_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_session_by_short_id(short_id: int) -> dict | None:
+    """Look up a session by its rolling short_id. Chat-scope is ignored so the
+    user can K/S/?/R/M any session from any chat thread."""
+    with _connect() as conn:
+        row = conn.execute(
+            "SELECT * FROM sessions WHERE short_id = ?", (int(short_id),),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def set_session_tmux_name(session_id: str, tmux_session_name: str) -> None:
+    """Record the tmux session name so K<n> can kill it later."""
+    with _connect() as conn:
+        conn.execute(
+            "UPDATE sessions SET tmux_session_name = ? WHERE session_id = ?",
+            (tmux_session_name, session_id),
+        )
+
+
+def get_recent_sessions_summary(limit: int = 5) -> list[dict]:
+    """Return the last N sessions for the S (status) shortcode."""
+    with _connect() as conn:
+        rows = conn.execute(
+            "SELECT short_id, agent_name, status, last_activity_at, last_prompt "
+            "FROM sessions WHERE short_id IS NOT NULL "
+            "ORDER BY last_activity_at DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
         return [dict(r) for r in rows]
 
 

@@ -28,9 +28,9 @@ def _load_prompt(name: str) -> str:
 # --- Agent Definitions ---
 
 scout = AgentDefinition(
-    description="Research & intelligence specialist — deep web research, market analysis, company background, regulatory landscape, competitor scans. Uses WebSearch + WebFetch with Read/Grep/Write to surface facts, citations, and structured briefings. Pick over Turbo when a question needs multi-source synthesis. Read-only on local files (no Edit, no Bash). 20-turn budget, opus, max effort.",
+    description="Research & intelligence specialist — deep web research, market analysis, company background, regulatory landscape, competitor scans. Uses WebSearch + WebFetch with Read/Grep/Write to surface facts, citations, and structured briefings. Pick over Turbo when a question needs multi-source synthesis. Read-only on local files (no Edit, no Bash). 20-turn budget, sonnet by default (escalates to opus on !opus or deep-dive keywords).",
     prompt=_load_prompt("scout"),
-    model="opus",
+    model="sonnet",
     tools=["Read", "Grep", "Write", "WebSearch", "WebFetch"],
     maxTurns=20,
     permissionMode="bypassPermissions",
@@ -39,9 +39,9 @@ scout = AgentDefinition(
 )
 
 forge = AgentDefinition(
-    description="Document builder for polished, tailored deliverables — resumes, cover letters, proposals, business plans, briefings, cold outreach. Reads source inputs, edits drafts in place, writes finals via Read/Edit/Write/Bash. Pick over Anvil when the deliverable is prose, not code. No web access — caller supplies the facts. 15-turn budget, opus, max effort.",
+    description="Document builder for polished, tailored deliverables — resumes, cover letters, proposals, business plans, briefings, cold outreach. Reads source inputs, edits drafts in place, writes finals via Read/Edit/Write/Bash. Pick over Anvil when the deliverable is prose, not code. No web access — caller supplies the facts. 15-turn budget, sonnet by default (escalates to opus on !opus for high-stakes deliverables).",
     prompt=_load_prompt("forge"),
-    model="opus",
+    model="sonnet",
     tools=["Read", "Edit", "Write", "Bash"],
     maxTurns=15,
     permissionMode="bypassPermissions",
@@ -50,9 +50,9 @@ forge = AgentDefinition(
 )
 
 wrench = AgentDefinition(
-    description="Infrastructure & DevOps specialist — health checks, troubleshooting, service management across Mac Mini, VPS, and Raspberry Pi. Uses Bash + Read/Grep/Write to inspect logs, restart daemons, check disk and network, and chase service errors. Pick when something is broken or you need a status snapshot. No web tools — diagnose locally. 25-turn budget, opus, max effort.",
+    description="Infrastructure & DevOps specialist — health checks, troubleshooting, service management across Mac Mini, VPS, and Raspberry Pi. Uses Bash + Read/Grep/Write to inspect logs, restart daemons, check disk and network, and chase service errors. Pick when something is broken or you need a status snapshot. No web tools — diagnose locally. 25-turn budget, sonnet by default (auto-escalates to opus on outage keywords: down, broken, outage, debug, root cause, crashed, failing).",
     prompt=_load_prompt("wrench"),
-    model="opus",
+    model="sonnet",
     tools=["Bash", "Read", "Grep", "Write"],
     maxTurns=25,
     permissionMode="bypassPermissions",
@@ -72,9 +72,9 @@ dispatch = AgentDefinition(
 )
 
 ledger = AgentDefinition(
-    description="Data & financial analysis specialist — budgets, spending reconciliation, CSV crunching, bill scanning, Monarch Money queries, transaction categorization. Uses Bash + Read/Write to run sqlite queries, build summary tables, and cross-reference Mail for upcoming bills. Pick when the answer is a number, table, or financial comparison. No web tools — local data only. 20-turn budget, opus.",
+    description="Data & financial analysis specialist — budgets, spending reconciliation, CSV crunching, bill scanning, Monarch Money queries, transaction categorization. Uses Bash + Read/Write to run sqlite queries, build summary tables, and cross-reference Mail for upcoming bills. Pick when the answer is a number, table, or financial comparison. No web tools — local data only. 20-turn budget, sonnet.",
     prompt=_load_prompt("ledger"),
-    model="opus",
+    model="sonnet",
     tools=["Bash", "Read", "Write"],
     maxTurns=20,
     permissionMode="bypassPermissions",
@@ -105,9 +105,9 @@ titan = AgentDefinition(
 )
 
 anvil = AgentDefinition(
-    description="Code builder and implementation specialist — writes, refactors, and ships working code. Worktree-first, test-driven, verifies its own diffs in an isolated branch before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget, opus, max effort.",
+    description="Code builder and implementation specialist — writes, refactors, and ships working code. Worktree-first, test-driven, verifies its own diffs in an isolated branch before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget, sonnet by default (auto-escalates to opus on refactor/architect/multi-file/rewrite keywords or !opus).",
     prompt=_load_prompt("anvil"),
-    model="opus",
+    model="sonnet",
     tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "TodoWrite"],
     maxTurns=40,
     permissionMode="bypassPermissions",
@@ -150,6 +150,47 @@ ALL_AGENTS = {
     "critic": critic,
     "herald": herald,
 }
+
+
+# --- Tier metadata (R1/R2 agent routing rules) ---
+# Source of truth for the routing hook. Kept separate from AgentDefinition
+# to avoid coupling to SDK dataclass fields. Mirrors the `tier:` frontmatter
+# in ~/.claude/agents/*.md.
+#
+# Tiers:
+#   heavy    — always Opus. Task requires it (titan, critic).
+#   adaptive — default Sonnet, promotes to Opus on !opus or keyword triggers.
+#   standard — always Sonnet. No promotion path.
+#   light    — Haiku only.
+AGENT_TIERS: dict[str, str] = {
+    "scout":     "adaptive",
+    "forge":     "adaptive",
+    "wrench":    "adaptive",
+    "anvil":     "adaptive",
+    "herald":    "adaptive",
+    "critic":    "heavy",
+    "titan":     "heavy",
+    "dispatch":  "standard",
+    "toolsmith": "standard",
+    "ledger":    "standard",
+}
+
+# Keywords that auto-escalate an adaptive agent from Sonnet to Opus.
+# Matched case-insensitive against the Agent() prompt body.
+# Per-agent keyword lists keep the heuristic targeted (e.g. wrench cares about
+# outage words; anvil cares about code-structure words).
+ADAPTIVE_ESCALATION_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "wrench":  ("outage", "down", "broken", "debug", "root cause", "crashed", "failing", "unreachable"),
+    "anvil":   ("refactor", "architect", "multi-file", "cross-system", "end-to-end", "rewrite"),
+    "scout":   ("deep dive", "deep-dive", "comprehensive", "synthesize across", "cross-reference"),
+    "forge":   ("proposal", "capability statement", "business plan", "client report"),
+    "herald":  (),  # herald has internal two-pass tier logic; no keyword trigger needed
+}
+
+
+def get_agent_tier(name: str) -> str:
+    """Return the routing tier for a named agent. Unknown → 'standard'."""
+    return AGENT_TIERS.get(name, "standard")
 
 
 # Optional per-agent default output schemas (pydantic BaseModel class OR JSON

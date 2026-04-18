@@ -32,12 +32,13 @@ Usage:
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional, Type, Union
 
 # ⚠️ Scrub API billing vars before importing claude_agent_sdk. See
 # ~/Projects/anthropic-update-watcher/watcher.py:182-183 for rationale
@@ -48,7 +49,7 @@ for _leak_var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_U
 
 from core.mac_sdk import query, ClaudeAgentOptions
 
-from core.agents import ALL_AGENTS
+from core.agents import ALL_AGENTS, get_agent_schema
 from core.tools import create_core_server, SwarmContext, set_active_context
 from core.hooks import AGENT_HOOKS
 from core.thinking import STANDARD
@@ -66,6 +67,7 @@ class SwarmAgent:
     max_turns: int = 15
     max_budget: float = 0.50
     wave: int = 1
+    output_schema: Optional[Any] = None  # pydantic BaseModel class OR JSON schema dict
 
 
 @dataclass
@@ -77,6 +79,50 @@ class SwarmResult:
     elapsed: float = 0.0
     error: Optional[str] = None
     session_id: Optional[str] = None  # SDK session for resume
+    parsed: Optional[Any] = None     # structured output if output_schema set
+
+
+def _schema_to_json(schema: Any) -> Optional[dict]:
+    """Normalize a pydantic BaseModel class or dict into a JSON-schema dict."""
+    if schema is None:
+        return None
+    if isinstance(schema, dict):
+        return schema
+    model_json_schema = getattr(schema, "model_json_schema", None)
+    if callable(model_json_schema):
+        return model_json_schema()
+    return None
+
+
+def _extract_json(text: str) -> Optional[Any]:
+    """Best-effort extract of the first top-level JSON value from agent output."""
+    if not text:
+        return None
+    fence = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", text, re.DOTALL)
+    if fence:
+        try:
+            return json.loads(fence.group(1))
+        except json.JSONDecodeError:
+            pass
+    for opener, closer in (("{", "}"), ("[", "]")):
+        start = text.find(opener)
+        end = text.rfind(closer)
+        if 0 <= start < end:
+            try:
+                return json.loads(text[start:end + 1])
+            except json.JSONDecodeError:
+                continue
+    return None
+
+
+def _validate_parsed(schema: Any, raw: Any) -> Any:
+    """Validate extracted JSON against schema (pydantic class → instance; dict → raw)."""
+    if raw is None:
+        return None
+    model_validate = getattr(schema, "model_validate", None)
+    if callable(model_validate):
+        return model_validate(raw)
+    return raw
 
 
 class Swarm:
@@ -91,12 +137,17 @@ class Swarm:
 
     def add(self, name: str, prompt: str, agent: str = "scout",
             model: str = None, max_turns: int = 15, max_budget: float = 0.50,
-            wave: int = 1):
-        """Add an agent to the swarm."""
+            wave: int = 1, output_schema: Optional[Any] = None):
+        """Add an agent to the swarm.
+
+        output_schema: optional pydantic BaseModel class OR JSON schema dict.
+        When set, the agent prompt is appended with "Return ONLY JSON matching: ..."
+        and the final message is parsed + validated into SwarmResult.parsed.
+        """
         self.agents.append(SwarmAgent(
             name=name, prompt=prompt, agent=agent,
             model=model, max_turns=max_turns, max_budget=max_budget,
-            wave=wave,
+            wave=wave, output_schema=output_schema,
         ))
 
     async def run(self) -> dict[str, str]:
@@ -156,6 +207,30 @@ class Swarm:
             recall_block = ""
         agent_prompt = f"{recall_block}\n\n{sa.prompt}" if recall_block else sa.prompt
 
+        # Static cacheable prefix: agent's system prompt goes into the preset
+        # 'append' block. exclude_dynamic_sections=True strips per-invocation
+        # dynamic bits (cwd, git status) from the CLI preset so the prefix
+        # stays byte-stable across swarm calls — CLI/API-level prompt caching
+        # hits on this block. Per-task content (recall + user prompt) stays
+        # in the user message.
+        static_append = agent_def.prompt if agent_def and getattr(agent_def, "prompt", "") else ""
+        system_prompt_cfg = {
+            "type": "preset",
+            "preset": "claude_code",
+            "exclude_dynamic_sections": True,
+        }
+        if static_append:
+            system_prompt_cfg["append"] = static_append
+
+        # Structured output: per-call schema wins, else per-agent default.
+        effective_schema = sa.output_schema or get_agent_schema(sa.agent)
+        schema_dict = _schema_to_json(effective_schema)
+        if schema_dict is not None:
+            agent_prompt = (
+                f"{agent_prompt}\n\nReturn ONLY a JSON object matching this schema "
+                f"(no prose, no markdown fence):\n{json.dumps(schema_dict)}"
+            )
+
         try:
             result_text = ""
             try:
@@ -163,6 +238,7 @@ class Swarm:
                     prompt=agent_prompt,
                     options=ClaudeAgentOptions(
                         model=model,
+                        system_prompt=system_prompt_cfg,
                         permission_mode="bypassPermissions",
                         max_turns=sa.max_turns,
                         max_budget_usd=sa.max_budget,
@@ -186,26 +262,42 @@ class Swarm:
             result_text = result_text.strip()
             elapsed = time.time() - start
 
-            # Write handoff file
+            parsed_obj = None
+            parse_error = None
+            if effective_schema is not None:
+                try:
+                    raw = _extract_json(result_text)
+                    parsed_obj = _validate_parsed(effective_schema, raw)
+                except Exception as e:
+                    parse_error = f"{type(e).__name__}: {e}"
+
             handoff = {
                 "agent": sa.agent,
                 "name": sa.name,
                 "timestamp": datetime.now().isoformat(),
                 "task": sa.prompt[:200],
-                "status": "complete",
+                "status": "complete" if parse_error is None else "partial",
                 "output": result_text[:5000],
                 "elapsed": round(elapsed, 1),
                 "session_id": session_id,
                 "run_id": self.run_id,
             }
+            if parsed_obj is not None:
+                dump = getattr(parsed_obj, "model_dump", None)
+                handoff["parsed"] = dump() if callable(dump) else parsed_obj
+            if parse_error:
+                handoff["parse_error"] = parse_error
             (HANDOFF_DIR / f"{sa.name}-output.json").write_text(
-                json.dumps(handoff, indent=2)
+                json.dumps(handoff, indent=2, default=str)
             )
 
             self.results[sa.name] = SwarmResult(
-                agent=sa.agent, name=sa.name, status="pass",
+                agent=sa.agent, name=sa.name,
+                status="partial" if parse_error else "pass",
                 output=result_text, elapsed=elapsed,
                 session_id=session_id,
+                parsed=parsed_obj,
+                error=parse_error,
             )
 
         except Exception as e:
@@ -270,6 +362,7 @@ class Swarm:
                 name=a.name, prompt=prompt, agent=a.agent,
                 model=a.model, max_turns=a.max_turns,
                 max_budget=a.max_budget, wave=a.wave,
+                output_schema=a.output_schema,
             ))
         return injected
 

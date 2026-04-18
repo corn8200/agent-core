@@ -9,7 +9,7 @@ warnings.filterwarnings(
 
 from pathlib import Path
 
-from claude_agent_sdk import AgentDefinition
+from claude_agent_sdk import AgentDefinition  # allow-direct-sdk: type symbol only
 
 _AGENTS_DIR = Path.home() / ".claude" / "agents"
 
@@ -150,6 +150,20 @@ ALL_AGENTS = {
     "critic": critic,
     "herald": herald,
 }
+
+
+# Optional per-agent default output schemas (pydantic BaseModel class OR JSON
+# schema dict). The swarm engine reads this via get_agent_schema(); when set,
+# it appends "Return ONLY JSON matching: ..." to the prompt and parses the
+# agent's final message into SwarmResult.parsed. Empty by default — existing
+# agents keep plain-text behavior. Callers can also pass output_schema=
+# directly to Swarm.add() to override per-call.
+AGENT_OUTPUT_SCHEMAS: dict[str, object] = {}
+
+
+def get_agent_schema(name: str) -> object | None:
+    """Return the default output schema for a named agent, or None."""
+    return AGENT_OUTPUT_SCHEMAS.get(name)
 
 
 def prepend_recall(agent_name: str, task: str) -> str:

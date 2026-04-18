@@ -200,12 +200,13 @@ def test_attach_no_attachments_is_identity(monkeypatch):
 def test_session_create_and_fetch():
     from core import message_db as db
     chat = "createfetch@test"
-    sid = db.create_session(
+    sid, short_id = db.create_session(
         chat_identifier=chat,
         agent_name="scout",
         sdk_session_id="sdk-123",
         initial_prompt="research X",
     )
+    assert isinstance(short_id, int) and short_id > 0
     active = db.get_active_session(chat)
     assert active is not None
     assert active["session_id"] == sid
@@ -216,7 +217,7 @@ def test_session_create_and_fetch():
 def test_session_touch_and_close():
     from core import message_db as db
     chat = "touchclose@test"
-    sid = db.create_session(
+    sid, _ = db.create_session(
         chat_identifier=chat, agent_name="wrench",
         sdk_session_id="sdk-xx", initial_prompt="check vps",
     )
@@ -231,7 +232,7 @@ def test_session_touch_and_close():
 
 def test_session_stale_expiration():
     from core import message_db as db
-    sid = db.create_session(
+    sid, _ = db.create_session(
         chat_identifier="stale@test", agent_name="scout",
         sdk_session_id="sdk-stale", initial_prompt="old",
     )

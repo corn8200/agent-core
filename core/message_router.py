@@ -36,6 +36,9 @@ from core.message_db import (
     touch_session,
     close_session,
     expire_stale_sessions,
+    get_session_by_short_id,
+    get_recent_sessions_summary,
+    set_session_tmux_name,
 )
 
 
@@ -58,6 +61,17 @@ VPS_TAG_RE = re.compile(
 
 SHORT_CODE_RE = re.compile(r"^\s*([AD])(\d+)\s*$", re.IGNORECASE)
 EDIT_CODE_RE = re.compile(r"^\s*E(\d+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
+
+# Dispatch-control shortcodes (backlog #91). These are matched BEFORE A/D/E
+# because K/S/?/R/M are more specific intents on dispatch sessions.
+KILL_CODE_RE = re.compile(r"^\s*K(\d+)\s*$", re.IGNORECASE)
+# Bare "S" on its own line — susceptible to false-match on a stray "S" or
+# "s" reply. Accepted trade-off: keying off a single char keeps the UX
+# terse. Anything else (e.g. "sure", "send it") will fail the anchor.
+STATUS_CODE_RE = re.compile(r"^\s*S\s*$", re.IGNORECASE)
+EXPLAIN_CODE_RE = re.compile(r"^\s*\?(\d+)\s*$")
+RETRY_CODE_RE = re.compile(r"^\s*R(\d+)\s*$", re.IGNORECASE)
+MORE_CODE_RE = re.compile(r"^\s*M(\d+)\s*$", re.IGNORECASE)
 
 # Agents can ask a follow-up question by ending their response with this sentinel.
 CLARIFY_RE = re.compile(r"^\s*CLARIFY\s*:\s*(.+)$", re.MULTILINE | re.IGNORECASE)
@@ -197,8 +211,41 @@ def _post_approval(code: str, action: str, payload: dict | None = None) -> bool:
 
 
 async def _handle_short_code(msg: InboundMessage) -> Optional[str]:
-    """Check if message is a short-code and handle it. Returns handler name or None."""
+    """Check if message is a short-code and handle it. Returns handler name or None.
+
+    Dispatch-control codes (K/S/?/R/M) are checked before approval codes (A/D/E)
+    because they're more specific and only match well-formed patterns.
+    """
     text = msg.text.strip()
+
+    m = KILL_CODE_RE.match(text)
+    if m:
+        await _handle_kill_code(int(m.group(1)), msg.chat_identifier)
+        update_inbound_route(msg.rowid, "dispatch-kill", "shortcode")
+        return "dispatch-kill"
+
+    if STATUS_CODE_RE.match(text):
+        await _handle_status_code(msg.chat_identifier)
+        update_inbound_route(msg.rowid, "dispatch-status", "shortcode")
+        return "dispatch-status"
+
+    m = EXPLAIN_CODE_RE.match(text)
+    if m:
+        await _handle_explain_code(int(m.group(1)), msg.chat_identifier)
+        update_inbound_route(msg.rowid, "dispatch-explain", "shortcode")
+        return "dispatch-explain"
+
+    m = RETRY_CODE_RE.match(text)
+    if m:
+        handler = await _handle_retry_code(int(m.group(1)), msg.chat_identifier)
+        update_inbound_route(msg.rowid, handler, "shortcode")
+        return handler
+
+    m = MORE_CODE_RE.match(text)
+    if m:
+        handler = await _handle_more_code(int(m.group(1)), msg.chat_identifier)
+        update_inbound_route(msg.rowid, handler, "shortcode")
+        return handler
 
     m = SHORT_CODE_RE.match(text)
     if m:
@@ -229,9 +276,150 @@ async def _handle_short_code(msg: InboundMessage) -> Optional[str]:
 
 
 def _looks_like_shortcode(text: str) -> bool:
-    """Quick pre-check used by Layer 2.5 to avoid trapping A1/D1 replies."""
+    """Quick pre-check used by Layer 2.5 to avoid trapping shortcode replies."""
     t = text.strip()
-    return bool(SHORT_CODE_RE.match(t) or EDIT_CODE_RE.match(t))
+    return bool(
+        SHORT_CODE_RE.match(t)
+        or EDIT_CODE_RE.match(t)
+        or KILL_CODE_RE.match(t)
+        or STATUS_CODE_RE.match(t)
+        or EXPLAIN_CODE_RE.match(t)
+        or RETRY_CODE_RE.match(t)
+        or MORE_CODE_RE.match(t)
+    )
+
+
+# --- Dispatch-control shortcode handlers (K/S/?/R/M) -----------------------
+
+async def _handle_kill_code(short_id: int, chat_identifier: str) -> None:
+    """K<n> — kill the tmux session for dispatch N, mark session closed."""
+    session = get_session_by_short_id(short_id)
+    if not session:
+        await send_message(
+            f"[no such dispatch {short_id}]",
+            agent="router", recipient=chat_identifier, attribution=False,
+        )
+        return
+    tmux_name = session.get("tmux_session_name")
+    if tmux_name:
+        try:
+            subprocess.run(
+                ["tmux", "kill-session", "-t", tmux_name], check=False,
+                capture_output=True, timeout=5,
+            )
+        except Exception as e:
+            print(f"[router] K{short_id}: tmux kill error (ignored): {e}")
+    close_session(session["session_id"])
+    await send_message(
+        f"[dispatch {short_id} killed]",
+        agent="router", recipient=chat_identifier, attribution=False,
+    )
+
+
+async def _handle_status_code(chat_identifier: str) -> None:
+    """S — summary of last 5 dispatches."""
+    rows = get_recent_sessions_summary(limit=5)
+    if not rows:
+        await send_message(
+            "[no recent dispatches]",
+            agent="router", recipient=chat_identifier, attribution=False,
+        )
+        return
+    lines = []
+    for r in rows:
+        prompt = (r.get("last_prompt") or "").replace("\n", " ")[:60]
+        last_activity = (r.get("last_activity_at") or "")[-8:].lstrip("T")
+        lines.append(
+            f"[{r['short_id']}] {r['agent_name']} {r['status']} {last_activity} — {prompt}"
+        )
+    await send_message(
+        "\n".join(lines),
+        agent="router", recipient=chat_identifier, attribution=False,
+    )
+
+
+async def _handle_explain_code(short_id: int, chat_identifier: str) -> None:
+    """?<n> — explain what dispatch N is doing / did."""
+    session = get_session_by_short_id(short_id)
+    if not session:
+        await send_message(
+            f"[no such dispatch {short_id}]",
+            agent="router", recipient=chat_identifier, attribution=False,
+        )
+        return
+    parts = [
+        f"[{short_id}] {session['agent_name']} — {session['status']}",
+        f"prompt: {(session.get('last_prompt') or '').strip()[:200]}",
+    ]
+    q = session.get("last_question")
+    if q:
+        parts.append(f"question: {q[:200]}")
+    await send_message(
+        "\n".join(parts),
+        agent="router", recipient=chat_identifier, attribution=False,
+    )
+
+
+async def _handle_retry_code(short_id: int, chat_identifier: str) -> str:
+    """R<n> — re-run dispatch N's ORIGINAL prompt in a fresh session."""
+    session = get_session_by_short_id(short_id)
+    if not session:
+        await send_message(
+            f"[no such dispatch {short_id}]",
+            agent="router", recipient=chat_identifier, attribution=False,
+        )
+        return "dispatch-retry:miss"
+
+    agent_name = session["agent_name"]
+    original = session.get("initial_prompt") or session.get("last_prompt") or ""
+    if not original:
+        await send_message(
+            f"[dispatch {short_id} has no prompt to retry]",
+            agent="router", recipient=chat_identifier, attribution=False,
+        )
+        return "dispatch-retry:empty"
+
+    sdk_session_id = _new_sdk_session_id()
+    new_sid, new_short = create_session(
+        chat_identifier=chat_identifier,
+        agent_name=agent_name,
+        sdk_session_id=sdk_session_id,
+        initial_prompt=original,
+        status="open",
+    )
+    await _spawn_dispatch(
+        agent_name=agent_name,
+        prompt=original,
+        chat_identifier=chat_identifier,
+        session_id=new_sid,
+        sdk_session_id=sdk_session_id,
+        resume=False,
+        short_id=new_short,
+    )
+    await send_message(
+        f"[retry {short_id} -> new dispatch {new_short}]",
+        agent="router", recipient=chat_identifier, attribution=False,
+    )
+    return f"dispatch-retry:{new_short}"
+
+
+async def _handle_more_code(short_id: int, chat_identifier: str) -> str:
+    """M<n> — resume dispatch N's SDK session with 'expand your last response'."""
+    session = get_session_by_short_id(short_id)
+    if not session:
+        await send_message(
+            f"[no such dispatch {short_id}]",
+            agent="router", recipient=chat_identifier, attribution=False,
+        )
+        return "dispatch-more:miss"
+    if not session.get("sdk_session_id"):
+        await send_message(
+            f"[dispatch {short_id} cannot be resumed]",
+            agent="router", recipient=chat_identifier, attribution=False,
+        )
+        return "dispatch-more:no-sdk"
+    handler = await _resume_session(session, "Expand your last response with more detail.")
+    return handler or "dispatch-more:failed"
 
 
 # --- Layer 2: Prefixes ------------------------------------------------------
@@ -548,6 +736,7 @@ def _build_dispatch_script(
     session_id: str,
     sdk_session_id: str,
     resume: bool,
+    short_id: int,
 ) -> str:
     """Emit the small Python dispatcher used inside the tmux session.
 
@@ -558,6 +747,8 @@ def _build_dispatch_script(
       4. If the output ends with `CLARIFY: <question>`, splits and sends just the
          question to the user, marks session awaiting_reply + records last_question.
          Otherwise, sends the full result and closes the session.
+      5. All outbound is prefixed `[<short_id>] ` BEFORE truncation so the 1800-char
+         iMessage budget is honored.
     """
     session_flag = f'"--resume", "{sdk_session_id}"' if resume else f'"--session-id", "{sdk_session_id}"'
     return f'''
@@ -590,7 +781,6 @@ async def run():
 
     # CLARIFY sentinel on the LAST non-empty line?
     question = None
-    # Walk lines from the end to find a CLARIFY line at the tail.
     lines = [ln for ln in result.splitlines() if ln.strip()]
     if lines:
         m = re.match(r"\\s*CLARIFY\\s*:\\s*(.+)$", lines[-1], re.IGNORECASE)
@@ -598,17 +788,16 @@ async def run():
             question = m.group(1).strip()
 
     if question:
-        # Send just the question; park the session.
-        out = f"[{agent_name}] {{question}}"
+        out = f"[{short_id}] {{question}}"
         if len(out) > 1800:
             out = out[:1800] + "\\n[truncated]"
-        await send_message(question, agent="{agent_name}", recipient="{chat_identifier}")
+        await send_message(out, agent="{agent_name}", recipient="{chat_identifier}", attribution=False)
         touch_session("{session_id}", status="awaiting_reply", last_question=question)
     else:
-        # Full result. Truncate for iMessage.
-        if len(result) > 1800:
-            result = result[:1800] + "\\n[truncated]"
-        await send_message(result, agent="{agent_name}", recipient="{chat_identifier}")
+        body = f"[{short_id}] {{result}}"
+        if len(body) > 1800:
+            body = body[:1800] + "\\n[truncated]"
+        await send_message(body, agent="{agent_name}", recipient="{chat_identifier}", attribution=False)
         close_session("{session_id}")
 
 asyncio.run(run())
@@ -622,6 +811,7 @@ async def _spawn_dispatch(
     session_id: str,
     sdk_session_id: str,
     resume: bool,
+    short_id: int,
 ) -> None:
     """Write script + prompt to temp files and spawn via tmux."""
     ts = datetime.now().strftime("%Y%m%d-%H%M%S")
@@ -642,6 +832,7 @@ async def _spawn_dispatch(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
         resume=resume,
+        short_id=short_id,
     )
 
     script_file = tempfile.NamedTemporaryFile(
@@ -653,6 +844,7 @@ async def _spawn_dispatch(
     VENV_PYTHON = str(Path.home() / "Projects/agent-core/.venv/bin/python3")
     cmd = f'{VENV_PYTHON} {script_file.name}; rm -f {script_file.name}'
     subprocess.Popen(["tmux", "new-session", "-d", "-s", session_name, cmd])
+    set_session_tmux_name(session_id, session_name)
 
 
 async def _dispatch_to_agent(
@@ -672,7 +864,7 @@ async def _dispatch_to_agent(
         return f"blocked:{existing['agent_name']}"
 
     sdk_session_id = _new_sdk_session_id()
-    session_id = create_session(
+    session_id, short_id = create_session(
         chat_identifier=chat_identifier,
         agent_name=agent_name,
         sdk_session_id=sdk_session_id,
@@ -687,8 +879,9 @@ async def _dispatch_to_agent(
         session_id=session_id,
         sdk_session_id=sdk_session_id,
         resume=False,
+        short_id=short_id,
     )
-    print(f"[router] Dispatched to {agent_name} (session {session_id[:8]}): {prompt[:80]}")
+    print(f"[router] Dispatched to {agent_name} (session {session_id[:8]} [{short_id}]): {prompt[:80]}")
     return agent_name
 
 
@@ -711,6 +904,7 @@ async def _resume_session(session: dict, user_reply: str) -> str:
         session_id=session["session_id"],
         sdk_session_id=sdk_session_id,
         resume=True,
+        short_id=session.get("short_id") or 0,
     )
     print(f"[router] Resumed {agent_name} (session {session['session_id'][:8]}): {user_reply[:80]}")
     return f"resume:{agent_name}"

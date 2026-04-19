@@ -32,11 +32,17 @@ async def _enrich_with_attachments(rowid: int, text: str) -> str:
     return await enrich_message_text(rowid, text)
 
 
-# Leading-garbage-tolerant match for bus attribution: "[AgentName]".
-# The attributedBody hex extractor sometimes pastes a junk char before the
-# real text, so we allow any non-letter prefix followed by "[Word]".
+# Leading-garbage-tolerant match for bus attribution.
+# The attributedBody hex extractor occasionally pastes 1-2 stray characters
+# (any ASCII — letters "k", "P", "L", punctuation "!", etc.) before the real
+# text, so we allow up to 2 leading chars before the bracket. Two forms count
+# as attribution:
+#   1. "[N]" sequence number (outbox/turbo prefix)
+#   2. "[AgentName]" bus attribution tag
+# 2026-04-19: widened junk class from [^A-Za-z0-9\[] to . — letter prefixes
+# like "k[37] ..." were leaking through and causing self-chat storms (#storm2).
 _BOT_ATTRIBUTION_RE = re.compile(
-    r"^(?:[^A-Za-z0-9\[]\s*)?(?:\[\d+\]\s*)?\[[A-Za-z][^\]]{1,50}\]"
+    r"^.{0,2}\[(?:\d{1,5}|[A-Za-z][^\]]{0,50})\]"
 )
 
 
@@ -47,12 +53,15 @@ def _looks_like_bot_attribution(text: str) -> bool:
 
 
 def _recent_outbound_match(text: str, window_sec: int = 600) -> bool:
-    """True if this exact body was sent by our bus within `window_sec`.
+    """True if this body was sent by our bus within `window_sec`.
 
     Belt+suspenders for the attribution regex: catches echoes where turbo
     sends bare "[N] text" with no agent tag. Reads from ~/logs/message_bus.db.
-    Silent-fail on any DB error — better to occasionally miss an echo than
-    to crash the reader.
+
+    The typedstream extractor occasionally pastes 1-2 stray characters before
+    the real text ("k[37] ...", "P[38] ..."), so we try exact match first,
+    then strip up to 2 leading characters and retry. Silent-fail on any DB
+    error — better to occasionally miss an echo than to crash the reader.
     """
     try:
         import sqlite3
@@ -62,14 +71,25 @@ def _recent_outbound_match(text: str, window_sec: int = 600) -> bool:
             return False
         con = sqlite3.connect(str(db), timeout=2.0)
         try:
-            cur = con.execute(
-                "SELECT 1 FROM outbound "
-                "WHERE message = ? "
-                "AND datetime(sent_at) > datetime('now', 'localtime', ?) "
-                "LIMIT 1",
-                (text, f"-{window_sec} seconds"),
-            )
-            return cur.fetchone() is not None
+            since = f"-{window_sec} seconds"
+            candidates = [text]
+            # Also test with 1-2 leading chars stripped (extractor junk).
+            # Only strip if the shorter form still contains an opening bracket
+            # — avoids matching unrelated short outbound messages.
+            for n in (1, 2):
+                if len(text) > n and "[" in text[n:]:
+                    candidates.append(text[n:])
+            for candidate in candidates:
+                cur = con.execute(
+                    "SELECT 1 FROM outbound "
+                    "WHERE message = ? "
+                    "AND datetime(sent_at) > datetime('now', 'localtime', ?) "
+                    "LIMIT 1",
+                    (candidate, since),
+                )
+                if cur.fetchone() is not None:
+                    return True
+            return False
         finally:
             con.close()
     except Exception:

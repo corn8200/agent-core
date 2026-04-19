@@ -35,13 +35,45 @@ async def _enrich_with_attachments(rowid: int, text: str) -> str:
 # Leading-garbage-tolerant match for bus attribution: "[AgentName]".
 # The attributedBody hex extractor sometimes pastes a junk char before the
 # real text, so we allow any non-letter prefix followed by "[Word]".
-_BOT_ATTRIBUTION_RE = re.compile(r"^[^A-Za-z0-9]?\[[A-Z][A-Za-z0-9 _-]{1,30}\]")
+_BOT_ATTRIBUTION_RE = re.compile(
+    r"^(?:[^A-Za-z0-9\[]\s*)?(?:\[\d+\]\s*)?\[[A-Za-z][^\]]{1,50}\]"
+)
 
 
 def _looks_like_bot_attribution(text: str) -> bool:
     if not text:
         return False
     return bool(_BOT_ATTRIBUTION_RE.match(text.lstrip()))
+
+
+def _recent_outbound_match(text: str, window_sec: int = 600) -> bool:
+    """True if this exact body was sent by our bus within `window_sec`.
+
+    Belt+suspenders for the attribution regex: catches echoes where turbo
+    sends bare "[N] text" with no agent tag. Reads from ~/logs/message_bus.db.
+    Silent-fail on any DB error — better to occasionally miss an echo than
+    to crash the reader.
+    """
+    try:
+        import sqlite3
+        from pathlib import Path as _P
+        db = _P.home() / "logs" / "message_bus.db"
+        if not db.exists():
+            return False
+        con = sqlite3.connect(str(db), timeout=2.0)
+        try:
+            cur = con.execute(
+                "SELECT 1 FROM outbound "
+                "WHERE message = ? "
+                "AND datetime(sent_at) > datetime('now', 'localtime', ?) "
+                "LIMIT 1",
+                (text, f"-{window_sec} seconds"),
+            )
+            return cur.fetchone() is not None
+        finally:
+            con.close()
+    except Exception:
+        return False
 
 
 # Control-character delimiters that cannot appear in iMessage text bodies.
@@ -212,13 +244,17 @@ class MessageReader:
             if not text and hex_body:
                 text = extract_text_from_attributed_body(hex_body) or ""
 
-            # Drop the bot's own outbound messages. The message bus prepends
-            # an [AgentName] attribution tag — if we see one in a
-            # from-me message in a self-chat, it's a reply we just sent and
-            # must not be re-routed (feedback loop).
-            if is_from_me and text and _looks_like_bot_attribution(text):
-                self._save_rowid(rowid)
-                continue
+            # Drop the bot's own outbound messages. Two detectors:
+            # 1. Attribution regex — matches "[AgentName]" / "[N] [AgentName]".
+            # 2. Cross-check against outbound table — if we sent this body
+            #    within the last 10 min, it's an echo. Belt+suspenders: the
+            #    regex misses messages that start with "[N] bare text..." (no
+            #    agent tag), e.g. "[7] Acknowledged.", which caused the
+            #    2026-04-18 echo storm.
+            if is_from_me and text:
+                if _looks_like_bot_attribution(text) or _recent_outbound_match(text):
+                    self._save_rowid(rowid)
+                    continue
 
             # Task A: enrich with attachment descriptions. Pure-attachment
             # messages (no text body) are still valid — don't drop them here.

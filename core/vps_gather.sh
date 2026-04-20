@@ -65,6 +65,8 @@ done
 echo "sentry-orchestrator.timer: $(systemctl is-active sentry-orchestrator.timer 2>/dev/null)"
 
 echo '=== ERRORS ==='
-sudo journalctl --priority=err --since '24 hours ago' --no-pager -q 2>/dev/null | tail -10
+sudo journalctl --priority=err --since '24 hours ago' --no-pager -q 2>/dev/null \
+  | grep -vE 'kex_protocol_error|kex_exchange_identification|Connection closed by authenticating user|Connection reset by' \
+  | tail -10
 
 echo '=== END ==='

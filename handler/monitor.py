@@ -213,7 +213,7 @@ def detect_anomalies(data: dict) -> list[dict]:
             errors_block = vps_raw.split("=== ERRORS ===")[1].split("===")[0].strip()
             if errors_block and len(errors_block) > 10:
                 error_count = len(errors_block.splitlines())
-                if error_count > 3:
+                if error_count > 10:
                     anomalies.append({
                         "severity": "medium",
                         "source": "vps",

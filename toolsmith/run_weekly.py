@@ -18,6 +18,9 @@ for _var in ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL",
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from core.vault import hydrate_env
+hydrate_env()
+
 from core.constants import HOME, PERSONAL_EMAIL
 from core.tools import send_imessage_reliable
 from core.hooks import AGENT_HOOKS

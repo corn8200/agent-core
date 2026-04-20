@@ -6,7 +6,9 @@ Includes:
 """
 
 import asyncio
+import difflib
 import json
+import re
 import shlex
 import subprocess
 import uuid
@@ -237,19 +239,260 @@ async def tmux_relay_healthy() -> tuple[bool, str]:
     return False, f"unexpected probe output: {out[:200]}"
 
 
+_PHONE_HANDLE_RE = re.compile(r"^\+?\d[\d\-\s().]{6,}$")
+_EMAIL_HANDLE_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+def _looks_like_imessage_handle(s: str) -> bool:
+    """True if `s` is already a deliverable iMessage handle (phone or email)."""
+    s = s.strip()
+    return bool(_PHONE_HANDLE_RE.match(s) or _EMAIL_HANDLE_RE.match(s))
+
+
+def _normalize_phone(raw: str) -> str:
+    """Strip spaces/parens/dashes from a phone string; keep leading +."""
+    digits = re.sub(r"[^\d]", "", raw)
+    if not digits:
+        return raw.strip()
+    if raw.strip().startswith("+"):
+        return "+" + digits
+    # Default to US (+1) if 10 digits and no country code
+    if len(digits) == 10:
+        return "+1" + digits
+    if len(digits) == 11 and digits.startswith("1"):
+        return "+" + digits
+    return "+" + digits
+
+
+async def _osascript(script: str, timeout: float = 15.0) -> tuple[bool, str]:
+    """Run osascript directly via subprocess. Contacts/Calendar automation
+    works from any context that has Automation TCC; no tmux relay needed.
+    Returns (ok, stdout_stripped). On non-zero exit returns (False, stderr_or_stdout).
+    """
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "/usr/bin/osascript", "-e", script,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+    except asyncio.TimeoutError:
+        return False, "osascript timed out"
+    except Exception as e:
+        return False, f"osascript spawn failed: {e}"
+    if proc.returncode != 0:
+        return False, (err or out).decode("utf-8", "replace").strip()
+    return True, out.decode("utf-8", "replace").strip()
+
+
+async def contacts_lookup(name: str, fields: list[str] | None = None) -> dict:
+    """General Contacts.app lookup. Returns a matched contact with requested fields.
+
+    Not limited to iMessage — callers pass `fields` to pull birthday, address,
+    organization, notes, etc. Matching logic mirrors resolve_imessage_buddy:
+    case-insensitive exact on full name first, fallback to substring. Zero hits
+    → fuzzy difflib suggestions. >1 hits → ambiguous result.
+
+    `fields` accepts: "phones", "emails", "birthday", "addresses", "organization",
+    "job_title", "note", "urls", "nickname". Default pulls phones + emails.
+
+    Returns:
+      {"ok": True, "name": "Joe Burkhardt", "fields": {"phones":[...], ...}}
+      {"ok": False, "reason": "not_found", "suggestions": [...]}
+      {"ok": False, "reason": "ambiguous", "matches": [{"name":..., "phones":[...]}, ...]}
+      {"ok": False, "reason": "lookup_failed", "error": "..."}
+    """
+    s = (name or "").strip()
+    if not s:
+        return {"ok": False, "reason": "empty", "input": name}
+    requested = set(fields or ["phones", "emails"])
+
+    field_scripts = {
+        "phones":       'try\n    repeat with x in phones of p\n      set out to out & "phones=" & (value of x as text) & (ASCII character 31)\n    end repeat\n  end try\n  ',
+        "emails":       'try\n    repeat with x in emails of p\n      set out to out & "emails=" & (value of x as text) & (ASCII character 31)\n    end repeat\n  end try\n  ',
+        "birthday":     'try\n    set bd to birth date of p\n    if bd is not missing value then set out to out & "birthday=" & (bd as text) & (ASCII character 31)\n  end try\n  ',
+        "addresses":    'try\n    repeat with x in addresses of p\n      set out to out & "addresses=" & (formatted address of x) & (ASCII character 31)\n    end repeat\n  end try\n  ',
+        "organization": 'try\n    if organization of p is not missing value then set out to out & "organization=" & (organization of p as text) & (ASCII character 31)\n  end try\n  ',
+        "job_title":    'try\n    if job title of p is not missing value then set out to out & "job_title=" & (job title of p as text) & (ASCII character 31)\n  end try\n  ',
+        "note":         'try\n    if note of p is not missing value then set out to out & "note=" & (note of p as text) & (ASCII character 31)\n  end try\n  ',
+        "urls":         'try\n    repeat with x in urls of p\n      set out to out & "urls=" & (value of x as text) & (ASCII character 31)\n    end repeat\n  end try\n  ',
+        "nickname":     'try\n    if nickname of p is not missing value then set out to out & "nickname=" & (nickname of p as text) & (ASCII character 31)\n  end try\n  ',
+    }
+    inner = "".join(field_scripts[f] for f in requested if f in field_scripts)
+    safe = s.replace('\\', '\\\\').replace('"', '\\"')
+    script = (
+        'tell application "Contacts"\n'
+        '  if not running then launch\n'
+        '  set out to ""\n'
+        f'  set matches to (every person whose name is "{safe}")\n'
+        '  if (count of matches) is 0 then\n'
+        f'    set matches to (every person whose name contains "{safe}")\n'
+        '  end if\n'
+        '  repeat with p in matches\n'
+        '    set out to out & (name of p as text) & (ASCII character 31)\n'
+        f'    {inner}'
+        '    set out to out & (ASCII character 30)\n'
+        '  end repeat\n'
+        '  return out\n'
+        'end tell\n'
+    )
+    ok, output = await _osascript(script, timeout=20.0)
+    if not ok:
+        return {"ok": False, "reason": "lookup_failed", "error": output, "input": name}
+
+    parsed: list[dict] = []
+    for record in output.split("\x1e"):
+        record = record.strip("\n\r\t ")
+        if not record:
+            continue
+        parts = [p for p in record.split("\x1f") if p]
+        if not parts:
+            continue
+        entry: dict = {"name": parts[0]}
+        for f in requested:
+            entry[f] = []
+        for field in parts[1:]:
+            if "=" not in field:
+                continue
+            key, _, val = field.partition("=")
+            if key == "phones":
+                entry.setdefault("phones", []).append(_normalize_phone(val))
+            elif key in ("emails", "addresses", "urls"):
+                entry.setdefault(key, []).append(val.strip())
+            else:
+                entry[key] = val.strip()
+        parsed.append(entry)
+
+    if not parsed:
+        suggestions = await _fuzzy_contact_suggestions(s)
+        return {"ok": False, "reason": "not_found", "input": name, "suggestions": suggestions}
+
+    low = s.lower()
+    exact = [p for p in parsed if p["name"].lower() == low]
+    pool = exact or parsed
+    if len(pool) > 1:
+        return {"ok": False, "reason": "ambiguous", "input": name, "matches": pool}
+    hit = pool[0]
+    return {"ok": True, "name": hit["name"], "fields": {k: v for k, v in hit.items() if k != "name"}}
+
+
+async def resolve_imessage_buddy(name: str) -> dict:
+    """Resolve a display name to a deliverable iMessage handle via Contacts.app.
+
+    Prevents the silent-failure mode where Messages.app accepts a misspelled
+    name as a participant, creates a phantom handle, and sends nothing.
+
+    Returns a dict:
+      {"ok": True, "handle": "+12404056533", "display": "Joe Burkhardt",
+       "passthrough": False}
+        exact match, one contact, one usable phone/email
+      {"ok": True, "handle": "+12404056533", "display": "+12404056533",
+       "passthrough": True}
+        input already looked like a phone/email — pass through unchecked
+      {"ok": False, "reason": "not_found", "input": name,
+       "suggestions": ["Joe Burkhardt", "Joe French"]}
+      {"ok": False, "reason": "ambiguous", "input": name,
+       "matches": [{"name": "Joe Burkhardt", "handles": [...]}, ...]}
+      {"ok": False, "reason": "no_handle", "input": name, "display": "..."}
+        contact exists but has no phone or email
+      {"ok": False, "reason": "lookup_failed", "error": "..."}
+    """
+    s = (name or "").strip()
+    if not s:
+        return {"ok": False, "reason": "empty", "input": name}
+    if _looks_like_imessage_handle(s):
+        handle = _normalize_phone(s) if _PHONE_HANDLE_RE.match(s) else s
+        return {"ok": True, "handle": handle, "display": handle, "passthrough": True}
+
+    lookup = await contacts_lookup(s, fields=["phones", "emails"])
+    if not lookup.get("ok"):
+        reason = lookup.get("reason")
+        if reason == "ambiguous":
+            return {
+                "ok": False,
+                "reason": "ambiguous",
+                "input": name,
+                "matches": [
+                    {"name": m["name"], "handles": (m.get("phones") or []) + (m.get("emails") or [])}
+                    for m in lookup.get("matches", [])
+                ],
+            }
+        return {**lookup, "input": name}
+
+    fields = lookup.get("fields", {})
+    phones = fields.get("phones") or []
+    emails = fields.get("emails") or []
+    handle = phones[0] if phones else (emails[0] if emails else None)
+    if not handle:
+        return {"ok": False, "reason": "no_handle", "input": name, "display": lookup["name"]}
+    return {"ok": True, "handle": handle, "display": lookup["name"], "passthrough": False}
+
+
+async def _fuzzy_contact_suggestions(query: str, cutoff: float = 0.55, n: int = 5) -> list[str]:
+    """Pull all contact names and difflib-rank closest matches to `query`."""
+    script = (
+        'tell application "Contacts"\n'
+        '  if not running then launch\n'
+        '  set out to ""\n'
+        '  repeat with p in every person\n'
+        '    set out to out & (name of p as text) & (ASCII character 30)\n'
+        '  end repeat\n'
+        '  return out\n'
+        'end tell\n'
+    )
+    ok, output = await _osascript(script, timeout=20.0)
+    if not ok:
+        return []
+    names = [n.strip() for n in output.split("\x1e") if n.strip()]
+    if not names:
+        return []
+    return difflib.get_close_matches(query, names, n=n, cutoff=cutoff)
+
+
 async def send_imessage_reliable(buddy: str, message: str, _approved: bool = False) -> tuple[bool, str]:
     """Send iMessage via tmux relay (works from LaunchAgents). Falls back to Pushover.
 
     Third-party recipients route through core.outbox for APPROVE/DENY preview
     unless _approved=True (reply-router promotion path) or the recipient is one
     of John's own self-identifiers.
+
+    If `buddy` is a display name (not phone/email), it is resolved against
+    Contacts.app first. Unresolvable or ambiguous names short-circuit with a
+    helpful error + fuzzy suggestions rather than silently sending to a
+    phantom handle.
     """
+    # Resolve display names to real handles BEFORE queuing to outbox so the
+    # preview shows the resolved handle and Messages.app can't fabricate a
+    # phantom participant.
+    display = buddy
+    if not _approved and not _looks_like_imessage_handle(buddy):
+        from core.outbox import _is_self
+        if not _is_self(buddy):
+            resolved = await resolve_imessage_buddy(buddy)
+            if not resolved.get("ok"):
+                reason = resolved.get("reason", "unknown")
+                if reason == "not_found":
+                    sug = resolved.get("suggestions") or []
+                    hint = f" Did you mean: {', '.join(sug)}?" if sug else ""
+                    return False, f"No Contacts match for '{buddy}'.{hint}"
+                if reason == "ambiguous":
+                    opts = "; ".join(
+                        f"{m['name']} ({', '.join(m['handles']) or 'no handle'})"
+                        for m in resolved.get("matches", [])
+                    )
+                    return False, f"Ambiguous contact '{buddy}'. Candidates: {opts}"
+                if reason == "no_handle":
+                    return False, f"Contact '{resolved.get('display', buddy)}' has no phone or email."
+                return False, f"Contact lookup failed for '{buddy}': {resolved.get('error','')}"
+            buddy = resolved["handle"]
+            display = resolved.get("display", buddy)
+
     if not _approved:
         from core.outbox import _is_self, queue_or_send
         if not _is_self(buddy):
             result = await queue_or_send(
                 channel="imessage",
-                recipient=buddy,
+                recipient=f"{display} <{buddy}>" if display and display != buddy else buddy,
                 subject=None,
                 body=message,
                 source="send_imessage_reliable",
@@ -464,6 +707,26 @@ async def osascript_run(args: dict[str, Any]) -> dict:
     if proc.returncode != 0:
         output = f"osascript error: {stderr.decode().strip()}"
     return {"content": [{"type": "text", "text": output}]}
+
+
+@tool(
+    "contact_lookup",
+    "Look up a person in Contacts.app by display name. Returns phones, emails, "
+    "birthday, address, organization, etc. — whatever `fields` you ask for. "
+    "Use this before sending iMessage/email to a display name, or when asked "
+    "to 'look up X's birthday/address/number.' Zero matches returns fuzzy "
+    "suggestions; multiple matches returns all candidates for disambiguation.",
+    {"name": str, "fields": str},
+)
+async def contact_lookup(args: dict[str, Any]) -> dict:
+    name = args.get("name", "").strip()
+    raw_fields = args.get("fields", "") or ""
+    fields = [f.strip() for f in raw_fields.split(",") if f.strip()] or None
+    try:
+        result = await contacts_lookup(name, fields=fields)
+    except Exception as e:
+        return {"content": [{"type": "text", "text": f"contact_lookup error: {e}"}]}
+    return {"content": [{"type": "text", "text": json.dumps(result, ensure_ascii=False, default=str)}]}
 
 
 @tool(
@@ -705,6 +968,7 @@ def create_core_server():
             send_business_email,
             send_personal_email,
             osascript_run,
+            contact_lookup,
             moshi_push,
             get_schedule,
             get_week_view_tool,

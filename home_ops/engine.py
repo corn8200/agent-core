@@ -118,7 +118,13 @@ async def synthesize(gather: dict, mode: str) -> tuple[str, dict]:
             if hasattr(msg, "result") and msg.result:
                 brief_text = msg.result
     except Exception as e:
-        print(f"synthesize error: {e}", file=sys.stderr)
+        # Common case: CLI subprocess exits non-zero AFTER the stream completed
+        # (hook teardown, MCP shutdown noise). Brief already in hand — warn, continue.
+        if brief_text.strip():
+            short = str(e).splitlines()[0][:120]
+            print(f"synthesize stream-tail warning (brief ok): {short}", file=sys.stderr)
+        else:
+            print(f"synthesize error: {e}", file=sys.stderr)
 
     brief_text = brief_text.strip()
     if brief_text:

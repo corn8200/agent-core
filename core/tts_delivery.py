@@ -19,6 +19,7 @@ Notes:
 """
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -90,6 +91,12 @@ async def deliver_brief_tts(
 
     r2_url: Optional[str] = None
     try:
+        # Prefer CLOUDFLARE_R2_TOKEN (R2-scoped) over CLOUDFLARE_API_TOKEN
+        # (general scope) — the general token on this account lacks R2 write.
+        r2_env = os.environ.copy()
+        r2_token = os.environ.get("CLOUDFLARE_R2_TOKEN")
+        if r2_token:
+            r2_env["CLOUDFLARE_API_TOKEN"] = r2_token
         upload = subprocess.run(
             [
                 "wrangler", "r2", "object", "put", f"{R2_BUCKET}/{r2_key}",
@@ -98,6 +105,7 @@ async def deliver_brief_tts(
                 "--remote",
             ],
             capture_output=True, text=True, timeout=60,
+            env=r2_env,
         )
         if upload.returncode == 0:
             r2_url = f"{R2_PUBLIC_BASE}/{r2_key}"

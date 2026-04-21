@@ -26,7 +26,7 @@ RUN apt-get update \
  && apt-get autoremove -y \
  && rm -rf /var/lib/apt/lists/*
 
-RUN npm install -g --no-fund --no-audit @anthropic-ai/claude-code@2.1.114
+RUN npm install -g --no-fund --no-audit @anthropic-ai/claude-code@2.1.116
 
 RUN pip install --no-cache-dir \
       'claude-agent-sdk>=0.1.50' \

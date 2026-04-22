@@ -65,7 +65,6 @@ class SwarmAgent:
     agent: str = "scout"        # named agent from ALL_AGENTS
     model: Optional[str] = None  # override agent default
     max_turns: int = 15
-    max_budget: float = 0.50
     wave: int = 1
     output_schema: Optional[Any] = None  # pydantic BaseModel class OR JSON schema dict
 
@@ -126,9 +125,12 @@ def _validate_parsed(schema: Any, raw: Any) -> Any:
 
 
 class Swarm:
-    def __init__(self, task: str, mode: str = "parallel", max_budget: float = 2.00):
+    def __init__(self, task: str, mode: str = "parallel", max_budget: float | None = None):
         self.task = task
         self.mode = mode
+        # max_budget retained for backward-compat call signature but ignored
+        # (Max subscription is flat-monthly; dollar caps on oat01 work are
+        # vestigial — see ~/.claude/rules/agent-routing.md).
         self.max_budget = max_budget
         self.agents: list[SwarmAgent] = []
         self.results: dict[str, SwarmResult] = {}
@@ -136,17 +138,21 @@ class Swarm:
         self.run_id = f"swarm-{uuid.uuid4().hex[:8]}"
 
     def add(self, name: str, prompt: str, agent: str = "scout",
-            model: str = None, max_turns: int = 15, max_budget: float = 0.50,
-            wave: int = 1, output_schema: Optional[Any] = None):
+            model: str = None, max_turns: int = 15,
+            wave: int = 1, output_schema: Optional[Any] = None,
+            **_legacy: Any):
         """Add an agent to the swarm.
 
         output_schema: optional pydantic BaseModel class OR JSON schema dict.
         When set, the agent prompt is appended with "Return ONLY JSON matching: ..."
         and the final message is parsed + validated into SwarmResult.parsed.
+
+        **_legacy: swallows retired kwargs like max_budget (dollar cap on
+        oat01 work is vestigial under the Max subscription).
         """
         self.agents.append(SwarmAgent(
             name=name, prompt=prompt, agent=agent,
-            model=model, max_turns=max_turns, max_budget=max_budget,
+            model=model, max_turns=max_turns,
             wave=wave, output_schema=output_schema,
         ))
 
@@ -241,7 +247,10 @@ class Swarm:
                         system_prompt=system_prompt_cfg,
                         permission_mode="bypassPermissions",
                         max_turns=sa.max_turns,
-                        max_budget_usd=sa.max_budget,
+                        # max_budget_usd removed 2026-04-22 (#183): Max
+                        # subscription is flat-monthly so dollar caps on
+                        # oat01-metered work are vestigial. Runaway-loop
+                        # guard is max_turns + R5/R6 fan-out hooks.
                         cwd=str(Path.home()),
                         session_id=session_id,
                         mcp_servers={"core": create_core_server()},
@@ -361,7 +370,7 @@ class Swarm:
             injected.append(SwarmAgent(
                 name=a.name, prompt=prompt, agent=a.agent,
                 model=a.model, max_turns=a.max_turns,
-                max_budget=a.max_budget, wave=a.wave,
+                wave=a.wave,
                 output_schema=a.output_schema,
             ))
         return injected

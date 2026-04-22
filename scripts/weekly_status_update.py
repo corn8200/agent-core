@@ -138,7 +138,7 @@ async def main():
         model="opus",
         permission_mode="bypassPermissions",
         max_turns=8,
-        max_budget_usd=0.25,
+        # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
         cwd=CONFIG_DIR,
         hooks=AGENT_HOOKS,
         thinking=HEAVY,

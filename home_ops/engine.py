@@ -104,7 +104,7 @@ async def synthesize(gather: dict, mode: str) -> tuple[str, dict]:
                 system_prompt=system_prompt,
                 permission_mode="bypassPermissions",
                 max_turns=2,
-                max_budget_usd=0.20,
+                # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
                 cwd=str(HOME),
                 hooks=AGENT_HOOKS,
                 thinking=HEAVY,

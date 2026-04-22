@@ -93,7 +93,7 @@ Review these results and give me the weekly Toolsmith report."""
                 model="opus",
                 permission_mode="bypassPermissions",
                 max_turns=3,
-                max_budget_usd=0.20,
+                # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
                 cwd=str(HOME),
                 hooks=AGENT_HOOKS,
                 thinking=STANDARD,

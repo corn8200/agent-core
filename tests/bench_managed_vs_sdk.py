@@ -83,7 +83,7 @@ async def run_sdk() -> tuple[str, float]:
                 model="opus",
                 permission_mode="bypassPermissions",
                 max_turns=2,
-                max_budget_usd=0.15,
+                # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
                 hooks=AGENT_HOOKS,
             ),
         ):

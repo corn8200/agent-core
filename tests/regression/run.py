@@ -75,7 +75,7 @@ async def _run_case(agent_name: str, prompt: str) -> tuple[str, dict]:
         system_prompt=agent_def.prompt,
         allowed_tools=list(agent_def.tools or []),
         max_turns=3,  # regression probes must not chew turns
-        max_budget_usd=0.25,  # hard ceiling per probe (Max = $0 actual; belt + suspenders)
+        # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
         permission_mode="bypassPermissions",
         model="sonnet",  # override: cheap for regression; agent's own pick ignored
     )

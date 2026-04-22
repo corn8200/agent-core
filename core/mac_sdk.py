@@ -12,16 +12,17 @@ What this guarantees (so individual callers don't have to):
      scrub running first.
   2. Wrapped query() appends every invocation to /tmp/mac-sdk-calls.json
      and raises SDKQuotaExceeded HARD (not a Pushover warning) when the
-     50-calls-per-hour ceiling is hit. Prevents runaway loops.
+     50-calls-per-hour ceiling is hit. This is a runaway-loop / fan-out
+     guard measured in CALLS, NOT DOLLARS — Max subscription is flat-
+     monthly so dollar caps on oat01 work are vestigial (see
+     ~/.claude/rules/agent-routing.md and memory/feedback_max_metered_
+     no_dollar_cap.md).
   3. When called with options=None, a sane default ClaudeAgentOptions is
-     built with AGENT_HOOKS installed and max_budget_usd=1.00. If the
-     caller supplies their own options, only hooks is back-filled (when
-     hooks is None) — max_budget_usd is left exactly as the caller passed
-     it (including explicit None), matching existing call-site behavior.
+     built with AGENT_HOOKS installed. No max_budget_usd default is set;
+     callers that want a cap must opt-in explicitly.
 """
 from __future__ import annotations
 
-import inspect
 import json
 import os
 import sys
@@ -54,9 +55,6 @@ CALL_LOG = Path("/tmp/mac-sdk-calls.json")
 HOURLY_CAP = 50
 HOURLY_WINDOW = 3600
 PRUNE_WINDOW = 7200
-DEFAULT_MAX_BUDGET_USD = 1.00
-
-_OPTIONS_SUPPORTS_BUDGET = "max_budget_usd" in inspect.signature(ClaudeAgentOptions).parameters
 
 _EMPTY_MCP_CONFIG = str(Path(__file__).resolve().parent / "mcp-empty.json")
 
@@ -131,10 +129,10 @@ def _entry_ts(entry: dict) -> float:
 
 def _apply_defaults(options: ClaudeAgentOptions | None) -> ClaudeAgentOptions:
     if options is None:
-        kwargs: dict = {"hooks": AGENT_HOOKS, "mcp_servers": _EMPTY_MCP_CONFIG}
-        if _OPTIONS_SUPPORTS_BUDGET:
-            kwargs["max_budget_usd"] = DEFAULT_MAX_BUDGET_USD
-        return ClaudeAgentOptions(**kwargs)
+        # No max_budget_usd default (removed 2026-04-22, #183). Max
+        # subscription = flat monthly; dollar caps on oat01 work are
+        # vestigial. Runaway-loop guard is HOURLY_CAP + max_turns.
+        return ClaudeAgentOptions(hooks=AGENT_HOOKS, mcp_servers=_EMPTY_MCP_CONFIG)
 
     if getattr(options, "hooks", None) is None:
         try:

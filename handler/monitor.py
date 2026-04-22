@@ -349,7 +349,7 @@ Be concise. This goes to a push notification."""
                 model="opus",
                 permission_mode="bypassPermissions",
                 max_turns=5,
-                max_budget_usd=0.30,
+                # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
                 cwd=str(HOME),
                 hooks=AGENT_HOOKS,
                 thinking=STANDARD,
@@ -575,7 +575,7 @@ Keep it under 300 words. No fluff."""
             model="opus",
             permission_mode="bypassPermissions",
             max_turns=5,
-            max_budget_usd=0.25,
+            # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
             cwd=str(HOME),
             mcp_servers={"core": create_core_server()},
             hooks=AGENT_HOOKS,

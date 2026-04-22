@@ -85,7 +85,7 @@ nudge/
 - **Haiku:** Dictation fix only ($0.02 budget)
 
 ## Rules
-- All automated agents: `permission_mode="bypassPermissions"`, always set `max_turns` + `max_budget_usd`
+- All automated agents: `permission_mode="bypassPermissions"`, always set `max_turns`. Do NOT set `max_budget_usd` on oat01-metered work — it was retired 2026-04-22 (#183) as vestigial under the flat-monthly Max subscription. Runaway-loop protection is `max_turns` + the 50-calls/hour HOURLY_CAP in `core/mac_sdk.py` + R5 fan-out / R6 titan hooks.
 - Always include `hooks=AGENT_HOOKS` on SDK calls
 - Always pass `thinking=<preset>` + `effort=<level>` — pick per task:
   - `ULTRA` (64k) + `effort="xhigh"` → **Titan** / architectural decisions / hardest multi-system problems

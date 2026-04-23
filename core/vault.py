@@ -195,16 +195,22 @@ def _op_read(key: str, vault: str = "MachineAutoBiz") -> str | None:
     token = _service_account_token()
     if not token:
         return None
-    try:
-        out = subprocess.run(
-            ["op", "read", f"op://{vault}/{key}/password"],
-            env={"OP_SERVICE_ACCOUNT_TOKEN": token, "PATH": os.environ.get("PATH", "")},
-            capture_output=True, text=True, timeout=10,
-        )
-        if out.returncode == 0:
-            return out.stdout.strip() or None
-    except Exception:
-        pass
+    # API_CREDENTIAL category items store the secret under `credential`, not
+    # `password`. Try both so new-style items (e.g. AGENT_CP_TOKEN, created
+    # 2026-04-23) resolve without needing a second write.
+    for field in ("password", "credential"):
+        try:
+            out = subprocess.run(
+                ["op", "read", f"op://{vault}/{key}/{field}"],
+                env={"OP_SERVICE_ACCOUNT_TOKEN": token, "PATH": os.environ.get("PATH", "")},
+                capture_output=True, text=True, timeout=10,
+            )
+            if out.returncode == 0:
+                val = out.stdout.strip()
+                if val:
+                    return val
+        except Exception:
+            pass
     return None
 
 

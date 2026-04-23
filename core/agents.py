@@ -105,7 +105,7 @@ titan = AgentDefinition(
 )
 
 anvil = AgentDefinition(
-    description="Code builder and implementation specialist — writes, refactors, and ships working code. Worktree-first, test-driven, verifies its own diffs in an isolated branch before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget, sonnet by default (auto-escalates to opus on refactor/architect/multi-file/rewrite keywords or !opus).",
+    description="Code builder. Sonnet default, Opus escalation on refactor/architect/multi-file keywords — writes, refactors, and ships code. Worktree-first, test-driven, verifies its own diffs in an isolated branch before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget.",
     prompt=_load_prompt("anvil"),
     model="sonnet",
     tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "TodoWrite"],
@@ -127,11 +127,34 @@ critic = AgentDefinition(
 )
 
 herald = AgentDefinition(
+    # heavy — client-facing deliverables always justify Opus
     description="Brand & deliverable QC — reads brand-kit (3 tiers: Professional/Family/Sentry AI Thermal), enforces John's taste + industry-standard quality rules on resumes, proposals, decks, client reports, websites, emails, and any other artifact. Runs mechanical QC (page count, fill ratio, section-across-page splits, ATS text extraction via pdftotext, brand-token drift) and auto-fixes mechanical violations by editing content (compress/expand bullets, restructure sections, adjust page breaks). Blocks + reports on subjective violations: images in ATS resumes, wrong tier tokens, fancy fonts where plain is required, brand voice drift, factual errors (UEI/CAGE/phone). Uses Read/Write/Edit/Bash/Grep/Glob. Pick for any pre-delivery review or brand-consistency check. 25-turn budget, opus, max effort.",
     prompt=_load_prompt("herald"),
     model="opus",
     tools=["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
     maxTurns=25,
+    permissionMode="bypassPermissions",
+    effort="max",
+    memory="project",
+)
+
+foreman = AgentDefinition(
+    description="Invisible dispatcher — parses raw unstructured input (voice memos, multi-intent requests), classifies intents, fans out to named specialists in parallel, and synthesizes a tight unified reply. Never asks questions, always acts. Uses Agent tool to dispatch to Scout/Wrench/Dispatch/Ledger/Forge/Anvil/Critic/Herald/Turbo/Titan plus direct osascript for Reminders/notes. Default delivery: iMessage via tmux relay. Pick behind any pipeline feeding raw user input (voice memos, handler polling, inbound webhooks). 30-turn budget, sonnet by default (escalates to opus on !opus or adaptive keywords).",
+    prompt=_load_prompt("foreman"),
+    model="sonnet",
+    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "Agent", "TodoWrite"],
+    maxTurns=30,
+    permissionMode="bypassPermissions",
+    effort="max",
+    memory="project",
+)
+
+turbo = AgentDefinition(
+    description="Speed-optimized quick-action agent on Haiku — fast lookups, quick sends, simple tasks. Invoked with 'turbo, <thing>' prefix. Read/Write/Edit/Grep/Glob/Bash/WebSearch/WebFetch. Pick for single-shot lookups, quick grep, simple ping checks, short iMessage sends. Skip for architectural decisions, multi-file refactors, complex debugging. 10-turn budget, haiku.",
+    prompt=_load_prompt("turbo"),
+    model="haiku",
+    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
+    maxTurns=10,
     permissionMode="bypassPermissions",
     effort="max",
     memory="project",
@@ -149,6 +172,8 @@ ALL_AGENTS = {
     "anvil": anvil,
     "critic": critic,
     "herald": herald,
+    "foreman": foreman,
+    "turbo": turbo,
 }
 
 
@@ -167,12 +192,14 @@ AGENT_TIERS: dict[str, str] = {
     "forge":     "adaptive",
     "wrench":    "adaptive",
     "anvil":     "adaptive",
-    "herald":    "adaptive",
+    "foreman":   "adaptive",
+    "herald":    "heavy",
     "critic":    "heavy",
     "titan":     "heavy",
     "dispatch":  "standard",
     "toolsmith": "standard",
     "ledger":    "standard",
+    "turbo":     "light",
 }
 
 # Keywords that auto-escalate an adaptive agent from Sonnet to Opus.
@@ -184,7 +211,7 @@ ADAPTIVE_ESCALATION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "anvil":   ("refactor", "architect", "multi-file", "cross-system", "end-to-end", "rewrite"),
     "scout":   ("deep dive", "deep-dive", "comprehensive", "synthesize across", "cross-reference"),
     "forge":   ("proposal", "capability statement", "business plan", "client report"),
-    "herald":  (),  # herald has internal two-pass tier logic; no keyword trigger needed
+    "foreman": ("multi-intent", "complex memo", "dispatch swarm"),
 }
 
 

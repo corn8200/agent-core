@@ -17,6 +17,10 @@
     <dict>
         <key>HOME</key>
         <string>/Users/johncornelius</string>
+        <key>USER</key>
+        <string>johncornelius</string>
+        <key>TMPDIR</key>
+        <string>/tmp</string>
         <key>PATH</key>
         <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>PYTHONPATH</key>

@@ -247,6 +247,11 @@ def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAutoBiz")
     keys = [k for k in keys if not _should_skip(k) and k not in _BASH_NOISE]
     result: dict[str, bool] = {}
 
+    # Always populate CLAUDE_CODE_OAUTH_TOKEN from per-host oat01 cache.
+    # Independent of vault: this is the canonical on-disk source and is
+    # load-bearing for any LaunchAgent that spawns `claude -p`.
+    hydrate_claude_oauth()
+
     token = _service_account_token()
     launchd = _is_launchd_context()
     # In launchd context, NEVER invoke op — it will hang on a TCC prompt.
@@ -324,4 +329,36 @@ def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAutoBiz")
     return result
 
 
-__all__ = ["get_secret", "hydrate_env"]
+def hydrate_claude_oauth() -> bool:
+    """Load CLAUDE_CODE_OAUTH_TOKEN from per-host oat01 cache.
+
+    Mirrors the shell-init logic at ~/.config/claude-oat01-shell-init.sh.
+    LaunchAgent-spawned Python doesn't inherit the env var from .zshenv, so
+    this helper reads the active-account marker and exports the matching
+    token file into os.environ.
+
+    Returns True if token was loaded (or already set), False otherwise.
+    Never overrides a token already in env. No-op if files are missing.
+    """
+    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
+        return True
+    active_marker = Path.home() / ".claude" / ".active-account"
+    account = "icloud"  # matches shell-init's safe default
+    try:
+        if active_marker.is_file():
+            account = active_marker.read_text().strip() or "icloud"
+    except Exception:
+        pass
+    token_file = Path.home() / ".config" / f"claude-oat01-{account}"
+    try:
+        if token_file.is_file():
+            tok = token_file.read_text().strip()
+            if tok:
+                os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+                return True
+    except Exception:
+        pass
+    return False
+
+
+__all__ = ["get_secret", "hydrate_env", "hydrate_claude_oauth"]

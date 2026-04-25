@@ -30,6 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 import time
@@ -48,7 +49,24 @@ DEDUP_TTL_SECONDS = 6 * 3600
 BYPASS_WINDOW_SECONDS = 15 * 60
 BYPASS_THRESHOLD = 3
 DOCTOR_LOG = Path.home() / "logs" / "doctor.jsonl"
-SEVERITIES = {"ok": 0, "notice": 0, "warn": 0, "critical": 1}
+SEVERITIES = {"ok": 0, "notice": 0, "warn": 0, "error": 1, "critical": 2}
+
+_SECRET_KEY_RE = re.compile(r"(?i)(token|key|secret|password|auth|credential|bearer)")
+
+
+def _validate_context(context) -> None:
+    if not context:
+        return
+    if not isinstance(context, dict):
+        raise ValueError(
+            f"doctor_escalate: context must be dict or None, got {type(context).__name__}"
+        )
+    for k in context.keys():
+        if _SECRET_KEY_RE.search(str(k)):
+            raise ValueError(
+                f"doctor_escalate: context key {k!r} matches secret pattern; "
+                f"redact at producer (use opaque names like 'secret_count' or 'token_present')"
+            )
 
 
 def _pane_ask_binary() -> Optional[str]:
@@ -109,7 +127,7 @@ def _pushover_direct(title: str, message: str, priority: int = 0) -> bool:
     data = urllib.parse.urlencode({
         "token": token, "user": user,
         "title": title[:250], "message": message[:1024],
-        "priority": priority,
+        "priority": min(priority, 2),
     }).encode()
     try:
         req = urllib.request.Request(
@@ -123,15 +141,41 @@ def _pushover_direct(title: str, message: str, priority: int = 0) -> bool:
 
 
 def _record_bypass(redis_conn) -> int:
-    if redis_conn is None:
-        return 0
-    key = "doctor:bypass:count"
+    if redis_conn is not None:
+        try:
+            c = redis_conn.incr("doctor:bypass:count")
+            redis_conn.expire("doctor:bypass:count", BYPASS_WINDOW_SECONDS)
+            return int(c)
+        except Exception:
+            pass  # fall through to JSONL scan
+    # Fallback: scan log for event=bypass within window. Survives Redis down + reboots.
+    cutoff = time.time() - BYPASS_WINDOW_SECONDS
+    count = 0
     try:
-        c = redis_conn.incr(key)
-        redis_conn.expire(key, BYPASS_WINDOW_SECONDS)
-        return int(c)
-    except Exception:
-        return 0
+        with DOCTOR_LOG.open("r") as f:
+            try:
+                f.seek(0, 2)
+                size = f.tell()
+                seek_to = max(0, size - 200_000)
+                f.seek(seek_to)
+                if seek_to > 0:
+                    f.readline()  # discard partial line only when mid-file
+            except Exception:
+                f.seek(0)
+            for line in f:
+                try:
+                    ev = json.loads(line)
+                    if ev.get("event") != "bypass":
+                        continue
+                    ts_str = ev.get("ts", "")
+                    ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
+                    if ts >= cutoff:
+                        count += 1
+                except Exception:
+                    continue
+    except FileNotFoundError:
+        return 1   # first-ever bypass
+    return count + 1   # +1 for the bypass we're about to log
 
 
 def _format_briefing(
@@ -193,9 +237,12 @@ def doctor_escalate(
 
     Returns dict with keys: dispatched, dedup_hit, bypassed, fingerprint.
     """
+    _validate_context(context)
     context = context or {}
     if severity not in SEVERITIES:
-        severity = "warn"
+        raise ValueError(
+            f"doctor_escalate: invalid severity {severity!r}; must be one of {sorted(SEVERITIES)}"
+        )
 
     fp = _fingerprint(watcher, severity, dedup_scope, context)
     result = {"dispatched": False, "dedup_hit": False, "bypassed": False, "fingerprint": fp}
@@ -248,7 +295,13 @@ def doctor_escalate(
                     "fingerprint": fp, "event": "dispatched", "attempt": attempt,
                 })
                 return result
-            last_err = f"rc={proc.returncode} stderr={proc.stderr[:200]}"
+            stderr_out = proc.stderr or ""
+            stdout_out = proc.stdout or ""
+            combined = stderr_out + stdout_out
+            last_err = f"rc={proc.returncode} stderr={stderr_out[:200]}"
+            if "not found" in combined and attempt < 3:
+                time.sleep(30 * attempt)
+                continue
         except subprocess.TimeoutExpired:
             last_err = "timeout"
         except Exception as e:

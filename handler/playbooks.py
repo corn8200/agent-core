@@ -106,7 +106,7 @@ async def _log_to_agent_cp(agent: str, kind: str, payload: dict):
         cmd = (
             "TOKEN=$(grep APPLE_BRIDGE_TOKEN ~/.config/secrets.env | cut -d= -f2 | tr -d '\"'"
             "'"
-            ") && curl -s -X POST http://127.0.0.1:8767/ingest"
+            ") && curl -s -X POST http://127.0.0.1:8768/api/ingest"
             " -H 'Content-Type: application/json'"
             " -H \"Authorization: Bearer $TOKEN\""
             f' -d "{escaped_body}"'

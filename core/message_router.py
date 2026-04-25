@@ -52,7 +52,7 @@ APPROVAL_QUEUE_URL = "http://100.118.21.64:8766/api/respond"
 # Format (fixed by Mac+VPS coordination): "[V:<service>:<ref>] <reply text>"
 # service is lowercase letters; ref is short alphanumeric assigned by the service.
 VPS_HOST_IP = "100.118.21.64"
-VPS_REPLY_BASE_URL = f"http://{VPS_HOST_IP}:8767"
+VPS_REPLY_BASE_URL = f"http://{VPS_HOST_IP}:8768/api"
 VPS_REPLY_SERVICES = {"sentinel", "mailtriage", "jobagent", "notify"}
 VPS_TAG_RE = re.compile(
     r"^\s*\[\s*v\s*:\s*(?P<service>[a-zA-Z]+)\s*:\s*(?P<ref>[A-Za-z0-9_-]+)\s*\]\s*",

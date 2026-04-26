@@ -79,10 +79,17 @@ nudge/
 - `com.john.imessage-bus` — KeepAlive daemon, polls chat.db, routes to agents
 - `com.john.nudge-engine` — every 5 min, calendar nudges via iMessage
 
-## Model Strategy (Max subscription = free)
-- **Opus:** Morning brief synthesis, handler diagnosis, memo execution, research passes 1+2, job tailoring
-- **Sonnet:** Ask commands, research passes 3-5, general agent work
-- **Haiku:** Dictation fix only ($0.02 budget)
+## Model Strategy (Max subscription = flat-monthly, no per-call $ cap)
+- **Tier system is canonical** — see `~/.claude/rules/agent-routing.md` and `AGENT_TIERS` in `core/agents.py`
+  - **heavy** (opus always): titan, critic, herald
+  - **adaptive** (sonnet → opus on keyword / `!opus`): anvil, wrench, scout, forge, foreman
+  - **standard** (sonnet, never opus): dispatch, toolsmith, ledger
+  - **light** (haiku): turbo
+- **Workload-level guidance** (where automation chooses model directly, not via named agent):
+  - Synthesis / multi-system diagnosis / hard tailoring → Opus
+  - Watcher loops / classification / general agent work → Sonnet
+  - Pure extraction / template filling → Haiku
+- **Dollar caps were retired 2026-04-22 (#183).** Usage-window readout (`5h:X% wk:Y%`) is the gate — `max_budget_usd` kwargs removed; only `max_turns` is enforced. See `~/.claude/rules/agent-routing.md`.
 
 ## Rules
 - All automated agents: `permission_mode="bypassPermissions"`, always set `max_turns`. Do NOT set `max_budget_usd` on oat01-metered work — it was retired 2026-04-22 (#183) as vestigial under the flat-monthly Max subscription. Runaway-loop protection is `max_turns` + the 50-calls/hour HOURLY_CAP in `core/mac_sdk.py` + R5 fan-out / R6 titan hooks.
@@ -97,9 +104,11 @@ nudge/
 - VPS SSH hostname is `vps`, NOT jcornelius.net
 
 ## Email Sending
-- Business (info@sentryaithermal.com): `send_business_email` MCP tool → sentry-mailqueue → Resend
-- Personal/system (notify@jcornelius.net): `send_personal_email` MCP tool → VPS send-email wrapper → Gmail SMTP
-- NEVER SCP scripts to VPS for email — use MCP tools
+- **Canonical agent path: mailhub** — `from mailhub import send_email, reply_email` (helper at `/srv/apps/lib/mailhub.py` on VPS, `agent-core/core/mailhub.py` on Mac/Air). Picks SMTP backend by `from_addr`, enforces reply-from-received-at server-side, auto-gates third-party approval queue, schedule-send + retry/bounce handled. Each agent passes `sender_app="<name>"`. See `~/.claude/rules/messaging.md`.
+- **Sentry biz** (info@sentryaithermal.com): `send_business_email` MCP tool → sentry-mailqueue → Resend (still authoritative — mailhub Phase 4+ will subsume).
+- **Legacy MCP tools** (`send_personal_email`, `send_business_email` in `core/tools.py`): still functional but route via the legacy ssh `send-email` path, NOT mailhub. New code should call mailhub directly. These remain for automated agents (handler, watch-commander) that have them registered as MCP tools.
+- NEVER SCP scripts to VPS for email — use mailhub
+- NEVER use raw smtplib from agent code — go through mailhub
 - NEVER use Gmail MCP drafts
 
 ## Email Receive

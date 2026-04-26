@@ -34,7 +34,10 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-from doctor_event_schema import canonical_ts, validate_event as _validate_schema_event
+try:
+    from doctor_event_schema import canonical_ts, validate_event as _validate_schema_event
+except ModuleNotFoundError:
+    from core.doctor_event_schema import canonical_ts, validate_event as _validate_schema_event
 from hashlib import sha1
 from pathlib import Path
 from typing import Any, Optional

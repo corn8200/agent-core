@@ -181,7 +181,9 @@ async def gather_reminders() -> dict:
 
             if not name:
                 continue
-            if name[0] in "📅📋🔖🗓📌🔹▪•🔮⭐✨":
+            # Skip pure section-divider items (emoji + short, no due date).
+            # 📅/🗓 removed — those are meaningful meeting prefixes on the Work list.
+            if name[0] in "📋🔖📌🔹▪•🔮⭐✨" and not due_iso and len(name) < 30:
                 continue
 
             total += 1

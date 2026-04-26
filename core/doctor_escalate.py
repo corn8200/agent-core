@@ -414,6 +414,15 @@ def doctor_escalate(
         _deliver_bypass(watcher, severity, summary, briefing, "no pane-ask-v2", r, bypass_priority)
         return result
 
+    # Fix #1: when invoked from a daemon (no $TMUX_PANE), pane-ask-v2 needs
+    # explicit --label NAME for the signed banner. Read $PANE_ASK_LABEL set
+    # by the calling LaunchAgent/systemd unit; fall back to the watcher name
+    # so every escalation has a verified identity rather than failing exit 8.
+    label_args: list[str] = []
+    if not os.environ.get("TMUX_PANE"):
+        label_value = os.environ.get("PANE_ASK_LABEL") or watcher or "doctor-escalate"
+        label_args = ["--label", label_value]
+
     target_args = ["--ssh", "vps", DOCTOR_PANE] if _on_mac() else [DOCTOR_PANE]
     last_err = ""
     for attempt, delay in enumerate((0, 5, 15), start=1):
@@ -421,7 +430,7 @@ def doctor_escalate(
             time.sleep(delay)
         try:
             proc = subprocess.run(
-                [binary, *target_args, briefing],
+                [binary, *label_args, *target_args, briefing],
                 capture_output=True, text=True, timeout=30,
             )
             if proc.returncode == 0:

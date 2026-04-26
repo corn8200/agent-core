@@ -199,15 +199,15 @@ def _log_event(event: dict) -> None:
 
 
 def _pushover_direct(title: str, message: str, priority: int = 0) -> bool:
-    token = os.environ.get("PUSHOVER_TOKEN")
-    user = os.environ.get("PUSHOVER_USER")
+    token = os.environ.get("PUSHOVER_APP_TOKEN")
+    user = os.environ.get("PUSHOVER_USER_KEY")
     if not (token and user):
         for path in ("/home/ubuntu/.config/secrets.env", os.path.expanduser("~/.config/secrets.env")):
             if os.path.exists(path):
                 for line in open(path):
-                    if line.startswith("PUSHOVER_TOKEN="):
+                    if line.startswith("PUSHOVER_APP_TOKEN="):
                         token = line.strip().split("=", 1)[1].strip("\"'")
-                    elif line.startswith("PUSHOVER_USER="):
+                    elif line.startswith("PUSHOVER_USER_KEY="):
                         user = line.strip().split("=", 1)[1].strip("\"'")
                 if token and user:
                     break

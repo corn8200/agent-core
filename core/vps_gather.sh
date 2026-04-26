@@ -53,16 +53,13 @@ free -h | grep Mem
 uptime
 
 echo '=== SERVICES ==='
-# Only long-running services (daemons). Timer-triggered oneshots are NORMALLY
-# inactive between runs — checking them creates false positives.
-# 2026-04-16: removed weather-poller, weather-app — services deleted from VPS,
-# were triggering false anomaly alerts every 30 min.
-for svc in sentry-dashboard sentry-formhandler sentry-mailqueue-web mailgw-web caddy prepper-v2 jobsignal-dashboard; do
+# Probe set comes from the canonical health_units.yaml registry (#664).
+# Source of truth: ~/claude-config/services/health_units.yaml
+# Loader: /srv/apps/lib/health_units_loader.py (stdlib-only fallback if PyYAML missing)
+for svc in $(python3 /srv/apps/lib/health_units_loader.py --surface vps-gather 2>/dev/null); do
   status=$(systemctl is-active $svc 2>/dev/null)
   echo "$svc: $status"
 done
-# The one real timer we rely on:
-echo "sentry-orchestrator.timer: $(systemctl is-active sentry-orchestrator.timer 2>/dev/null)"
 
 echo '=== ERRORS ==='
 sudo journalctl --priority=err --since '24 hours ago' --no-pager -q 2>/dev/null \

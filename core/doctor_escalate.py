@@ -1,18 +1,13 @@
-"""doctor_escalate — Mac-side entry point for routing infra alerts to the doctor pane.
+"""doctor_escalate — canonical entry point for routing infra alerts to the doctor pane.
 
 Replaces direct-to-Pushover / direct-email alerting from watchers, daemons, and
 schedulers. Doctor (claude-vps:6) reasons about the alert, applies safe fixes,
 writes backlog rows for sticky issues, and iMessages John only if human hands
 are needed. See ~/.claude/rules/infra-alerts.md for the HARD RULE.
 
-Mac specifics vs VPS version:
-  - pane-ask-v2 is invoked with --ssh vps (doctor pane is always on VPS)
-  - Log path is ~/logs/doctor.jsonl (VPS log is under /srv/apps/taskqueue/)
-  - Redis connects to VPS via Tailscale (100.118.21.64:6379)
+Usage (from any watcher on VPS or Mac):
 
-Usage (from any watcher on Mac):
-
-    from core.doctor_escalate import doctor_escalate
+    from doctor_escalate import doctor_escalate
     doctor_escalate(
         watcher="my-watcher",
         severity="warn",
@@ -20,10 +15,11 @@ Usage (from any watcher on Mac):
         context={"key": "structured details"},
         fix_hints=["systemctl restart foo"],   # optional
         dedup_scope="foo:/srv",                # optional, 6h TTL
+        quota={"max_per_hour": 5, "burst": 2}, # optional, overrides 10/h burst-3 default
     )
 
-Fallback: 3 retries with backoff (5s/15s/45s) via pane-ask-v2 --ssh vps; if all
-fail, direct Pushover with [DOCTOR-BYPASS] prefix so the alert still lands.
+Fallback: 3 retries with backoff (5s/15s/45s) via pane-ask-v2; if all fail,
+direct Pushover with [DOCTOR-BYPASS] prefix so the alert still lands.
 """
 from __future__ import annotations
 
@@ -37,6 +33,8 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+
+from doctor_event_schema import canonical_ts, validate_event as _validate_schema_event
 from hashlib import sha1
 from pathlib import Path
 from typing import Any, Optional
@@ -44,14 +42,89 @@ from typing import Any, Optional
 logger = logging.getLogger(__name__)
 
 DOCTOR_PANE = "claude-vps:6"
-PANE_ASK_PATH = "/Users/johncornelius/bin/pane-ask-v2"
+PANE_ASK_PATHS = (
+    "/home/ubuntu/bin/pane-ask-v2",           # VPS
+    "/Users/johncornelius/bin/pane-ask-v2",   # Mac
+)
 DEDUP_TTL_SECONDS = 6 * 3600
 BYPASS_WINDOW_SECONDS = 15 * 60
-BYPASS_THRESHOLD = 3
-DOCTOR_LOG = Path.home() / "logs" / "doctor.jsonl"
-SEVERITIES = {"ok": 0, "notice": 0, "warn": 0, "error": 1, "critical": 2}
+BYPASS_THRESHOLD = 3          # N bypasses in window → wake John about doctor-down
+DOCTOR_LOG = Path("/srv/apps/taskqueue/logs/doctor.jsonl")
+SEVERITIES = {"ok": 0, "notice": 0, "warn": 0, "error": 1, "critical": 2}   # pushover priority map
+
+# Producer-side rate limiting (#648): token bucket defaults applied when watcher
+# omits the quota kwarg. Each call to doctor_escalate costs one token.
+_DEFAULT_QUOTA = {"max_per_hour": 10, "burst": 3}
+_RL_STATE_PATH = Path("/tmp/doctor_rl_state.json")  # Redis-less fallback
 
 _SECRET_KEY_RE = re.compile(r"(?i)(token|key|secret|password|auth|credential|bearer)")
+
+
+def _token_bucket_check(watcher: str, quota: dict, redis_conn) -> bool:
+    """Return True (allow) or False (rate-limited).
+
+    Uses a leaky-bucket: tokens refill at rate=max_per_hour/3600 per second up
+    to burst capacity. One token is consumed per allowed escalation. Bucket
+    state lives in Redis when available; falls back to /tmp JSON otherwise.
+    Fail-open on any storage error so a broken rate-limiter never silences a
+    real alert.
+    """
+    max_per_hour = int(quota.get("max_per_hour", _DEFAULT_QUOTA["max_per_hour"]))
+    burst = int(quota.get("burst", _DEFAULT_QUOTA["burst"]))
+    rate = max_per_hour / 3600.0  # tokens per second
+    now = time.time()
+
+    if redis_conn is not None:
+        tokens_key = f"doctor:rl:{watcher}:tokens"
+        refill_key = f"doctor:rl:{watcher}:last_refill"
+        try:
+            pipe = redis_conn.pipeline()
+            pipe.get(tokens_key)
+            pipe.get(refill_key)
+            tokens_raw, last_refill_raw = pipe.execute()
+
+            tokens = float(tokens_raw) if tokens_raw is not None else float(burst)
+            last_refill = float(last_refill_raw) if last_refill_raw is not None else now
+
+            elapsed = now - last_refill
+            tokens = min(float(burst), tokens + elapsed * rate)
+
+            if tokens < 1.0:
+                return False
+
+            pipe = redis_conn.pipeline()
+            # TTL = 2× the per-hour window so idle watchers age out cleanly
+            pipe.set(tokens_key, tokens - 1.0, ex=7200)
+            pipe.set(refill_key, now, ex=7200)
+            pipe.execute()
+            return True
+        except Exception as e:
+            logger.warning("doctor_escalate: rate-limit redis op failed (%s), allowing", e)
+            return True  # fail-open
+
+    # Redis-less fallback: local JSON file
+    try:
+        try:
+            state = json.loads(_RL_STATE_PATH.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            state = {}
+
+        bucket = state.get(watcher, {"tokens": float(burst), "last_refill": now})
+        tokens = float(bucket["tokens"])
+        last_refill = float(bucket["last_refill"])
+
+        elapsed = now - last_refill
+        tokens = min(float(burst), tokens + elapsed * rate)
+
+        if tokens < 1.0:
+            return False
+
+        state[watcher] = {"tokens": tokens - 1.0, "last_refill": now}
+        _RL_STATE_PATH.write_text(json.dumps(state))
+        return True
+    except Exception as e:
+        logger.warning("doctor_escalate: rate-limit file op failed (%s), allowing", e)
+        return True  # fail-open
 
 
 def _validate_context(context) -> None:
@@ -70,17 +143,23 @@ def _validate_context(context) -> None:
 
 
 def _pane_ask_binary() -> Optional[str]:
-    if os.path.exists(PANE_ASK_PATH) and os.access(PANE_ASK_PATH, os.X_OK):
-        return PANE_ASK_PATH
+    for p in PANE_ASK_PATHS:
+        if os.path.exists(p) and os.access(p, os.X_OK):
+            return p
     return None
 
 
+def _on_mac() -> bool:
+    return sys.platform == "darwin"
+
+
 def _get_redis():
+    """Lazy Redis import — works from both VPS (localhost:6379) and Mac (tailscale)."""
     try:
         from redis import Redis
     except ImportError:
         return None
-    host = os.environ.get("REDIS_HOST", "100.118.21.64")
+    host = os.environ.get("REDIS_HOST") or "100.118.21.64"
     port = int(os.environ.get("REDIS_PORT", 6379))
     db = int(os.environ.get("REDIS_DB", 0))
     try:
@@ -104,8 +183,14 @@ def _fingerprint(watcher: str, severity: str, dedup_scope: Optional[str], contex
 def _log_event(event: dict) -> None:
     try:
         DOCTOR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            to_write = _validate_schema_event(event)
+        except Exception as val_err:
+            to_write = dict(event)
+            to_write["_validate_error"] = str(val_err)
+            logger.warning("doctor_escalate: event validation failed (%s), writing raw", val_err)
         with DOCTOR_LOG.open("a") as f:
-            f.write(json.dumps(event) + "\n")
+            f.write(json.dumps(to_write) + "\n")
     except Exception as e:
         logger.warning("doctor_escalate: log write failed (%s)", e)
 
@@ -114,13 +199,15 @@ def _pushover_direct(title: str, message: str, priority: int = 0) -> bool:
     token = os.environ.get("PUSHOVER_TOKEN")
     user = os.environ.get("PUSHOVER_USER")
     if not (token and user):
-        secrets_path = os.path.expanduser("~/.config/secrets.env")
-        if os.path.exists(secrets_path):
-            for line in open(secrets_path):
-                if line.startswith("PUSHOVER_TOKEN="):
-                    token = line.strip().split("=", 1)[1].strip("\"'")
-                elif line.startswith("PUSHOVER_USER="):
-                    user = line.strip().split("=", 1)[1].strip("\"'")
+        for path in ("/home/ubuntu/.config/secrets.env", os.path.expanduser("~/.config/secrets.env")):
+            if os.path.exists(path):
+                for line in open(path):
+                    if line.startswith("PUSHOVER_TOKEN="):
+                        token = line.strip().split("=", 1)[1].strip("\"'")
+                    elif line.startswith("PUSHOVER_USER="):
+                        user = line.strip().split("=", 1)[1].strip("\"'")
+                if token and user:
+                    break
     if not (token and user):
         logger.error("doctor_escalate: pushover credentials unavailable, alert LOST")
         return False
@@ -187,11 +274,12 @@ def _format_briefing(
     fix_hints: Optional[list],
 ) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    source_host = "mac" if _on_mac() else "vps"
     lines = [
         f"[DOCTOR-ESCALATION {watcher} {ts}]",
+        f"source_host={source_host} (fix runs HERE — never dispatch to the other host's panes)",
         f"severity={severity} summary={summary[:200]}",
         f"fingerprint={fingerprint} (dedup TTL {DEDUP_TTL_SECONDS//3600}h)",
-        "source=mac",
     ]
     if context:
         lines.append("")
@@ -225,18 +313,33 @@ def _format_briefing(
 
 
 def doctor_escalate(
-    watcher: str,
-    severity: str,
-    summary: str,
+    watcher: Optional[str] = None,
+    severity: str = "",
+    summary: str = "",
     context: Optional[dict] = None,
     fix_hints: Optional[list] = None,
     dedup_scope: Optional[str] = None,
+    source: Optional[str] = None,
     bypass_priority: Optional[int] = None,
+    quota: Optional[dict] = None,
 ) -> dict:
-    """Route an infra alert from Mac through the doctor pane (claude-vps:6).
+    """Route an infra alert through the doctor pane.
 
-    Returns dict with keys: dispatched, dedup_hit, bypassed, fingerprint.
+    Returns dict with keys: dispatched, dedup_hit, bypassed, rate_limited, fingerprint.
+
+    quota — optional per-watcher rate limit override:
+        {"max_per_hour": int, "burst": int}
+        Defaults to _DEFAULT_QUOTA (10/h, burst 3).
     """
+    # coerce source -> watcher (legacy alias)
+    if watcher is None and source is not None:
+        watcher = source
+    if not watcher:
+        raise ValueError("doctor_escalate: watcher (or source) is required")
+    if not severity:
+        raise ValueError("doctor_escalate: severity is required")
+    if not summary:
+        raise ValueError("doctor_escalate: summary is required")
     _validate_context(context)
     context = context or {}
     if severity not in SEVERITIES:
@@ -244,10 +347,40 @@ def doctor_escalate(
             f"doctor_escalate: invalid severity {severity!r}; must be one of {sorted(SEVERITIES)}"
         )
 
-    fp = _fingerprint(watcher, severity, dedup_scope, context)
-    result = {"dispatched": False, "dedup_hit": False, "bypassed": False, "fingerprint": fp}
+    effective_quota = dict(_DEFAULT_QUOTA)
+    if quota:
+        effective_quota.update(quota)
 
+    fp = _fingerprint(watcher, severity, dedup_scope, context)
+    result = {
+        "dispatched": False,
+        "dedup_hit": False,
+        "bypassed": False,
+        "rate_limited": False,
+        "fingerprint": fp,
+    }
+
+    # Single Redis connection reused by rate-limit check, dedup check, and bypass counter.
     r = _get_redis()
+
+    # Producer-side rate limit (#648) — drop before touching dedup or dispatch.
+    if not _token_bucket_check(watcher, effective_quota, r):
+        result["rate_limited"] = True
+        logger.warning(
+            "doctor_escalate: rate-limited watcher=%s quota=%s/%sh burst=%s — dropped",
+            watcher,
+            effective_quota["max_per_hour"],
+            1,
+            effective_quota["burst"],
+        )
+        _log_event({
+            "ts": canonical_ts(),
+            "watcher": watcher, "severity": severity, "summary": summary,
+            "fingerprint": fp, "event": "rate_limited",
+            "quota": effective_quota,
+        })
+        return result
+
     if r is not None:
         dedup_key = f"doctor:escalation:{fp}"
         try:
@@ -255,7 +388,7 @@ def doctor_escalate(
                 ttl = r.ttl(dedup_key)
                 result["dedup_hit"] = True
                 _log_event({
-                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "ts": canonical_ts(),
                     "watcher": watcher, "severity": severity, "summary": summary,
                     "fingerprint": fp, "event": "dedup_hit", "ttl_remaining_s": int(ttl),
                 })
@@ -270,7 +403,7 @@ def doctor_escalate(
     binary = _pane_ask_binary()
     if not binary:
         _log_event({
-            "ts": datetime.now(timezone.utc).isoformat(),
+            "ts": canonical_ts(),
             "watcher": watcher, "severity": severity, "fingerprint": fp,
             "event": "bypass", "reason": "pane-ask-v2 binary not found",
         })
@@ -278,19 +411,20 @@ def doctor_escalate(
         _deliver_bypass(watcher, severity, summary, briefing, "no pane-ask-v2", r, bypass_priority)
         return result
 
+    target_args = ["--ssh", "vps", DOCTOR_PANE] if _on_mac() else [DOCTOR_PANE]
     last_err = ""
     for attempt, delay in enumerate((0, 5, 15), start=1):
         if delay:
             time.sleep(delay)
         try:
             proc = subprocess.run(
-                [binary, "--ssh", "vps", DOCTOR_PANE, briefing],
+                [binary, *target_args, briefing],
                 capture_output=True, text=True, timeout=30,
             )
             if proc.returncode == 0:
                 result["dispatched"] = True
                 _log_event({
-                    "ts": datetime.now(timezone.utc).isoformat(),
+                    "ts": canonical_ts(),
                     "watcher": watcher, "severity": severity, "summary": summary,
                     "fingerprint": fp, "event": "dispatched", "attempt": attempt,
                 })
@@ -340,7 +474,7 @@ def _deliver_bypass(
         body_parts.insert(0, f"WARN: doctor appears DOWN ({bypass_count} bypasses in window)")
     _pushover_direct(title, "\n".join(body_parts), priority=prio)
     _log_event({
-        "ts": datetime.now(timezone.utc).isoformat(),
+        "ts": canonical_ts(),
         "watcher": watcher, "severity": severity, "summary": summary,
         "event": "bypass", "reason": reason, "bypass_count": bypass_count,
         "pushover_priority": prio,

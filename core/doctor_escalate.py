@@ -1,9 +1,9 @@
-"""doctor_escalate — canonical entry point for routing infra alerts to the doctor pane.
+"""doctor_escalate — canonical entry point for routing infra alerts to a doctor pane.
 
 Replaces direct-to-Pushover / direct-email alerting from watchers, daemons, and
-schedulers. Doctor (claude-vps:6) reasons about the alert, applies safe fixes,
-writes backlog rows for sticky issues, and iMessages John only if human hands
-are needed. See ~/.claude/rules/infra-alerts.md for the HARD RULE.
+schedulers. The doctor pane on the relevant host (Mac or VPS) reasons about the
+alert, applies safe fixes, writes backlog rows for sticky issues, and iMessages
+John only if human hands are needed. See ~/.claude/rules/infra-alerts.md.
 
 Usage (from any watcher on VPS or Mac):
 
@@ -16,10 +16,17 @@ Usage (from any watcher on VPS or Mac):
         fix_hints=["systemctl restart foo"],   # optional
         dedup_scope="foo:/srv",                # optional, 6h TTL
         quota={"max_per_hour": 5, "burst": 2}, # optional, overrides 10/h burst-3 default
+        target_host="mac",                     # optional: "mac" | "vps" | None (= calling host)
     )
 
+Routing semantics (mac-doctor-pane plan, 2026-04-27):
+    target_host  — where the FIX should run (which doctor pane gets dispatched).
+                   Default: the host the call was made from.
+    source_host  — where the watcher detected the symptom from (the calling
+                   host). Stamped in the briefing for human context only.
+
 Fallback: 3 retries with backoff (5s/15s/45s) via pane-ask-v2; if all fail,
-direct Pushover with [DOCTOR-BYPASS] prefix so the alert still lands.
+direct Pushover with [DOCTOR-BYPASS-<host>] prefix so the alert still lands.
 """
 from __future__ import annotations
 
@@ -34,17 +41,33 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-try:
-    from doctor_event_schema import canonical_ts, validate_event as _validate_schema_event
-except ModuleNotFoundError:
-    from core.doctor_event_schema import canonical_ts, validate_event as _validate_schema_event
+# Self-bootstrap sys.path: callers can `from doctor_escalate import …`
+# without pre-loading sys.path, as long as Python can locate this file
+# (PYTHONPATH, an explicit sys.path.insert, or absolute spec_from_file_location).
+# Once that import succeeds, this block ensures sibling modules
+# (doctor_event_schema, etc.) resolve from the same dir
+# regardless of how the caller set things up. Critic finding #7 (#686).
+_LIB_DIR = os.path.dirname(os.path.abspath(__file__))
+if _LIB_DIR and _LIB_DIR not in sys.path:
+    sys.path.insert(0, _LIB_DIR)
+
+from doctor_event_schema import canonical_ts, validate_event as _validate_schema_event
 from hashlib import sha1
 from pathlib import Path
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-DOCTOR_PANE = "claude-vps:6"
+_SOURCE_HOST = "mac" if sys.platform == "darwin" else "vps"
+
+DOCTOR_PANES = {
+    "mac": "claude:8",
+    "vps": "claude-vps:6",
+}
+DOCTOR_LOG_PATHS = {
+    "mac": Path.home() / "Library/Logs/doctor.jsonl",
+    "vps": Path("/srv/apps/taskqueue/logs/doctor.jsonl"),
+}
 PANE_ASK_PATHS = (
     "/home/ubuntu/bin/pane-ask-v2",           # VPS
     "/Users/johncornelius/bin/pane-ask-v2",   # Mac
@@ -52,8 +75,17 @@ PANE_ASK_PATHS = (
 DEDUP_TTL_SECONDS = 6 * 3600
 BYPASS_WINDOW_SECONDS = 15 * 60
 BYPASS_THRESHOLD = 3          # N bypasses in window → wake John about doctor-down
-DOCTOR_LOG = Path("/srv/apps/taskqueue/logs/doctor.jsonl")
 SEVERITIES = {"ok": 0, "notice": 0, "warn": 0, "error": 1, "critical": 2}   # pushover priority map
+
+# #683 cluster-dedup: when N+ distinct fingerprints fire for the same watcher
+# within CLUSTER_WINDOW_SECONDS, the Nth fire is rewritten as one "cluster"
+# escalation summarising all N, and the cluster fingerprint is latched for
+# CLUSTER_LATCH_SECONDS so subsequent individual fires from that watcher get
+# suppressed. Reduces doctor noise floor when a class-of-workers fails together
+# (e.g. 4 gather_worker subscribers all going stale at once on phase-7 incidents).
+CLUSTER_WINDOW_SECONDS = 5 * 60       # rolling window for counting distinct fps
+CLUSTER_THRESHOLD = 3                  # min distinct fps in window to switch to cluster mode
+CLUSTER_LATCH_SECONDS = 5 * 60         # how long after clustering to suppress individuals
 
 # Producer-side rate limiting (#648): token bucket defaults applied when watcher
 # omits the quota kwarg. Each call to doctor_escalate costs one token.
@@ -61,6 +93,31 @@ _DEFAULT_QUOTA = {"max_per_hour": 10, "burst": 3}
 _RL_STATE_PATH = Path("/tmp/doctor_rl_state.json")  # Redis-less fallback
 
 _SECRET_KEY_RE = re.compile(r"(?i)(token|key|secret|password|auth|credential|bearer)")
+
+
+def _on_mac() -> bool:
+    return sys.platform == "darwin"
+
+
+def _doctor_log_path() -> Path:
+    return DOCTOR_LOG_PATHS["mac" if _on_mac() else "vps"]
+
+
+def _resolve_target(target_host: Optional[str]) -> tuple[str, str, list[str]]:
+    """Return (resolved_host, pane, ssh_args)."""
+    if target_host is None:
+        target_host = _SOURCE_HOST
+    if target_host not in DOCTOR_PANES:
+        raise ValueError(
+            f"target_host must be 'mac' or 'vps', got {target_host!r}"
+        )
+    pane = DOCTOR_PANES[target_host]
+    on_mac = _on_mac()
+    if target_host == "mac":
+        ssh_args = [] if on_mac else ["--ssh", "mac"]
+    else:
+        ssh_args = ["--ssh", "vps"] if on_mac else []
+    return target_host, pane, ssh_args
 
 
 def _token_bucket_check(watcher: str, quota: dict, redis_conn) -> bool:
@@ -152,10 +209,6 @@ def _pane_ask_binary() -> Optional[str]:
     return None
 
 
-def _on_mac() -> bool:
-    return sys.platform == "darwin"
-
-
 def _get_redis():
     """Lazy Redis import — works from both VPS (localhost:6379) and Mac (tailscale)."""
     try:
@@ -174,25 +227,81 @@ def _get_redis():
         return None
 
 
-def _fingerprint(watcher: str, severity: str, dedup_scope: Optional[str], context: dict) -> str:
+def _check_cluster(watcher: str, fp: str, redis_conn) -> tuple[str, list[str]]:
+    """#683 cluster-dedup. Returns (mode, recent_fps).
+
+    mode is one of:
+      - "individual": fire as normal — under cluster threshold or no Redis
+      - "first_cluster": this fire promotes to a cluster — caller rewrites
+        summary/fingerprint to a cluster shape, latches further suppression
+      - "suppressed": cluster is latched — caller should treat this as a
+        dedup_hit and return without dispatching
+
+    Race-safety: the promotion step uses `SET latch NX EX` (atomic
+    set-if-not-exists with TTL), so two concurrent processes hitting the
+    threshold at the exact same moment cannot both win and ship two cluster
+    summaries.
+
+    Best-effort: any Redis error falls through to "individual" so we never
+    silence a real alert.
+    """
+    if redis_conn is None:
+        return ("individual", [])
+    cluster_key = f"doctor:cluster:{watcher}"
+    latch_key = f"doctor:cluster_latch:{watcher}"
+    now = time.time()
+    try:
+        if redis_conn.exists(latch_key):
+            return ("suppressed", [])
+        redis_conn.zadd(cluster_key, {fp: now})
+        redis_conn.expire(cluster_key, CLUSTER_WINDOW_SECONDS * 2)
+        redis_conn.zremrangebyscore(cluster_key, 0, now - CLUSTER_WINDOW_SECONDS)
+        distinct_count = redis_conn.zcard(cluster_key)
+        if distinct_count < CLUSTER_THRESHOLD:
+            return ("individual", [])
+        won = redis_conn.set(latch_key, "1", nx=True, ex=CLUSTER_LATCH_SECONDS)
+        if not won:
+            return ("suppressed", [])
+        recent = redis_conn.zrange(cluster_key, 0, -1)
+        recent_fps = [m.decode() if isinstance(m, bytes) else m for m in recent]
+        return ("first_cluster", recent_fps)
+    except Exception as e:
+        logger.warning("doctor_escalate: cluster check failed (%s) — firing individual", e)
+        return ("individual", [])
+
+
+def _fingerprint(
+    watcher: str,
+    severity: str,
+    dedup_scope: Optional[str],
+    context: dict,
+    target_host: str,
+) -> str:
+    """[CRITIC-FIX SEV-1#1] Fingerprint scoped to target_host.
+
+    Mac and VPS doctor get distinct dedup keyspaces. Same watcher firing on
+    both hosts produces different fingerprints — no cross-host silencing.
+    """
+    base = f"{target_host}|{watcher}|{severity}"
     if dedup_scope:
-        payload = f"{watcher}|{severity}|{dedup_scope}"
+        payload = f"{base}|{dedup_scope}"
     else:
         items = sorted((k, str(v)[:200]) for k, v in (context or {}).items())
-        payload = f"{watcher}|{severity}|" + "|".join(f"{k}={v}" for k, v in items)
+        payload = f"{base}|" + "|".join(f"{k}={v}" for k, v in items)
     return sha1(payload.encode()).hexdigest()[:16]
 
 
 def _log_event(event: dict) -> None:
+    log_path = _doctor_log_path()
     try:
-        DOCTOR_LOG.parent.mkdir(parents=True, exist_ok=True)
+        log_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             to_write = _validate_schema_event(event)
         except Exception as val_err:
             to_write = dict(event)
             to_write["_validate_error"] = str(val_err)
             logger.warning("doctor_escalate: event validation failed (%s), writing raw", val_err)
-        with DOCTOR_LOG.open("a") as f:
+        with log_path.open("a") as f:
             f.write(json.dumps(to_write) + "\n")
     except Exception as e:
         logger.warning("doctor_escalate: log write failed (%s)", e)
@@ -230,19 +339,26 @@ def _pushover_direct(title: str, message: str, priority: int = 0) -> bool:
         return False
 
 
-def _record_bypass(redis_conn) -> int:
+def _record_bypass(redis_conn, target_host: str) -> int:
+    """[CRITIC-FIX SEV-1#2] Bypass counter scoped per host.
+
+    Mac and VPS doctor get separate bypass counters. A failure on one host
+    should never trigger a doctor-down alarm on the other.
+    """
     if redis_conn is not None:
         try:
-            c = redis_conn.incr("doctor:bypass:count")
-            redis_conn.expire("doctor:bypass:count", BYPASS_WINDOW_SECONDS)
+            key = f"doctor:bypass:{target_host}:count"
+            c = redis_conn.incr(key)
+            redis_conn.expire(key, BYPASS_WINDOW_SECONDS)
             return int(c)
         except Exception:
             pass  # fall through to JSONL scan
-    # Fallback: scan log for event=bypass within window. Survives Redis down + reboots.
+    # Fallback: scan THIS host's log for event=bypass within window.
+    log_path = _doctor_log_path()
     cutoff = time.time() - BYPASS_WINDOW_SECONDS
     count = 0
     try:
-        with DOCTOR_LOG.open("r") as f:
+        with log_path.open("r") as f:
             try:
                 f.seek(0, 2)
                 size = f.tell()
@@ -256,6 +372,9 @@ def _record_bypass(redis_conn) -> int:
                 try:
                     ev = json.loads(line)
                     if ev.get("event") != "bypass":
+                        continue
+                    # Only count bypasses for the same target_host
+                    if ev.get("target_host") and ev.get("target_host") != target_host:
                         continue
                     ts_str = ev.get("ts", "")
                     ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00")).timestamp()
@@ -275,12 +394,13 @@ def _format_briefing(
     context: dict,
     fingerprint: str,
     fix_hints: Optional[list],
+    target_host: str,
 ) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    source_host = "mac" if _on_mac() else "vps"
+    log_path = _doctor_log_path()
     lines = [
         f"[DOCTOR-ESCALATION {watcher} {ts}]",
-        f"source_host={source_host} (fix runs HERE — never dispatch to the other host's panes)",
+        f"target_host={target_host} source_host={_SOURCE_HOST} (fix runs on target_host's doctor)",
         f"severity={severity} summary={summary[:200]}",
         f"fingerprint={fingerprint} (dedup TTL {DEDUP_TTL_SECONDS//3600}h)",
     ]
@@ -309,8 +429,8 @@ def _format_briefing(
         "3. iMessage John only if human hands are required.",
         "Do NOT escalate to Pushover/email directly from doctor — that's the watcher's bypass path.",
         "",
-        "Standing briefing: ~/claude-config/doctor/BRIEFING.md",
-        "Log this escalation: /srv/apps/taskqueue/logs/doctor.jsonl",
+        "Standing briefing: ~/claude-config/doctor/COMMON.md + ~/claude-config/doctor/{MAC,VPS}.md",
+        f"Log this escalation: {log_path}",
     ]
     return "\n".join(lines)
 
@@ -325,16 +445,15 @@ def doctor_escalate(
     source: Optional[str] = None,
     bypass_priority: Optional[int] = None,
     quota: Optional[dict] = None,
+    target_host: Optional[str] = None,
 ) -> dict:
-    """Route an infra alert through the doctor pane.
+    """Route an infra alert through a doctor pane.
 
-    Returns dict with keys: dispatched, dedup_hit, bypassed, rate_limited, fingerprint.
-
-    quota — optional per-watcher rate limit override:
-        {"max_per_hour": int, "burst": int}
-        Defaults to _DEFAULT_QUOTA (10/h, burst 3).
+    target_host — "mac" | "vps" | None. None = the calling host. Picks which
+        doctor pane gets the dispatch and which dedup/bypass keyspace is used.
+    Returns dict with keys: dispatched, dedup_hit, bypassed, rate_limited,
+    clustered, cluster_suppressed, fingerprint, target_host.
     """
-    # coerce source -> watcher (legacy alias)
     if watcher is None and source is not None:
         watcher = source
     if not watcher:
@@ -350,23 +469,26 @@ def doctor_escalate(
             f"doctor_escalate: invalid severity {severity!r}; must be one of {sorted(SEVERITIES)}"
         )
 
+    resolved_host, doctor_pane, ssh_args = _resolve_target(target_host)
+
     effective_quota = dict(_DEFAULT_QUOTA)
     if quota:
         effective_quota.update(quota)
 
-    fp = _fingerprint(watcher, severity, dedup_scope, context)
+    fp = _fingerprint(watcher, severity, dedup_scope, context, resolved_host)
     result = {
         "dispatched": False,
         "dedup_hit": False,
         "bypassed": False,
         "rate_limited": False,
+        "clustered": False,
+        "cluster_suppressed": False,
         "fingerprint": fp,
+        "target_host": resolved_host,
     }
 
-    # Single Redis connection reused by rate-limit check, dedup check, and bypass counter.
     r = _get_redis()
 
-    # Producer-side rate limit (#648) — drop before touching dedup or dispatch.
     if not _token_bucket_check(watcher, effective_quota, r):
         result["rate_limited"] = True
         logger.warning(
@@ -381,6 +503,7 @@ def doctor_escalate(
             "watcher": watcher, "severity": severity, "summary": summary,
             "fingerprint": fp, "event": "rate_limited",
             "quota": effective_quota,
+            "source_host": _SOURCE_HOST, "target_host": resolved_host,
         })
         return result
 
@@ -394,6 +517,7 @@ def doctor_escalate(
                     "ts": canonical_ts(),
                     "watcher": watcher, "severity": severity, "summary": summary,
                     "fingerprint": fp, "event": "dedup_hit", "ttl_remaining_s": int(ttl),
+                    "source_host": _SOURCE_HOST, "target_host": resolved_host,
                 })
                 return result
             r.setex(dedup_key, DEDUP_TTL_SECONDS, json.dumps({
@@ -402,28 +526,61 @@ def doctor_escalate(
         except Exception as e:
             logger.warning("doctor_escalate: dedup check failed (%s) — firing anyway", e)
 
-    briefing = _format_briefing(watcher, severity, summary, context, fp, fix_hints)
+    cluster_mode, cluster_fps = _check_cluster(watcher, fp, r)
+    if cluster_mode == "suppressed":
+        result["dedup_hit"] = True
+        result["cluster_suppressed"] = True
+        _log_event({
+            "ts": canonical_ts(),
+            "watcher": watcher, "severity": severity, "summary": summary,
+            "fingerprint": fp, "event": "cluster_suppressed",
+            "source_host": _SOURCE_HOST, "target_host": resolved_host,
+        })
+        return result
+    if cluster_mode == "first_cluster":
+        cluster_fp = sha1(
+            f"cluster|{resolved_host}|{watcher}|{','.join(sorted(cluster_fps))}".encode()
+        ).hexdigest()[:16]
+        original_summary = summary
+        summary = f"[CLUSTER {len(cluster_fps)} fps in {CLUSTER_WINDOW_SECONDS//60}m] {original_summary[:160]}"
+        context = {
+            **context,
+            "cluster_member_fingerprints": cluster_fps,
+            "cluster_member_count": len(cluster_fps),
+            "cluster_window_seconds": CLUSTER_WINDOW_SECONDS,
+            "cluster_latch_seconds": CLUSTER_LATCH_SECONDS,
+            "original_fingerprint": fp,
+            "original_summary": original_summary,
+        }
+        fp = cluster_fp
+        result["fingerprint"] = fp
+        result["clustered"] = True
+
+    briefing = _format_briefing(
+        watcher, severity, summary, context, fp, fix_hints, resolved_host,
+    )
     binary = _pane_ask_binary()
     if not binary:
         _log_event({
             "ts": canonical_ts(),
-            "watcher": watcher, "severity": severity, "fingerprint": fp,
-            "event": "bypass", "reason": "pane-ask-v2 binary not found",
+            "watcher": watcher, "severity": severity, "summary": summary,
+            "fingerprint": fp, "event": "bypass",
+            "reason": "pane-ask-v2 binary not found",
+            "source_host": _SOURCE_HOST, "target_host": resolved_host,
         })
         result["bypassed"] = True
-        _deliver_bypass(watcher, severity, summary, briefing, "no pane-ask-v2", r, bypass_priority)
+        _deliver_bypass(
+            watcher, severity, summary, briefing, "no pane-ask-v2",
+            r, bypass_priority, fp, resolved_host,
+        )
         return result
 
-    # Fix #1: when invoked from a daemon (no $TMUX_PANE), pane-ask-v2 needs
-    # explicit --label NAME for the signed banner. Read $PANE_ASK_LABEL set
-    # by the calling LaunchAgent/systemd unit; fall back to the watcher name
-    # so every escalation has a verified identity rather than failing exit 8.
     label_args: list[str] = []
     if not os.environ.get("TMUX_PANE"):
         label_value = os.environ.get("PANE_ASK_LABEL") or watcher or "doctor-escalate"
         label_args = ["--label", label_value]
 
-    target_args = ["--ssh", "vps", DOCTOR_PANE] if _on_mac() else [DOCTOR_PANE]
+    target_args = [*ssh_args, doctor_pane]
     last_err = ""
     for attempt, delay in enumerate((0, 5, 15), start=1):
         if delay:
@@ -439,6 +596,8 @@ def doctor_escalate(
                     "ts": canonical_ts(),
                     "watcher": watcher, "severity": severity, "summary": summary,
                     "fingerprint": fp, "event": "dispatched", "attempt": attempt,
+                    "source_host": _SOURCE_HOST, "target_host": resolved_host,
+                    **({"context": context} if context else {}),
                 })
                 return result
             stderr_out = proc.stderr or ""
@@ -448,6 +607,8 @@ def doctor_escalate(
             if "not found" in combined and attempt < 3:
                 time.sleep(30 * attempt)
                 continue
+            if proc.returncode == 7:
+                last_err = f"rate_limited rc=7 stderr={stderr_out[:200]}"
         except subprocess.TimeoutExpired:
             last_err = "timeout"
         except Exception as e:
@@ -459,7 +620,10 @@ def doctor_escalate(
         except Exception:
             pass
     result["bypassed"] = True
-    _deliver_bypass(watcher, severity, summary, briefing, last_err, r, bypass_priority)
+    _deliver_bypass(
+        watcher, severity, summary, briefing, last_err,
+        r, bypass_priority, fp, resolved_host,
+    )
     return result
 
 
@@ -471,25 +635,34 @@ def _deliver_bypass(
     reason: str,
     redis_conn,
     bypass_priority: Optional[int],
+    fingerprint: Optional[str],
+    target_host: str,
 ) -> None:
-    bypass_count = _record_bypass(redis_conn)
+    bypass_count = _record_bypass(redis_conn, target_host)
     prio = bypass_priority if bypass_priority is not None else SEVERITIES.get(severity, 0)
-    title = f"[DOCTOR-BYPASS] {watcher}/{severity}: {summary[:80]}"
+    # [CRITIC-FIX SEV-2#1] Distinct subtype for rate-limited bypasses.
+    if "rate_limited" in reason or "rc=7" in reason:
+        title_prefix = f"[DOCTOR-RATE-LIMITED-{target_host}]"
+    else:
+        title_prefix = f"[DOCTOR-BYPASS-{target_host}]"
+    title = f"{title_prefix} {watcher}/{severity}: {summary[:80]}"
     body_parts = [
         f"doctor unreachable - {reason}",
-        f"bypass #{bypass_count} in last {BYPASS_WINDOW_SECONDS//60}m",
+        f"bypass #{bypass_count} in last {BYPASS_WINDOW_SECONDS//60}m (host={target_host})",
         "",
         briefing,
     ]
-    if bypass_count >= BYPASS_THRESHOLD:
+    if bypass_count >= BYPASS_THRESHOLD and "rate_limited" not in reason:
         prio = max(prio, 1)
-        body_parts.insert(0, f"WARN: doctor appears DOWN ({bypass_count} bypasses in window)")
+        body_parts.insert(0, f"WARN: doctor[{target_host}] appears DOWN ({bypass_count} bypasses in window)")
     _pushover_direct(title, "\n".join(body_parts), priority=prio)
     _log_event({
         "ts": canonical_ts(),
         "watcher": watcher, "severity": severity, "summary": summary,
         "event": "bypass", "reason": reason, "bypass_count": bypass_count,
         "pushover_priority": prio,
+        "source_host": _SOURCE_HOST, "target_host": target_host,
+        **({"fingerprint": fingerprint} if fingerprint else {}),
     })
 
 

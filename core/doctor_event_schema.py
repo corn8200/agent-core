@@ -83,6 +83,7 @@ class DoctorEvent(TypedDict, total=False):
     fingerprint: str
     context_json: str
     source_host: str
+    target_host: str
     bypass: bool
     # --- dispatched ---
     attempt: int

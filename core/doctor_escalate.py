@@ -323,11 +323,17 @@ def _pushover_direct(title: str, message: str, priority: int = 0) -> bool:
     if not (token and user):
         logger.error("doctor_escalate: pushover credentials unavailable, alert LOST")
         return False
-    data = urllib.parse.urlencode({
+    clamped_priority = min(priority, 2)
+    payload: dict = {
         "token": token, "user": user,
         "title": title[:250], "message": message[:1024],
-        "priority": min(priority, 2),
-    }).encode()
+        "priority": clamped_priority,
+    }
+    # Pushover P2 (emergency) requires retry + expire or the API returns HTTP 400.
+    if clamped_priority >= 2:
+        payload["retry"] = 60    # retry interval in seconds (minimum 30)
+        payload["expire"] = 3600  # stop retrying after 1 hour
+    data = urllib.parse.urlencode(payload).encode()
     try:
         req = urllib.request.Request(
             "https://api.pushover.net/1/messages.json", data=data, method="POST",

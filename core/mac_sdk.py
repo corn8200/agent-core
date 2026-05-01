@@ -49,6 +49,7 @@ from claude_agent_sdk import *  # noqa: E402, F401, F403
 from claude_agent_sdk import ClaudeAgentOptions  # noqa: E402
 
 from core.hooks import AGENT_HOOKS  # noqa: E402
+from core.claude_usage_guard import assert_claude_usage_allowed  # noqa: E402
 
 
 CALL_LOG = Path("/tmp/mac-sdk-calls.json")
@@ -169,6 +170,7 @@ async def query(
     don't accidentally read like ambient text if a future revision adds
     injection here. Tailor's `_call_claude` already honors the same flag.
     """
+    assert_claude_usage_allowed("mac_sdk")
     _check_and_record_call()
     options = _apply_defaults(options)
     _ = skip_ambient

@@ -455,8 +455,128 @@ async def _fuzzy_contact_suggestions(query: str, cutoff: float = 0.55, n: int = 
     return difflib.get_close_matches(query, names, n=n, cutoff=cutoff)
 
 
+async def _chatdb_service_for_handle(handle: str) -> str | None:
+    """Query chat.db for the most-recent successful outbound service used with handle.
+
+    Returns 'iMessage', 'SMS', 'RCS', or None (no history / relay unavailable).
+    'RCS' means the SMS service type should be used in osascript (Mac Continuity
+    routes both SMS and RCS through the same SMS account).
+
+    Tries the handle as-is, then with a leading +1 if it looks like a 10-digit US
+    number without one, to handle normalization mismatches.
+    """
+    handles_to_try = [handle]
+    digits_only = re.sub(r"\D", "", handle)
+    if len(digits_only) == 10:
+        handles_to_try.append(f"+1{digits_only}")
+    elif len(digits_only) == 11 and digits_only.startswith("1") and not handle.startswith("+"):
+        handles_to_try.append(f"+{digits_only}")
+
+    for h in handles_to_try:
+        safe = h.replace("'", "''")
+        sql = (
+            f"SELECT m.service, MAX(m.date) AS last "
+            f"FROM message m JOIN handle h ON m.handle_id = h.ROWID "
+            f"WHERE h.id = '{safe}' AND m.is_from_me = 1 AND m.error = 0 "
+            f"GROUP BY m.service ORDER BY last DESC LIMIT 1;"
+        )
+        ok, output = await tmux_relay_shell(
+            f"sqlite3 ~/Library/Messages/chat.db {shlex.quote(sql)}", timeout=8.0
+        )
+        if not ok:
+            return None
+        row = output.strip()
+        if row:
+            service = row.split("|")[0].strip()
+            return service
+    return None
+
+
+async def _chatdb_verify_send(handle: str, text: str, after_mac_ts: int, timeout: float = 8.0) -> tuple[str, int] | None:
+    """Poll chat.db for the outbound row matching this send.
+
+    after_mac_ts is Mac absolute time in nanoseconds (date column units).
+    Returns (service, error_code) once a row appears, or None on timeout.
+
+    Note: chat.db stores message body in attributedBody blob (not text column)
+    for both iMessage and RCS/SMS on modern macOS. We match by timestamp and
+    is_from_me only — the timestamp window is tight (pre_ts captured just
+    before osascript fires) so false matches are not a practical concern.
+    """
+    handles_to_try = [handle]
+    digits_only = re.sub(r"\D", "", handle)
+    if len(digits_only) == 10:
+        handles_to_try.append(f"+1{digits_only}")
+    elif len(digits_only) == 11 and digits_only.startswith("1") and not handle.startswith("+"):
+        handles_to_try.append(f"+{digits_only}")
+
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(1.5)
+        for h in handles_to_try:
+            safe_h = h.replace("'", "''")
+            sql = (
+                f"SELECT m.service, m.error FROM message m "
+                f"JOIN handle h ON m.handle_id = h.ROWID "
+                f"WHERE h.id = '{safe_h}' AND m.is_from_me = 1 "
+                f"AND m.date > {after_mac_ts} "
+                f"ORDER BY m.date DESC LIMIT 1;"
+            )
+            ok, output = await tmux_relay_shell(
+                f"sqlite3 ~/Library/Messages/chat.db {shlex.quote(sql)}", timeout=6.0
+            )
+            if not ok:
+                continue
+            row = output.strip()
+            if row:
+                parts = row.split("|")
+                try:
+                    return parts[0].strip(), int(parts[1].strip())
+                except (IndexError, ValueError):
+                    pass
+    return None
+
+
+def _mac_now_ns() -> int:
+    """Current time as Mac absolute nanoseconds (chat.db date column units)."""
+    import time
+    return int((time.time() - 978307200) * 1e9)
+
+
+async def _send_via_osascript_service(buddy: str, escaped_msg: str, service_type: str) -> tuple[bool, str]:
+    """Send via the named osascript service type ('iMessage' or 'SMS')."""
+    if service_type == "iMessage":
+        script = (
+            f'tell application "Messages"\n'
+            f'  if not running then launch\n'
+            f'  set targetService to first service whose service type is iMessage\n'
+            f'  set targetBuddy to buddy "{buddy}" of targetService\n'
+            f'  send "{escaped_msg}" to targetBuddy\n'
+            f'  return "ok"\n'
+            f'end tell'
+        )
+    else:
+        script = (
+            f'tell application "Messages"\n'
+            f'  if not running then launch\n'
+            f'  set targetService to first service whose service type is SMS\n'
+            f'  set targetBuddy to buddy "{buddy}" of targetService\n'
+            f'  send "{escaped_msg}" to targetBuddy\n'
+            f'  return "ok"\n'
+            f'end tell'
+        )
+    return await _tmux_relay_osascript(script, timeout=30.0)
+
+
+_IMESSAGE_ERROR_CODES = {1, 22, 102, 1032}
+
+
 async def send_imessage_reliable(buddy: str, message: str, _approved: bool = False) -> tuple[bool, str]:
-    """Send iMessage via tmux relay (works from LaunchAgents). Falls back to Pushover.
+    """Send iMessage or SMS via tmux relay, with chat.db delivery verification.
+
+    Structurally incapable of returning (True, ...) unless chat.db confirms
+    a row with error=0 for this send. Auto-routes to SMS when iMessage is not
+    viable (Layer 1: prior history shows SMS/RCS; Layer 2: post-send error code).
 
     Third-party recipients route through core.outbox for APPROVE/DENY preview
     unless _approved=True (reply-router promotion path) or the recipient is one
@@ -467,9 +587,6 @@ async def send_imessage_reliable(buddy: str, message: str, _approved: bool = Fal
     helpful error + fuzzy suggestions rather than silently sending to a
     phantom handle.
     """
-    # Resolve display names to real handles BEFORE queuing to outbox so the
-    # preview shows the resolved handle and Messages.app can't fabricate a
-    # phantom participant.
     display = buddy
     if not _approved and not _looks_like_imessage_handle(buddy):
         from core.outbox import _is_self
@@ -514,70 +631,59 @@ async def send_imessage_reliable(buddy: str, message: str, _approved: bool = Fal
                 inner = result.get("result") or (True, "sent")
                 return inner if isinstance(inner, tuple) else (True, str(inner))
 
-    # Pre-warm Messages.app so the first send doesn't cold-start inside the 30s window
     escaped_msg = message.replace(chr(92), chr(92)*2).replace(chr(34), chr(92)+chr(34))
-    script = (
-        f'tell application "Messages"\n'
-        f'  if not running then launch\n'
-        f'  set targetService to 1st account whose service type is iMessage\n'
-        f'  set targetBuddy to participant "{buddy}" of targetService\n'
-        f'  send "{escaped_msg}" to targetBuddy\n'
-        f'  return "ok"\n'
-        f'end tell'
-    )
-    ok, output = await _tmux_relay_osascript(script, timeout=30.0)
-    if ok:
-        return True, f"iMessage sent to {buddy} via tmux relay"
 
-    # Fallback: Pushover
-    from core.constants import PUSHOVER_USER, PUSHOVER_TOKEN
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "curl", "-s", "-o", "/dev/null",
-            "-F", f"token={PUSHOVER_TOKEN}",
-            "-F", f"user={PUSHOVER_USER}",
-            "-F", f"title=Message for {buddy}",
-            "-F", f"message={message[:1000]}",
-            "https://api.pushover.net/1/messages.json",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await asyncio.wait_for(proc.communicate(), timeout=10)
-        return True, f"Pushover sent (iMessage relay failed: {output})"
-    except Exception as e:
-        return False, f"All delivery failed: {e}"
+    # Layer 1 — pre-flight: check chat.db for prior send history on this handle.
+    # If the most-recent successful service is SMS or RCS, skip iMessage entirely.
+    prior_service = await _chatdb_service_for_handle(buddy)
+    if prior_service in ("SMS", "RCS"):
+        first_service = "SMS"
+    else:
+        first_service = "iMessage"
 
+    pre_ts = _mac_now_ns()
 
-@tool(
-    "ssh_command",
-    "Run a command on a remote host via SSH. Returns stdout.",
-    {"host": str, "command": str},
-)
-async def ssh_command(args: dict[str, Any]) -> dict:
-    host = args["host"]
-    cmd = args["command"]
-    proc = await asyncio.create_subprocess_exec(
-        "ssh", "-o", "ConnectTimeout=10", host, cmd,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    try:
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
-    except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
-        return {"content": [{"type": "text", "text": f"SSH command timed out after 60s on {host}"}]}
-    output = stdout.decode().strip()
-    if proc.returncode != 0:
-        output += f"\n[STDERR] {stderr.decode().strip()}"
-    return {"content": [{"type": "text", "text": output}]}
+    ok, output = await _send_via_osascript_service(buddy, escaped_msg, first_service)
+    if not ok:
+        if first_service == "iMessage":
+            ok2, output2 = await _send_via_osascript_service(buddy, escaped_msg, "SMS")
+            if not ok2:
+                return False, f"iMessage relay failed ({output}); SMS relay also failed ({output2})"
+            attempted_service = "SMS"
+            osascript_ok = True
+        else:
+            return False, f"SMS relay failed: {output}"
+    else:
+        attempted_service = first_service
+        osascript_ok = True
 
+    # Layer 2 — post-send verification: query chat.db for the outbound row.
+    row = await _chatdb_verify_send(buddy, message, pre_ts, timeout=8.0)
+    if row is None:
+        return False, f"no chat.db record after 8s — send did not register (osascript said ok={osascript_ok})"
 
-@tool(
-    "send_imessage",
-    "Send an iMessage through the unified message bus. Supports delivery tiers and agent attribution.",
-    {"buddy": str, "message": str, "agent": str, "tier": str},
-)
+    actual_service, error_code = row
+
+    if error_code == 0:
+        svc_label = "iMessage" if actual_service == "iMessage" else "SMS"
+        return True, f"Delivered via {svc_label} to {buddy}"
+
+    # iMessage error — try SMS fallback if we haven't already
+    if actual_service == "iMessage" and error_code in _IMESSAGE_ERROR_CODES and attempted_service == "iMessage":
+        pre_ts2 = _mac_now_ns()
+        ok3, output3 = await _send_via_osascript_service(buddy, escaped_msg, "SMS")
+        if not ok3:
+            return False, f"iMessage failed (error={error_code}), SMS fallback relay also failed: {output3}"
+        row2 = await _chatdb_verify_send(buddy, message, pre_ts2, timeout=8.0)
+        if row2 is None:
+            return False, f"iMessage failed (error={error_code}), SMS fallback: no chat.db record after 8s"
+        svc2, err2 = row2
+        if err2 == 0:
+            return True, f"Delivered via SMS to {buddy} (iMessage error={error_code}, auto-fallback)"
+        return False, f"iMessage failed (error={error_code}), SMS fallback also failed (error={err2})"
+
+    return False, f"send failed on {actual_service} (error={error_code})"
+
 async def send_imessage(args: dict[str, Any]) -> dict:
     try:
         agent = args.get("agent", "unknown")

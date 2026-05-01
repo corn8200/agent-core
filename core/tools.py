@@ -182,7 +182,11 @@ async def tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool,
         print(f"[tmux_relay_shell] WARNING: {detail}", flush=True)
         return False, detail
 
-    bash_cmd = f"({shell_cmd}) > {result_file} 2>&1; exit 0"
+    # Atomic publish: write to .tmp, then mv to final. Eliminates TOCTOU
+    # race where the polling loop reads+unlinks the result file after bash's
+    # `>` redirect creates it but before the command writes its output.
+    tmp_file = Path(f"{result_file}.tmp")
+    bash_cmd = f"({shell_cmd}) > {tmp_file} 2>&1; mv {tmp_file} {result_file}; exit 0"
     proc = await asyncio.create_subprocess_exec(
         _TMUX, "new-window", "-a", "-d", "-t", f"{target}:", "-n", f"shrelay-{tag}",
         "bash", "-c", bash_cmd,
@@ -199,6 +203,7 @@ async def tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool,
             flush=True,
         )
         result_file.unlink(missing_ok=True)
+        tmp_file.unlink(missing_ok=True)
         return False, f"tmux new-window returned {proc.returncode}"
 
     for _ in range(int(timeout * 5)):
@@ -214,6 +219,7 @@ async def tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool,
         flush=True,
     )
     result_file.unlink(missing_ok=True)
+    tmp_file.unlink(missing_ok=True)
     return False, "tmux shell relay timed out"
 
 

@@ -9,7 +9,7 @@ from hashlib import sha256
 
 
 CP_PUBLIC_BASE = os.environ.get("CP_PUBLIC_BASE", "https://cp.jcornelius.net").rstrip("/")
-NOTIFY_PUBLIC_BASE = os.environ.get("NOTIFY_PUBLIC_BASE", f"{CP_PUBLIC_BASE}/notify").rstrip("/")
+NOTIFY_PUBLIC_BASE = os.environ.get("NOTIFY_PUBLIC_BASE", "https://app.jcornelius.net/notify").rstrip("/")
 
 
 def _clip(value: str, limit: int) -> str:
@@ -72,4 +72,3 @@ def alert_action_url(
     canonical = _canonical_query(params)
     sig = hmac.new(secret.encode("utf-8"), canonical.encode("utf-8"), sha256).hexdigest()
     return f"{NOTIFY_PUBLIC_BASE}/alert/send-to-mac3?{canonical}&sig={sig}"
-

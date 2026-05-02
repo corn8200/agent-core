@@ -38,6 +38,7 @@ Channel = Literal["imessage", "email_personal", "email_business", "email_raw"]
 ALLOWED_SELF = {
     "corn82@icloud.com",
     "corn82@gmail.com",
+    "corn82@outlook.com",
     "13042684985",
     "3042684985",
     # Business GV — biz inbound only but John owns it, so self-send is fine.

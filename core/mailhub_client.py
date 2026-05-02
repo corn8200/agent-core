@@ -1,18 +1,19 @@
-"""Mailhub Python client library — in-tree, for VPS agents.
-
-For Mac/Air agents, a pip-installable version at agent-core/core/mailhub.py
-mirrors this surface. Phase 4 ships the full package; Phase 2 ships this
-in-tree module so mailhub-internal tests can exercise the API end-to-end.
-"""
+"""Compatibility client for the canonical core.mailhub helpers."""
 
 from __future__ import annotations
 
 import os
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 
-DEFAULT_BASE_URL = os.environ.get("MAILHUB_URL", "http://127.0.0.1:8770")
+from core.mailhub import (
+    DEFAULT_BASE_URL,
+    MailhubAuthError,
+    MailhubError,
+    _headers,
+    _resolve_token_or_raise,
+)
 
 
 class MailhubClient:
@@ -31,10 +32,7 @@ class MailhubClient:
         self.timeout = timeout
 
     def _headers(self) -> dict[str, str]:
-        h = {"Content-Type": "application/json"}
-        if self.api_token:
-            h["X-Mailhub-Token"] = self.api_token
-        return h
+        return _headers(self.api_token or _resolve_token_or_raise())
 
     async def send(
         self,
@@ -159,3 +157,13 @@ async def reply_mail(
         in_reply_to_inbound_id=in_reply_to_inbound_id,
         body=body, category=category,
     )
+
+
+__all__ = [
+    "DEFAULT_BASE_URL",
+    "MailhubAuthError",
+    "MailhubClient",
+    "MailhubError",
+    "reply_mail",
+    "send_mail",
+]

@@ -1,7 +1,7 @@
 // reminders_fetch.swift — fast EventKit-based incomplete-reminders reader.
 // Usage: swift reminders_fetch.swift
 // Output: one reminder per line, fields separated by \x1f, records terminated by \x1e.
-// Fields: title, list_name, due_iso (empty if no due date)
+// Fields: title, list_name, due_iso (empty if no due date), id, notes, priority
 //
 // Why Swift/EventKit: Reminders.app crashes on AppleScript `every reminder whose
 // completed is false` queries under macOS 26.4.1 (Swift runtime assertion during
@@ -53,11 +53,14 @@ for r in reminders {
     let title = clean(r.title)
     if title.isEmpty { continue }
     let listName = clean(r.calendar?.title)
+    let itemId = clean(r.calendarItemIdentifier)
+    let notes = clean(r.notes)
+    let priority = String(r.priority)
     var dueIso = ""
     if let comps = r.dueDateComponents, let date = cal.date(from: comps) {
         dueIso = fmt.string(from: date)
     }
     let fs = "\u{1f}"
-    lines.append("\(title)\(fs)\(listName)\(fs)\(dueIso)\u{1e}")
+    lines.append("\(title)\(fs)\(listName)\(fs)\(dueIso)\(fs)\(itemId)\(fs)\(notes)\(fs)\(priority)\u{1e}")
 }
 print(lines.joined(separator: "\n"))

@@ -105,9 +105,9 @@ titan = AgentDefinition(
 )
 
 anvil = AgentDefinition(
-    description="Code builder. Sonnet default, Opus escalation on refactor/architect/multi-file keywords — writes, refactors, and ships code. Worktree-first, test-driven, verifies its own diffs in an isolated branch before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget.",
+    description="Code builder. Opus direct code lane — writes, refactors, and ships code. Worktree-first, test-driven, verifies its own diffs before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget.",
     prompt=_load_prompt("anvil"),
-    model="sonnet",
+    model="opus",
     tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "TodoWrite"],
     maxTurns=40,
     permissionMode="bypassPermissions",
@@ -183,7 +183,7 @@ ALL_AGENTS = {
 # in ~/.claude/agents/*.md.
 #
 # Tiers:
-#   heavy    — always Opus. Task requires it (titan, critic).
+#   heavy    — always Opus. Task requires it (titan, critic, anvil).
 #   adaptive — default Sonnet, promotes to Opus on !opus or keyword triggers.
 #   standard — always Sonnet. No promotion path.
 #   light    — Haiku only.
@@ -191,7 +191,7 @@ AGENT_TIERS: dict[str, str] = {
     "scout":     "adaptive",
     "forge":     "adaptive",
     "wrench":    "adaptive",
-    "anvil":     "adaptive",
+    "anvil":     "heavy",
     "foreman":   "adaptive",
     "herald":    "heavy",
     "critic":    "heavy",
@@ -205,10 +205,9 @@ AGENT_TIERS: dict[str, str] = {
 # Keywords that auto-escalate an adaptive agent from Sonnet to Opus.
 # Matched case-insensitive against the Agent() prompt body.
 # Per-agent keyword lists keep the heuristic targeted (e.g. wrench cares about
-# outage words; anvil cares about code-structure words).
+# outage words; scout cares about research-depth words).
 ADAPTIVE_ESCALATION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "wrench":  ("outage", "down", "broken", "debug", "root cause", "crashed", "failing", "unreachable"),
-    "anvil":   ("refactor", "architect", "multi-file", "cross-system", "end-to-end", "rewrite"),
     "scout":   ("deep dive", "deep-dive", "comprehensive", "synthesize across", "cross-reference"),
     "forge":   ("proposal", "capability statement", "business plan", "client report"),
     "foreman": ("multi-intent", "complex memo", "dispatch swarm"),

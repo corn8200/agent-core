@@ -34,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from core import agents as agents_mod  # noqa: E402
 from core.mac_sdk import ClaudeAgentOptions, query  # noqa: E402
+from core.thinking import LIGHT  # noqa: E402
 
 DEFAULT_CASES = Path(__file__).parent / "cases" / "all.yaml"
 
@@ -78,6 +79,8 @@ async def _run_case(agent_name: str, prompt: str) -> tuple[str, dict]:
         # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
         permission_mode="bypassPermissions",
         model="sonnet",  # override: cheap for regression; agent's own pick ignored
+        thinking=LIGHT,
+        effort="max",
     )
     msgs: list[Any] = []
     async for m in query(prompt=prompt, options=opts):

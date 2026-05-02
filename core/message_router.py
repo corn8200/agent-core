@@ -720,6 +720,12 @@ async def _classify_with_opus(msg: InboundMessage) -> dict:
             "--output-format", "json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env={
+                **os.environ,
+                "CLAUDE_RUN_MODE": "automation",
+                "CLAUDE_RUN_PROFILE": "quick",
+                "CLAUDE_RUN_REASON": "message-router intent classification",
+            },
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         output = stdout.decode().strip()
@@ -845,6 +851,10 @@ async def run():
         ["/opt/homebrew/bin/claude", "-p", prompt,
          "--model", "{model}", {session_flag}, "--max-turns", "10"],
         capture_output=True, text=True, timeout=300,
+        env={{**os.environ,
+             "CLAUDE_RUN_MODE": "automation",
+             "CLAUDE_RUN_PROFILE": "strong",
+             "CLAUDE_RUN_REASON": "message-router dispatch {agent_name} #{short_id}"}},
     )
     result = proc.stdout.strip()
     if not result:

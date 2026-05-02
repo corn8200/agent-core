@@ -46,42 +46,8 @@ _DANGEROUS_NAMES: Final = frozenset({
     "ANTHROPIC_CONSOLE_KEY_VPS",
 })
 
-# Paid-API keys blocked from hydrate_env() when THRIFTY_MODE=1. Downstream
-# callers see empty strings and fall through to free alternatives:
-#   OPENAI_API_KEY        → memory search falls back to keyword-only
-#   TAVILY_API_KEY        → prepper/groundtruth skip fresh web lookups
-#   ELEVENLABS_API_KEY    → brief TTS falls through to macOS `say`
-#   MAPBOX_API_KEY        → groundtruth skips map tiles
-#   GOOGLE_MAPS_API_KEY   → geocoding skipped
-# Resend and Pushover are NOT on this list — business email + alerts must flow.
-_THRIFTY_SKIP_NAMES: Final = frozenset({
-    "OPENAI_API_KEY",
-    "TAVILY_API_KEY",
-    "ELEVENLABS_API_KEY",
-    "MAPBOX_API_KEY",
-    "GOOGLE_MAPS_API_KEY",
-})
-
-
-def _thrifty_on() -> bool:
-    if os.environ.get("THRIFTY_MODE") == "1":
-        return True
-    env_file = Path.home() / ".config" / "thrifty.env"
-    if not env_file.exists():
-        return False
-    try:
-        for line in env_file.read_text().splitlines():
-            if line.startswith("export THRIFTY_MODE=") and line.endswith("=1"):
-                return True
-    except Exception:
-        pass
-    return False
-
-
 def _should_skip(name: str) -> bool:
     if name in _DANGEROUS_NAMES:
-        return True
-    if name in _THRIFTY_SKIP_NAMES and _thrifty_on():
         return True
     return False
 

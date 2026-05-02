@@ -41,6 +41,7 @@ import json
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Optional
 
 try:
@@ -181,7 +182,7 @@ def dispatched_sdk_agent(
     *,
     system_prompt: str,
     user_prompt: str,
-    model: str = "sonnet",
+    model: str = "opus",
     max_turns: int = 30,
     watcher_name: str = "swarm-sdk",
     retries: int = 1,
@@ -209,7 +210,9 @@ def dispatched_sdk_agent(
     scope = dedup_scope or f"sdk-{watcher_name}"
 
     try:
-        import claude_agent_sdk as _sdk  # noqa: F401
+        from core.mac_sdk import ClaudeAgentOptions, query
+        from core.thinking import STANDARD
+        from core.hooks import AGENT_HOOKS
     except ImportError:
         return {
             "ok": False,
@@ -219,7 +222,7 @@ def dispatched_sdk_agent(
 
     model_map = {
         "sonnet": "claude-sonnet-4-6",
-        "opus": "claude-opus-4-6",
+        "opus": "claude-opus-4-7",
         "haiku": "claude-haiku-4-5",
     }
     resolved_model = model_map.get(model, model)
@@ -236,12 +239,15 @@ def dispatched_sdk_agent(
             import asyncio
 
             async def _run():
-                from claude_agent_sdk import ClaudeAgentOptions, query  # allow-direct-sdk
-
                 options = ClaudeAgentOptions(
                     model=resolved_model,
                     max_turns=max_turns,
                     system_prompt=system_prompt,
+                    permission_mode="bypassPermissions",
+                    cwd=str(Path.home()),
+                    hooks=AGENT_HOOKS,
+                    thinking=STANDARD,
+                    effort="max",
                 )
                 result_parts = []
                 async for event in query(user_prompt, options=options):

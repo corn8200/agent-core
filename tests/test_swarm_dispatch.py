@@ -5,9 +5,9 @@ invocations, no real doctor pane traffic.
 """
 from __future__ import annotations
 
-import sys
 import types
 import unittest
+import builtins
 from unittest.mock import MagicMock, call, patch
 
 
@@ -116,22 +116,25 @@ class TestDispatchedPaneAskSshFlag(unittest.TestCase):
 
 
 class TestDispatchedSdkAgentSkippedWhenUnavailable(unittest.TestCase):
-    """Missing claude_agent_sdk returns skipped sentinel without escalating."""
+    """Missing SDK wrapper returns skipped sentinel without escalating."""
 
     def test_sdk_skipped_when_unavailable(self):
-        # Temporarily remove the module from sys.modules so the import fails.
-        saved = sys.modules.pop("claude_agent_sdk", None)
+        real_import = builtins.__import__
+
+        def fake_import(name, *args, **kwargs):
+            if name == "core.mac_sdk":
+                raise ImportError("simulated missing core.mac_sdk")
+            return real_import(name, *args, **kwargs)
+
         try:
-            with patch(ESCALATE_PATH) as mock_esc:
+            with patch("builtins.__import__", side_effect=fake_import), \
+                 patch(ESCALATE_PATH) as mock_esc:
                 from core.swarm_dispatch import dispatched_sdk_agent
                 result = dispatched_sdk_agent(
                     system_prompt="You are a helper.",
                     user_prompt="Hello",
                 )
         finally:
-            if saved is not None:
-                sys.modules["claude_agent_sdk"] = saved
-            # Also evict any cached import inside swarm_dispatch module
             import importlib
             import core.swarm_dispatch as sd
             importlib.reload(sd)

@@ -18,7 +18,6 @@ core/
   agent_cp_client.py — Control plane telemetry (events, kill switches). Silent-fail. Reads APPLE_BRIDGE_TOKEN from env or secrets.env.legacy.
   vault.py          — 1Password MachineAuto loader: hydrate_env(), get_secret(). Billing guard excludes ANTHROPIC_* keys.
   sdk_guard.py      — Structural rate-limit guard. Auto-patches query() via sitecustomize.py.
-  modes.py          — Thrifty mode helpers (check/enter/exit thrifty state)
   browser.py        — Playwright persistent sessions: with_site(), capture_session(), list_sites()
   safari.py         — Safari osascript+JS helpers for interactive browser mode
   constants.py      — HOME, PERSONAL_EMAIL, VPS_SSH, IPs, DB paths, SKIP_CALENDARS
@@ -81,8 +80,8 @@ nudge/
 
 ## Model Strategy (Max subscription = flat-monthly, no per-call $ cap)
 - **Tier system is canonical** — see `~/.claude/rules/agent-routing.md` and `AGENT_TIERS` in `core/agents.py`
-  - **heavy** (opus always): titan, critic, herald
-  - **adaptive** (sonnet → opus on keyword / `!opus`): anvil, wrench, scout, forge, foreman
+  - **heavy** (opus always): titan, critic, herald, anvil
+  - **adaptive** (sonnet → opus on keyword / `!opus`): wrench, scout, forge, foreman
   - **standard** (sonnet, never opus): dispatch, toolsmith, ledger
   - **light** (haiku): turbo
 - **Workload-level guidance** (where automation chooses model directly, not via named agent):
@@ -106,6 +105,7 @@ nudge/
 ## Email Sending
 - **Canonical agent path: mailhub** — `from mailhub import send_email, reply_email` (helper at `/srv/apps/lib/mailhub.py` on VPS, `agent-core/core/mailhub.py` on Mac/Air). Picks SMTP backend by `from_addr`, enforces reply-from-received-at server-side, auto-gates third-party approval queue, schedule-send + retry/bounce handled. Each agent passes `sender_app="<name>"`. See `~/.claude/rules/messaging.md`.
 - **Sentry biz** (info@sentryaithermal.com): `send_business_email` MCP tool → sentry-mailqueue → Resend (still authoritative — mailhub Phase 4+ will subsume).
+- **Outlook personal** (corn82@outlook.com): John-owned address/calendar identity, but no mailhub SMTP/Graph backend exists yet. Do not send/reply from another address when the inbound was received at Outlook; build the Outlook backend first.
 - **Legacy MCP tools** (`send_personal_email`, `send_business_email` in `core/tools.py`): still functional but route via the legacy ssh `send-email` path, NOT mailhub. New code should call mailhub directly. These remain for automated agents (handler, watch-commander) that have them registered as MCP tools.
 - NEVER SCP scripts to VPS for email — use mailhub
 - NEVER use raw smtplib from agent code — go through mailhub
@@ -114,3 +114,4 @@ nudge/
 ## Email Receive
 - corn82@icloud.com: mailtriage daemon (auto-classify, Pushover urgent, approval-queue drafts)
 - corn82@gmail.com: mailgw-idle (forwards important → iCloud → mailtriage)
+- corn82@outlook.com: personal Microsoft account; calendar/free-busy integration is via macOS Internet Accounts once signed in. No mailhub receive monitor until credentials/OAuth are added.

@@ -307,7 +307,14 @@ def _log_event(event: dict) -> None:
         logger.warning("doctor_escalate: log write failed (%s)", e)
 
 
-def _pushover_direct(title: str, message: str, priority: int = 0) -> bool:
+def _pushover_direct(
+    title: str,
+    message: str,
+    priority: int = 0,
+    *,
+    url: str | None = None,
+    url_title: str | None = None,
+) -> bool:
     token = os.environ.get("PUSHOVER_APP_TOKEN")
     user = os.environ.get("PUSHOVER_USER_KEY")
     if not (token and user):
@@ -329,6 +336,10 @@ def _pushover_direct(title: str, message: str, priority: int = 0) -> bool:
         "title": title[:250], "message": message[:1024],
         "priority": clamped_priority,
     }
+    if url:
+        payload["url"] = url[:512]
+    if url_title:
+        payload["url_title"] = url_title[:100]
     # Pushover P2 (emergency) requires retry + expire or the API returns HTTP 400.
     if clamped_priority >= 2:
         payload["retry"] = 60    # retry interval in seconds (minimum 30)
@@ -661,7 +672,26 @@ def _deliver_bypass(
     if bypass_count >= BYPASS_THRESHOLD and "rate_limited" not in reason:
         prio = max(prio, 1)
         body_parts.insert(0, f"WARN: doctor[{target_host}] appears DOWN ({bypass_count} bypasses in window)")
-    _pushover_direct(title, "\n".join(body_parts), priority=prio)
+    body = "\n".join(body_parts)
+    url = None
+    try:
+        from interactive_links import alert_action_url
+
+        url = alert_action_url(
+            source=f"doctor-bypass-{target_host}",
+            title=title,
+            message=body,
+            severity=severity,
+        )
+    except Exception:
+        url = None
+    _pushover_direct(
+        title,
+        body,
+        priority=prio,
+        url=url,
+        url_title="Send to Mac panel 3" if url else None,
+    )
     _log_event({
         "ts": canonical_ts(),
         "watcher": watcher, "severity": severity, "summary": summary,

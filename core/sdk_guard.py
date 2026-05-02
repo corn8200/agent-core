@@ -160,13 +160,28 @@ def _pushover_alert(count: int) -> None:
             return
 
         import urllib.request, urllib.parse
-        data = urllib.parse.urlencode({
+        title = "SDK runaway alert"
+        message = f"agent-core made {count} SDK calls in the last hour (cap={HOURLY_CAP}). Check logs."
+        payload = {
             "token": token,
             "user": user,
-            "title": "SDK runaway alert",
-            "message": f"agent-core made {count} SDK calls in the last hour (cap={HOURLY_CAP}). Check logs.",
+            "title": title,
+            "message": message,
             "priority": "0",
-        }).encode()
+        }
+        try:
+            from core.interactive_links import alert_action_url
+
+            payload["url"] = alert_action_url(
+                source="sdk-guard",
+                title=title,
+                message=message,
+                severity="warn",
+            )
+            payload["url_title"] = "Send to Mac panel 3"
+        except Exception:
+            pass
+        data = urllib.parse.urlencode(payload).encode()
         urllib.request.urlopen(
             "https://api.pushover.net/1/messages.json",
             data=data,

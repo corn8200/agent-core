@@ -30,6 +30,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 import agent_cp_client as cp  # noqa: E402
 CP_AGENT = "nudge-engine"
 
+try:
+    from core.interactive_links import portal_url
+except Exception:
+    def portal_url(path: str = "/") -> str:
+        return "https://cp.jcornelius.net" + "/" + path.lstrip("/")
+
 
 @dataclass(frozen=True)
 class NudgeProfile:
@@ -268,6 +274,8 @@ async def _send_work_meeting_nudges(work_ctx: dict, now: datetime, dry_run: bool
                 dry_run,
                 tier="fifteen_min",
                 title=_meeting_title(f"{int(minutes_away)} min", meeting_name),
+                url=portal_url("/work"),
+                url_title="Open work",
             )
             if sent:
                 log_nudge(uid, meeting_name, due_dt.isoformat(), "fifteen_min", msg)
@@ -279,6 +287,8 @@ async def _send_work_meeting_nudges(work_ctx: dict, now: datetime, dry_run: bool
                 dry_run,
                 tier="five_min",
                 title=_meeting_title("5 min", meeting_name),
+                url=portal_url("/work"),
+                url_title="Open work",
             )
             if sent:
                 log_nudge(uid, meeting_name, due_dt.isoformat(), "five_min", msg)
@@ -370,6 +380,8 @@ async def _send_pushover_notification(
     message: str,
     priority: int,
     sound: str,
+    url: str | None = None,
+    url_title: str | None = None,
 ):
     from core.pushover import send_pushover
     return await send_pushover(
@@ -377,6 +389,8 @@ async def _send_pushover_notification(
         message=message,
         priority=priority,
         sound=sound,
+        url=url,
+        url_title=url_title,
         device=_pushover_device(),
         timestamp=int(datetime.now().timestamp()),
     )
@@ -395,6 +409,8 @@ async def _send_nudge(
     title: str | None = None,
     priority: int | None = None,
     sound: str | None = None,
+    url: str | None = None,
+    url_title: str | None = None,
 ):
     """Send nudge via Pushover by default, with iMessage as a failure fallback."""
     prof = _profile(tier, title=title)
@@ -407,7 +423,8 @@ async def _send_nudge(
         print(
             "  [DRY RUN] Would send "
             f"delivery={delivery or 'pushover'} title={push_title!r} "
-            f"priority={push_priority} sound={push_sound!r}: {message[:240]}"
+            f"priority={push_priority} sound={push_sound!r} "
+            f"url={url or ''!r}: {message[:240]}"
         )
         return False
 
@@ -421,6 +438,8 @@ async def _send_nudge(
         message=message,
         priority=push_priority,
         sound=push_sound,
+        url=url,
+        url_title=url_title,
     )
     if push.ok:
         print(f"[nudge] pushover delivery: {push.detail}")
@@ -512,7 +531,13 @@ async def run_nudges(dry_run: bool = False):
                 parts.extend(_work_context_lines(work_ctx, include_week=True))
                 msg = "\n".join(parts)
                 print(f"[nudge] week_ahead: {msg[:100]}")
-                sent = await _send_nudge(msg, dry_run, tier="week_ahead")
+                sent = await _send_nudge(
+                    msg,
+                    dry_run,
+                    tier="week_ahead",
+                    url=portal_url("/work"),
+                    url_title="Open week",
+                )
                 if sent:
                     log_nudge(week_key, "week_ahead", now.isoformat(), "week_ahead", msg)
 
@@ -543,7 +568,13 @@ async def run_nudges(dry_run: bool = False):
             parts.extend(work_lines)
             msg = "\n".join(parts)
             print(f"[nudge] day_before: {msg[:100]}")
-            sent = await _send_nudge(msg, dry_run, tier="day_before")
+            sent = await _send_nudge(
+                msg,
+                dry_run,
+                tier="day_before",
+                url=portal_url("/work"),
+                url_title="Open tomorrow",
+            )
             if sent:
                 log_nudge(day_key, "day_before", tomorrow.isoformat(), "day_before", msg)
 
@@ -583,7 +614,13 @@ async def run_nudges(dry_run: bool = False):
 
             msg = "\n".join(parts)
             print(f"[nudge] morning_preview: {msg[:100]}")
-            sent = await _send_nudge(msg, dry_run, tier="morning_preview")
+            sent = await _send_nudge(
+                msg,
+                dry_run,
+                tier="morning_preview",
+                url=portal_url("/work"),
+                url_title="Open today",
+            )
             if sent:
                 log_nudge(morning_key, "morning_preview", today.isoformat(), "morning_preview", msg)
 
@@ -610,6 +647,8 @@ async def run_nudges(dry_run: bool = False):
                     dry_run,
                     tier="fifteen_min",
                     title=_meeting_title(f"{int(minutes_away)} min", event.summary),
+                    url=portal_url("/work"),
+                    url_title="Open work",
                 )
                 if sent:
                     log_nudge(uid, event.summary, event.start.isoformat(), "fifteen_min", msg)
@@ -626,6 +665,8 @@ async def run_nudges(dry_run: bool = False):
                         dry_run,
                         tier="five_min",
                         title=_meeting_title("5 min", event.summary),
+                        url=portal_url("/work"),
+                        url_title="Open work",
                     )
                     if sent:
                         log_nudge(uid, event.summary, event.start.isoformat(), "five_min", msg)

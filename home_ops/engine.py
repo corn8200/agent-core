@@ -63,8 +63,8 @@ async def _pushover_shrink_alert(
     mode: str, orig: int, final: int, lim: int, cleared: bool
 ) -> None:
     """Fire P0 Pushover when shrink fires 2 days in a row. HARD RULE: P0 only."""
-    import asyncio as _asyncio
-    from core.constants import PUSHOVER_USER, PUSHOVER_TOKEN
+    from core.interactive_links import alert_action_url
+    from core.pushover import send_pushover
 
     title = f"home-ops shrink 2 days in a row ({mode})"
     msg = (
@@ -72,18 +72,13 @@ async def _pushover_shrink_alert(
         f"(limit {lim}). Cleared={cleared}. Payload growing; investigate "
         f"home_ops/prompts.py _shrink_payload reason."
     )
-    proc = await _asyncio.create_subprocess_exec(
-        "curl", "-s", "-o", "/dev/null", "--max-time", "10",
-        "-F", f"token={PUSHOVER_TOKEN}",
-        "-F", f"user={PUSHOVER_USER}",
-        "-F", f"title={title}",
-        "-F", f"message={msg}",
-        "-F", "priority=0",
-        "https://api.pushover.net/1/messages.json",
-        stdout=_asyncio.subprocess.PIPE,
-        stderr=_asyncio.subprocess.PIPE,
+    await send_pushover(
+        title=title,
+        message=msg,
+        priority=0,
+        url=alert_action_url(source="home-ops", title=title, message=msg, severity="warn"),
+        url_title="Send to Mac panel 3",
     )
-    await _asyncio.wait_for(proc.communicate(), timeout=12)
 
 
 async def synthesize(gather: dict, mode: str) -> tuple[str, dict]:

@@ -73,6 +73,7 @@ async def deliver_brief_tts(
                 str(deliver_script),
                 str(BRIEF_TEXT_PATH),
                 "--no-imessage",
+                "--no-pushover",
             ],
             capture_output=True, text=True, timeout=120,
         )
@@ -115,13 +116,25 @@ async def deliver_brief_tts(
         print(f"R2 upload error: {e}", file=sys.stderr)
 
     if r2_url:
+        first_line = brief_text.split("\n", 1)[0][:180]
         try:
             from core.tools import send_imessage_reliable
-            first_line = brief_text.split("\n", 1)[0][:180]
             msg = f"{msg_prefix}: {r2_url}\n\n{first_line}"
             await send_imessage_reliable(to_addr, msg)
         except Exception as e:
             print(f"iMessage delivery failed: {e}", file=sys.stderr)
+        try:
+            from core.pushover import send_pushover
+
+            await send_pushover(
+                title=msg_prefix,
+                message=f"Audio ready.\n{first_line}",
+                priority=0,
+                url=r2_url,
+                url_title="Play audio",
+            )
+        except Exception as e:
+            print(f"Pushover audio link failed: {e}", file=sys.stderr)
     else:
         print(
             "R2 upload failed -- skipping iMessage audio delivery",

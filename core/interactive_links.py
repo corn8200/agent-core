@@ -1,4 +1,11 @@
-"""Interactive notification links shared by local agent-core senders."""
+"""Interactive notification links shared by local agent-core senders.
+
+This intentionally does not mint cockpit reply tokens or approval tokens. It is
+a short-lived signed GET action for one-way Pushover buttons that hands alert
+context to a pane. When the Universal Approval Bus owns one-tap notification
+actions, move this signing grammar behind that shared helper instead of adding
+new query formats here.
+"""
 from __future__ import annotations
 
 import hmac

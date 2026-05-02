@@ -75,7 +75,9 @@ PANE_ASK_PATHS = (
 DEDUP_TTL_SECONDS = 6 * 3600
 BYPASS_WINDOW_SECONDS = 15 * 60
 BYPASS_THRESHOLD = 3          # N bypasses in window → wake John about doctor-down
-SEVERITIES = {"ok": 0, "notice": 0, "warn": 0, "error": 1, "critical": 2}   # pushover priority map
+# Doctor bypass alerts are still infra alerts. Per rules/messaging.md, P2 is
+# family/home safety only; P1 is reserved for rare true infra emergencies.
+SEVERITIES = {"ok": 0, "notice": 0, "warn": 0, "error": 0, "critical": 1}
 
 # #683 cluster-dedup: when N+ distinct fingerprints fire for the same watcher
 # within CLUSTER_WINDOW_SECONDS, the Nth fire is rewritten as one "cluster"

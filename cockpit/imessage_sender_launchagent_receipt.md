@@ -3,5 +3,8 @@
 - Label: `com.john.cockpit-imessage-sender`
 - Source plist: `cockpit/com.john.cockpit-imessage-sender.plist`
 - Intended install path: `/Users/johncornelius/Library/LaunchAgents/com.john.cockpit-imessage-sender.plist`
-- Live load status: not loaded by this change.
-- Reason: live load was not safe during validation because the production queue was not empty. `/srv/data/cp/cockpit.db` contained a stale claimed row (`id=1`, `thread_id=+15555550000`, body prefix `w54 smoke test`) that the sender would reclaim and send.
+- Live load status: installed and loaded on 2026-05-03.
+- Install path: `/Users/johncornelius/Library/LaunchAgents/com.john.cockpit-imessage-sender.plist`
+- Preload safety action: stale smoke-test row `id=1` in `/srv/data/cp/cockpit.db` was marked `failed` with no live send.
+- Dry run before load: `claimed=0 sent=0 failed=0`.
+- LaunchAgent verification: `launchctl print gui/501/com.john.cockpit-imessage-sender` reported `last exit code = 0`; log showed `claimed=0 sent=0 failed=0`.

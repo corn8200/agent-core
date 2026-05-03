@@ -312,11 +312,83 @@ def test_send_nudge_prefers_pushover(monkeypatch):
         "message": "Body",
         "priority": 1,
         "sound": "persistent",
+        "url": None,
+        "url_title": None,
     }]
 
 
-def test_send_nudge_falls_back_to_imessage_when_pushover_fails(monkeypatch):
+def test_preview_tiers_publish_stack_first(monkeypatch):
+    stack_calls = []
+
+    def fake_stack(**kwargs):
+        stack_calls.append(kwargs)
+        return True
+
+    async def fake_push(**_kwargs):
+        raise AssertionError("Pushover should not run when Stack publish succeeds")
+
+    async def fake_fallback(*_args, **_kwargs):
+        raise AssertionError("iMessage should not run when Stack publish succeeds")
+
+    monkeypatch.delenv("NUDGE_DELIVERY", raising=False)
+    monkeypatch.setattr(_engine, "_publish_stack_item", fake_stack)
+    monkeypatch.setattr(_engine, "_send_pushover_notification", fake_push)
+    monkeypatch.setattr(_engine, "_send_imessage_fallback", fake_fallback)
+
+    delivered = asyncio.run(_engine._send_nudge(
+        "Body",
+        tier="morning_preview",
+        url="https://example.test/work",
+        url_title="Open today",
+    ))
+
+    assert delivered is True
+    assert stack_calls == [{
+        "title": "Today preview",
+        "message": "Body",
+        "tier": "morning_preview",
+        "priority": 1,
+        "url": "https://example.test/work",
+        "url_title": "Open today",
+    }]
+
+
+def test_preview_tiers_fall_back_to_push_when_stack_fails(monkeypatch):
+    push_calls = []
+
+    def fake_stack(**_kwargs):
+        return False
+
+    async def fake_push(**kwargs):
+        push_calls.append(kwargs)
+        return SimpleNamespace(ok=True, detail="sent")
+
+    async def fake_fallback(*_args, **_kwargs):
+        raise AssertionError("iMessage should not run when Pushover succeeds")
+
+    monkeypatch.delenv("NUDGE_DELIVERY", raising=False)
+    monkeypatch.setattr(_engine, "_publish_stack_item", fake_stack)
+    monkeypatch.setattr(_engine, "_send_pushover_notification", fake_push)
+    monkeypatch.setattr(_engine, "_send_imessage_fallback", fake_fallback)
+
+    delivered = asyncio.run(_engine._send_nudge("Body", tier="day_before"))
+
+    assert delivered is True
+    assert push_calls == [{
+        "title": "Tomorrow prep",
+        "message": "Body",
+        "priority": 1,
+        "sound": "vibrate",
+        "url": None,
+        "url_title": None,
+    }]
+
+
+def test_send_nudge_falls_back_to_imessage_when_preview_stack_and_push_fail(monkeypatch):
     fallback = []
+
+    def fake_stack(**_kwargs):
+        return False
 
     async def fake_push(**_kwargs):
         return SimpleNamespace(ok=False, detail="no creds")
@@ -326,6 +398,7 @@ def test_send_nudge_falls_back_to_imessage_when_pushover_fails(monkeypatch):
         return True, "fallback sent"
 
     monkeypatch.delenv("NUDGE_DELIVERY", raising=False)
+    monkeypatch.setattr(_engine, "_publish_stack_item", fake_stack)
     monkeypatch.setattr(_engine, "_send_pushover_notification", fake_push)
     monkeypatch.setattr(_engine, "_send_imessage_fallback", fake_fallback)
 
@@ -345,12 +418,12 @@ def test_send_nudge_dry_run_does_not_claim_delivery(monkeypatch):
     assert delivered is False
 
 
-def test_send_nudge_both_logs_success_if_pushover_sent_even_when_mirror_fails(monkeypatch):
+def test_meeting_tiers_ignore_both_mirror_when_push_succeeds(monkeypatch):
     async def fake_push(**_kwargs):
         return SimpleNamespace(ok=True, detail="sent")
 
     async def fake_fallback(*_args, **_kwargs):
-        return False, "mirror failed"
+        raise AssertionError("meeting tiers should be push-only")
 
     monkeypatch.setenv("NUDGE_DELIVERY", "both")
     monkeypatch.setattr(_engine, "_send_pushover_notification", fake_push)
@@ -359,6 +432,22 @@ def test_send_nudge_both_logs_success_if_pushover_sent_even_when_mirror_fails(mo
     delivered = asyncio.run(_engine._send_nudge("Body", tier="five_min"))
 
     assert delivered is True
+
+
+def test_meeting_tiers_do_not_fall_back_to_imessage_when_push_fails(monkeypatch):
+    async def fake_push(**_kwargs):
+        return SimpleNamespace(ok=False, detail="no creds")
+
+    async def fake_fallback(*_args, **_kwargs):
+        raise AssertionError("meeting tiers should be push-only")
+
+    monkeypatch.delenv("NUDGE_DELIVERY", raising=False)
+    monkeypatch.setattr(_engine, "_send_pushover_notification", fake_push)
+    monkeypatch.setattr(_engine, "_send_imessage_fallback", fake_fallback)
+
+    delivered = asyncio.run(_engine._send_nudge("Body", tier="fifteen_min"))
+
+    assert delivered is False
 
 
 def test_pushover_device_defaults_to_iphone_and_can_target_all(monkeypatch):

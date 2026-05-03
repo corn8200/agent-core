@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import json
 import os
 import re
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +53,7 @@ from home_ops import state as state_mod  # noqa: E402
 
 GATHER_DUMP_PATH = Path("/tmp/home-ops-gather.json")
 BRIEF_TEXT_PATH = Path("/tmp/home-ops-brief.txt")
+_LOCAL_MODE_LOCKS: set[str] = set()
 
 
 async def deliver_tts(brief_text: str) -> bool:
@@ -194,6 +197,36 @@ def extract_loose_ends(brief_text: str) -> list[str]:
     return out
 
 
+@contextmanager
+def _mode_lock(mode: str):
+    safe_mode = re.sub(r"[^A-Za-z0-9_.-]+", "_", mode or "default").strip("_") or "default"
+    if safe_mode in _LOCAL_MODE_LOCKS:
+        yield False
+        return
+
+    lock_dir = Path(HOME) / "logs"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = (lock_dir / f"home-ops-{safe_mode}.lock").open("a")
+    acquired = False
+    try:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError:
+            yield False
+            return
+
+        _LOCAL_MODE_LOCKS.add(safe_mode)
+        try:
+            yield True
+        finally:
+            _LOCAL_MODE_LOCKS.discard(safe_mode)
+    finally:
+        if acquired:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
+
+
 async def run(mode: str, dry_run: bool = False, gather_only: bool = False,
               force: bool = False, recipients: list[str] | None = None,
               audio: bool = False) -> int:
@@ -334,14 +367,19 @@ def main():
             print(f"[home-ops] {agent_name} killed via agent-cp, exiting")
             sys.exit(0)
     try:
-        code = asyncio.run(run(
-            mode=mode,
-            dry_run=args.dry_run,
-            gather_only=args.gather_only,
-            force=args.force,
-            recipients=recipients,
-            audio=(mode == "morning" and not args.no_audio),
-        ))
+        with _mode_lock(mode) as acquired:
+            if not acquired:
+                print(f"[home-ops] {mode} run already active, exiting")
+                code = 0
+            else:
+                code = asyncio.run(run(
+                    mode=mode,
+                    dry_run=args.dry_run,
+                    gather_only=args.gather_only,
+                    force=args.force,
+                    recipients=recipients,
+                    audio=(mode == "morning" and not args.no_audio),
+                ))
     except BaseException as _e:
         import traceback as _tb
         _tbs = _tb.format_exc()

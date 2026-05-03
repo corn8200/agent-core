@@ -286,6 +286,97 @@ async def send_alert_email(anomalies: list[dict], data: dict):
         print(f"[handler] {stdout.decode().strip()}")
 
 
+def _handler_alert_priority(anomalies: list[dict]) -> int:
+    if any(a.get("severity") == "high" for a in anomalies):
+        return 2
+    if any(a.get("severity") == "medium" for a in anomalies):
+        return 1
+    return 0
+
+
+def _publish_stack_alert(
+    title: str,
+    message: str,
+    *,
+    anomalies: list[dict],
+    diagnosis: str,
+    fingerprint: str,
+) -> bool:
+    payload = {
+        "title": title,
+        "message": message,
+        "kind": "anomaly",
+        "priority": _handler_alert_priority(anomalies),
+        "sources": ("ui",),
+        "fingerprint": fingerprint,
+        "anomalies": anomalies[:10],
+    }
+    if diagnosis:
+        payload["diagnosis"] = diagnosis[:1200]
+    try:
+        return cp.event(CP_AGENT, "anomaly", payload=payload) is not None
+    except Exception as exc:
+        print(f"[handler] stack publish failed: {exc}", file=sys.stderr)
+        return False
+
+
+async def _deliver_actionable_alert(
+    *,
+    title: str,
+    message: str,
+    anomalies: list[dict],
+    data: dict,
+    diagnosis: str,
+    fingerprint: str,
+    state: dict,
+    now: datetime,
+    high: list[dict],
+    should_email: bool,
+    skip_reason: str | None,
+) -> bool:
+    stack_sent = False
+    if should_email:
+        stack_sent = _publish_stack_alert(
+            title,
+            message,
+            anomalies=anomalies,
+            diagnosis=diagnosis,
+            fingerprint=fingerprint,
+        )
+
+    if stack_sent:
+        print(f"[{now:%H:%M:%S}] Stack alert published (hash={fingerprint}).")
+        if high:
+            save_state({
+                "last_alert_hash": fingerprint,
+                "last_alert_ts": now.isoformat(),
+                "alert_count": state.get("alert_count", 0) + 1,
+                "anomalies": anomalies,
+            })
+        else:
+            print(f"[{now:%H:%M:%S}] Medium only, stack row published.")
+        return True
+
+    await send_pushover(title, message)
+
+    # Email ONLY if: high severity AND not deduped AND not quiet hours
+    if high and should_email:
+        await send_alert_email(anomalies, data)
+        print(f"[{now:%H:%M:%S}] Alert email sent (hash={fingerprint}).")
+        save_state({
+            "last_alert_hash": fingerprint,
+            "last_alert_ts": now.isoformat(),
+            "alert_count": state.get("alert_count", 0) + 1,
+            "anomalies": anomalies,
+        })
+    elif high:
+        print(f"[{now:%H:%M:%S}] Email skipped: {skip_reason}. Push sent instead.")
+    else:
+        print(f"[{now:%H:%M:%S}] Medium only, no email.")
+
+    return False
+
+
 # --- SDK Diagnosis ---
 
 async def diagnose_anomalies(anomalies: list[dict], data: dict, heal_context: str = "") -> str:
@@ -507,26 +598,22 @@ async def quick_check(dry_run: bool = False):
     age_map = prune_anomaly_age(age_map, {diag_fp}, now)
     save_anomaly_age(age_map)
 
-    # Push notification always fires (cheap, silent on phone at night)
     heal_prefix = f"[{len(healed)} auto-healed] " if healed else ""
     title = f"Handler: {heal_prefix}{len(actionable)} issue{'s' if len(actionable)>1 else ''}"
     push_msg = diagnosis[:400] if diagnosis else "; ".join(a["message"] for a in actionable)[:400]
-    await send_pushover(title, push_msg)
-
-    # Email ONLY if: high severity AND not deduped AND not quiet hours
-    if high and should_email:
-        await send_alert_email(anomalies, data)
-        print(f"[{now:%H:%M:%S}] Alert email sent (hash={fingerprint}).")
-        save_state({
-            "last_alert_hash": fingerprint,
-            "last_alert_ts": now.isoformat(),
-            "alert_count": state.get("alert_count", 0) + 1,
-            "anomalies": actionable,
-        })
-    elif high:
-        print(f"[{now:%H:%M:%S}] Email skipped: {skip_reason}. Push sent instead.")
-    else:
-        print(f"[{now:%H:%M:%S}] Medium only, no email.")
+    await _deliver_actionable_alert(
+        title=title,
+        message=push_msg,
+        anomalies=actionable,
+        data=data,
+        diagnosis=diagnosis,
+        fingerprint=fingerprint,
+        state=state,
+        now=now,
+        high=high,
+        should_email=should_email,
+        skip_reason=skip_reason,
+    )
 
     print(f"[{now:%H:%M:%S}] Handler check complete.")
 

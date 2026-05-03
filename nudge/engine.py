@@ -48,6 +48,9 @@ NUDGE_PROFILES = {
     "five_min": NudgeProfile("Meeting now", priority=1, sound="persistent"),
 }
 
+STACK_FIRST_TIERS = {"week_ahead", "day_before", "morning_preview"}
+PUSH_ONLY_TIERS = {"fifteen_min", "five_min"}
+
 
 def _clip(value: str, limit: int) -> str:
     value = (value or "").strip()
@@ -397,6 +400,34 @@ async def _send_imessage_fallback(title: str, message: str):
     return await send_message(f"{title}\n{message}", agent="nudge", tier="normal", attribution=True)
 
 
+def _publish_stack_item(
+    *,
+    title: str,
+    message: str,
+    tier: str,
+    priority: int,
+    url: str | None = None,
+    url_title: str | None = None,
+) -> bool:
+    payload = {
+        "title": title,
+        "message": message,
+        "kind": "nudge",
+        "tier": tier,
+        "priority": priority,
+        "sources": ("ui",),
+    }
+    if url:
+        payload["url"] = url
+    if url_title:
+        payload["url_title"] = url_title
+    try:
+        return cp.event(CP_AGENT, "nudge", payload=payload) is not None
+    except Exception as exc:
+        print(f"[nudge] stack publish failed: {exc}", file=sys.stderr)
+        return False
+
+
 async def _send_nudge(
     message: str,
     dry_run: bool = False,
@@ -408,23 +439,39 @@ async def _send_nudge(
     url: str | None = None,
     url_title: str | None = None,
 ):
-    """Send nudge via Pushover by default, with iMessage as a failure fallback."""
+    """Send nudge through the tier's preferred non-LLM delivery path."""
     prof = _profile(tier, title=title)
     push_title = prof.title
     push_priority = prof.priority if priority is None else priority
     push_sound = sound or prof.sound
-    delivery = os.environ.get("NUDGE_DELIVERY", "pushover").strip().casefold()
+    delivery = os.environ.get("NUDGE_DELIVERY", "").strip().casefold()
+    effective_delivery = delivery or ("stack" if tier in STACK_FIRST_TIERS else "pushover")
+    stack_first = tier in STACK_FIRST_TIERS and delivery not in {"pushover", "imessage", "both"}
+    push_only = tier in PUSH_ONLY_TIERS
 
     if dry_run:
         print(
             "  [DRY RUN] Would send "
-            f"delivery={delivery or 'pushover'} title={push_title!r} "
+            f"delivery={effective_delivery} title={push_title!r} "
             f"priority={push_priority} sound={push_sound!r} "
             f"url={url or ''!r}: {message[:240]}"
         )
         return False
 
-    if delivery == "imessage":
+    if stack_first:
+        if _publish_stack_item(
+            title=push_title,
+            message=message,
+            tier=tier,
+            priority=push_priority,
+            url=url,
+            url_title=url_title,
+        ):
+            print("[nudge] stack delivery: published")
+            return True
+        print("[nudge] stack delivery failed; trying pushover", file=sys.stderr)
+
+    if delivery == "imessage" and not push_only:
         ok, result = await _send_imessage_fallback(push_title, message)
         print(f"[nudge] imessage delivery: {result}")
         return ok
@@ -439,13 +486,15 @@ async def _send_nudge(
     )
     if push.ok:
         print(f"[nudge] pushover delivery: {push.detail}")
-        if delivery == "both":
+        if delivery == "both" and not push_only:
             ok, result = await _send_imessage_fallback(push_title, message)
             print(f"[nudge] imessage mirror: {result}")
             return True
         return True
 
     print(f"[nudge] pushover failed: {push.detail}", file=sys.stderr)
+    if push_only:
+        return False
     ok, result = await _send_imessage_fallback(push_title, message)
     print(f"[nudge] imessage fallback: {result}")
     return ok

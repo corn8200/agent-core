@@ -341,6 +341,22 @@ def _slim_weather(w):
     }
 
 
+def _slim_work_context(ctx):
+    if not isinstance(ctx, dict):
+        return None
+    calendar = ctx.get("calendar") or {}
+    work = ctx.get("work") or {}
+    return {
+        "generated_at": ctx.get("generated_at"),
+        "files": ctx.get("files") or {},
+        "summary": ctx.get("summary") or {},
+        "calendar_events": (calendar.get("upcoming") or calendar.get("events") or [])[:25],
+        "work_reminders": (work.get("next_actions") or work.get("reminders") or [])[:40],
+        "meeting_reminders": (work.get("meeting_reminders") or [])[:20],
+        "priority_reminders": (work.get("priority_reminders") or [])[:20],
+    }
+
+
 def _build_day_labels() -> str:
     tz = ZoneInfo("America/New_York")
     today = datetime.now(tz).date()
@@ -496,6 +512,9 @@ def build_user_prompt(gather: dict, mode: str) -> tuple[str, dict]:
         "loose_ends": gather.get("loose_ends") or [],
         "learned_facts": gather.get("learned_facts") or [],
     }
+    work_context = _slim_work_context(gather.get("work_context"))
+    if work_context:
+        payload["work_context"] = work_context
 
     blob, shrink_info = _shrink_payload(payload, limit=200000)
     day_labels = _build_day_labels()

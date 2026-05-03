@@ -67,8 +67,24 @@ _TMUX = "/opt/homebrew/bin/tmux"
 _RELAY_SESSIONS = ["claude", "main"]
 
 
+async def _kill_tmux_session(session: str) -> None:
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            _TMUX, "kill-session", "-t", session,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=2)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+    except Exception:
+        pass
+
+
 async def _tmux_relay_osascript(script: str, timeout: float = 30.0) -> tuple[bool, str]:
-    """Run osascript via tmux new-window to get GUI session access.
+    """Run osascript via a hidden one-shot tmux session to get GUI session access.
 
     Returns (success, output). Falls back gracefully if no tmux session exists.
     """
@@ -103,37 +119,42 @@ async def _tmux_relay_osascript(script: str, timeout: float = 30.0) -> tuple[boo
         script_file.unlink(missing_ok=True)
         return False, "no tmux session for relay"
 
-    # Run osascript in a temporary tmux window (inherits Terminal.app GUI context)
+    # Run osascript in a private one-shot tmux session. This keeps Terminal.app
+    # FDA inheritance without inserting relay-* windows into the human claude session.
+    relay_session = f"imsg-relay-{tag}"
     bash_cmd = (
         f"osascript {script_file} > {result_file} 2>&1; "
         f"rm -f {script_file}; exit 0"
     )
-    # Use "-a -t <session>:" so tmux appends a new window instead of trying
-    # to reuse a fixed index (fixed 2026-04-09: "index N in use" failures).
-    # -d keeps the new window from stealing focus from the active Claude pane.
     proc = await asyncio.create_subprocess_exec(
-        _TMUX, "new-window", "-a", "-d", "-t", f"{target}:", "-n", f"relay-{tag}",
-        "bash", "-c", bash_cmd,
+        _TMUX, "new-session", "-d", "-s", relay_session, "-n", "relay",
+        "-c", str(Path.home()),
+        f"bash -c {shlex.quote(bash_cmd)}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await proc.communicate()
+    _stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        result_file.unlink(missing_ok=True)
+        script_file.unlink(missing_ok=True)
+        return False, f"tmux new-session returned {proc.returncode}: {stderr.decode(errors='replace')[:200]}"
 
-    # Wait for result file (osascript runs async in the tmux window)
-    for _ in range(int(timeout * 5)):
-        if result_file.exists():
-            output = result_file.read_text().strip()
-            result_file.unlink(missing_ok=True)
-            return True, output
-        await asyncio.sleep(0.2)
-
-    result_file.unlink(missing_ok=True)
-    script_file.unlink(missing_ok=True)
-    return False, "tmux relay timed out"
+    try:
+        for _ in range(int(timeout * 5)):
+            if result_file.exists():
+                output = result_file.read_text().strip()
+                result_file.unlink(missing_ok=True)
+                return True, output
+            await asyncio.sleep(0.2)
+        return False, "tmux relay timed out"
+    finally:
+        result_file.unlink(missing_ok=True)
+        script_file.unlink(missing_ok=True)
+        await _kill_tmux_session(relay_session)
 
 
 async def tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool, str]:
-    """Run a bash command via tmux new-window to inherit Terminal.app's FDA.
+    """Run a bash command via a hidden one-shot tmux session to inherit Terminal.app's FDA.
 
     launchd-spawned children do not inherit Full Disk Access, so accessing
     protected paths like `~/Library/Group Containers/...` or `~/Library/Messages`
@@ -182,14 +203,15 @@ async def tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool,
         print(f"[tmux_relay_shell] WARNING: {detail}", flush=True)
         return False, detail
 
-    # Atomic publish: write to .tmp, then mv to final. Eliminates TOCTOU
-    # race where the polling loop reads+unlinks the result file after bash's
-    # `>` redirect creates it but before the command writes its output.
+    # Atomic publish: write to .tmp, then mv to final. Use a private one-shot
+    # tmux session so FDA relay work never inserts shrelay-* windows into claude.
     tmp_file = Path(f"{result_file}.tmp")
+    relay_session = f"shellrelay-{tag}"
     bash_cmd = f"({shell_cmd}) > {tmp_file} 2>&1; mv {tmp_file} {result_file}; exit 0"
     proc = await asyncio.create_subprocess_exec(
-        _TMUX, "new-window", "-a", "-d", "-t", f"{target}:", "-n", f"shrelay-{tag}",
-        "bash", "-c", bash_cmd,
+        _TMUX, "new-session", "-d", "-s", relay_session, "-n", "relay",
+        "-c", str(Path.home()),
+        f"bash -c {shlex.quote(bash_cmd)}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -197,30 +219,33 @@ async def tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool,
 
     if proc.returncode != 0:
         print(
-            f"[tmux_relay_shell] new-window failed rc={proc.returncode} "
+            f"[tmux_relay_shell] new-session failed rc={proc.returncode} "
             f"session={target} cmd={shell_cmd[:100]!r} "
             f"stderr={_stderr.decode(errors='replace').strip()[:200]}",
             flush=True,
         )
         result_file.unlink(missing_ok=True)
         tmp_file.unlink(missing_ok=True)
-        return False, f"tmux new-window returned {proc.returncode}"
+        return False, f"tmux new-session returned {proc.returncode}"
 
-    for _ in range(int(timeout * 5)):
-        if result_file.exists():
-            output = result_file.read_text()
-            result_file.unlink(missing_ok=True)
-            return True, output
-        await asyncio.sleep(0.2)
+    try:
+        for _ in range(int(timeout * 5)):
+            if result_file.exists():
+                output = result_file.read_text()
+                result_file.unlink(missing_ok=True)
+                return True, output
+            await asyncio.sleep(0.2)
 
-    print(
-        f"[tmux_relay_shell] result file never appeared "
-        f"session={target} cmd={shell_cmd[:100]!r} timeout={timeout}s",
-        flush=True,
-    )
-    result_file.unlink(missing_ok=True)
-    tmp_file.unlink(missing_ok=True)
-    return False, "tmux shell relay timed out"
+        print(
+            f"[tmux_relay_shell] result file never appeared "
+            f"session={target} cmd={shell_cmd[:100]!r} timeout={timeout}s",
+            flush=True,
+        )
+        return False, "tmux shell relay timed out"
+    finally:
+        result_file.unlink(missing_ok=True)
+        tmp_file.unlink(missing_ok=True)
+        await _kill_tmux_session(relay_session)
 
 
 async def tmux_relay_healthy() -> tuple[bool, str]:

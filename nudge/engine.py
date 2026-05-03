@@ -30,11 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 import agent_cp_client as cp  # noqa: E402
 CP_AGENT = "nudge-engine"
 
-try:
-    from core.interactive_links import portal_url
-except Exception:
-    def portal_url(path: str = "/") -> str:
-        return "https://cp.jcornelius.net" + "/" + path.lstrip("/")
+from core.interactive_links import portal_url
 
 
 @dataclass(frozen=True)
@@ -494,7 +490,7 @@ async def _has_upcoming_events(now: datetime) -> bool:
     return any(not _should_skip(e) for e in events)
 
 
-async def run_nudges(dry_run: bool = False):
+async def run_nudges(dry_run: bool = False, force_tier: str | None = None, bypass_window: bool = False):
     now = datetime.now()
     hour = now.hour
     work_ctx = {}
@@ -508,7 +504,7 @@ async def run_nudges(dry_run: bool = False):
     # Top-of-loop gate: if no tier is in an active window AND no event is
     # imminent, skip all gather_* calls. This is the single biggest lever
     # for the 3800+ no-op fires/day.
-    if not _in_any_active_window(now):
+    if not bypass_window and not _in_any_active_window(now):
         has_events = await _has_upcoming_events(now)
         has_work_meeting = _has_upcoming_work_meeting(work_ctx, now)
         if not has_events and not has_work_meeting:
@@ -578,8 +574,8 @@ async def run_nudges(dry_run: bool = False):
             if sent:
                 log_nudge(day_key, "day_before", tomorrow.isoformat(), "day_before", msg)
 
-    # --- Morning preview (7-8 AM) ---
-    if 7 <= hour <= 8:
+    # --- Morning preview (7-8 AM, or forced) ---
+    if (7 <= hour <= 8) or force_tier == "morning_preview":
         today = now.date()
         today_start = datetime.combine(today, datetime.min.time()).replace(hour=0)
         today_end = datetime.combine(today, datetime.min.time()).replace(hour=23, minute=59)
@@ -587,7 +583,7 @@ async def run_nudges(dry_run: bool = False):
         schedulable = [e for e in events if not _should_skip(e)]
 
         morning_key = f"morning-{today.isoformat()}"
-        if not already_sent(morning_key, "morning_preview"):
+        if force_tier == "morning_preview" or not already_sent(morning_key, "morning_preview"):
             from core.calendar_service import _compute_free_slots, get_schedule_view
             view = await get_schedule_view()
 
@@ -690,6 +686,8 @@ async def main():
     parser = argparse.ArgumentParser(description="Calendar nudge engine")
     parser.add_argument("--dry-run", action="store_true", help="Log without sending")
     parser.add_argument("--status", action="store_true", help="Show recent nudge history")
+    parser.add_argument("--force-tier", metavar="TIER", help="Force a specific tier regardless of time window or dedup")
+    parser.add_argument("--bypass-window", action="store_true", help="Skip the active-window gate")
     args = parser.parse_args()
 
     init_nudge_db()
@@ -702,8 +700,8 @@ async def main():
         await show_status()
         return
 
-    print(f"[nudge] Running at {datetime.now():%Y-%m-%d %H:%M:%S} (dry_run={args.dry_run})")
-    await run_nudges(dry_run=args.dry_run)
+    print(f"[nudge] Running at {datetime.now():%Y-%m-%d %H:%M:%S} (dry_run={args.dry_run}, force_tier={args.force_tier}, bypass_window={args.bypass_window})")
+    await run_nudges(dry_run=args.dry_run, force_tier=args.force_tier, bypass_window=args.bypass_window)
     print("[nudge] Done.")
 
 

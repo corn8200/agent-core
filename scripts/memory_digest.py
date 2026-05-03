@@ -2,32 +2,28 @@
 """memory_digest.py — 15-min pattern detector over agent memory.
 
 Scans ~/logs/agent-memory.db for anomaly repetition and brief streaks.
-Fires Pushover P0 when a handler-diagnosis keyword recurs 3+ times in
-the last 4 hours, or when 3+ consecutive morning briefs share an opening
-topic. Dedups against /tmp/memory-digest-last.json so it never spams.
-
-HARD RULE: Pushover priority is ALWAYS 0. Never escalate.
+Publishes one control-plane anomaly item when a handler-diagnosis keyword
+recurs 3+ times in the last 4 hours. Quiet brief streaks update dedup
+state without creating UI items or triggering push delivery.
 """
+import argparse
 import hashlib
 import json
-import os
 import re
 import sqlite3
 import sys
-import urllib.parse
-import urllib.request
 from collections import Counter
 from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, '/Users/johncornelius/Projects/agent-core')
 
-from core.vault import hydrate_env, get_secret  # noqa: E402
-hydrate_env()
+from core import agent_cp_client as cp  # noqa: E402
 
 DB_PATH = Path.home() / 'logs' / 'agent-memory.db'
 LOG_PATH = Path.home() / 'logs' / 'memory-digest.log'
 STATE_PATH = Path('/tmp/memory-digest-last.json')
+CP_AGENT = 'memory-digest'
 
 RECENT_WINDOW_MIN = 30
 HANDLER_WINDOW_HOURS = 4
@@ -58,13 +54,6 @@ def _log(msg: str) -> None:
     ts = datetime.now().isoformat(timespec='seconds')
     with LOG_PATH.open('a') as f:
         f.write(f"[{ts}] {msg}\n")
-
-
-def _load_secrets() -> dict:
-    return {
-        "PUSHOVER_APP_TOKEN": get_secret("PUSHOVER_APP_TOKEN") or "",
-        "PUSHOVER_USER_KEY": get_secret("PUSHOVER_USER_KEY") or "",
-    }
 
 
 def _fetch(conn: sqlite3.Connection, sql: str, params: tuple) -> list:
@@ -122,15 +111,15 @@ def _detect_brief_streak(conn: sqlite3.Connection) -> tuple[str, int] | None:
     return None
 
 
-def _check_dedup(alert_text: str) -> bool:
+def _check_dedup(alert_text: str, state_path: Path) -> bool:
     alert_hash = hashlib.sha256(alert_text.encode()).hexdigest()
     now = datetime.now()
 
-    if not STATE_PATH.exists():
+    if not state_path.exists():
         return True
 
     try:
-        state = json.loads(STATE_PATH.read_text())
+        state = json.loads(state_path.read_text())
     except (json.JSONDecodeError, OSError):
         return True
 
@@ -151,47 +140,51 @@ def _check_dedup(alert_text: str) -> bool:
     return False
 
 
-def _write_state(alert_text: str) -> None:
+def _write_state(alert_text: str, state_path: Path) -> None:
     alert_hash = hashlib.sha256(alert_text.encode()).hexdigest()
-    STATE_PATH.write_text(json.dumps({
+    state_path.write_text(json.dumps({
         'last_alert_hash': alert_hash,
         'last_alert_time': datetime.now().isoformat(),
     }))
 
 
-def _send_pushover(title: str, message: str, secrets: dict) -> bool:
-    token = secrets.get('PUSHOVER_APP_TOKEN') or secrets.get('PUSHOVER_TOKEN')
-    user = secrets.get('PUSHOVER_USER_KEY') or secrets.get('PUSHOVER_USER')
-    if not token or not user:
-        _log("pushover skipped: PUSHOVER token/user missing from secrets.env")
-        return False
-
-    data = urllib.parse.urlencode({
-        'token': token,
-        'user': user,
+def _publish_anomaly_item(title: str, message: str, *, dry_run: bool) -> bool:
+    payload = {
         'title': title,
         'message': message,
-        'priority': 0,
-    }).encode()
-    req = urllib.request.Request('https://api.pushover.net/1/messages.json', data=data)
+        'kind': 'anomaly',
+        'priority': 2,
+        'sources': ('ui',),
+    }
+    if dry_run:
+        _log(f"dry-run anomaly item: {json.dumps(payload, sort_keys=True)}")
+        return True
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            if 200 <= resp.status < 300:
-                return True
-            _log(f"pushover HTTP {resp.status}")
-            return False
+        return cp.event(CP_AGENT, 'anomaly', payload=payload) is not None
     except Exception as exc:
-        _log(f"pushover error: {exc}")
+        _log(f"anomaly item publish error: {exc}")
         return False
 
 
-def main() -> int:
-    if not DB_PATH.exists():
+def _parse_args(argv: list[str] | None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--db-path', default=str(DB_PATH))
+    parser.add_argument('--state-path', default=str(STATE_PATH))
+    parser.add_argument('--dry-run', action='store_true')
+    return parser.parse_args(argv)
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(argv)
+    db_path = Path(args.db_path)
+    state_path = Path(args.state_path)
+
+    if not db_path.exists():
         _log("db missing, skipping")
         return 0
 
     try:
-        conn = sqlite3.connect(str(DB_PATH), timeout=5)
+        conn = sqlite3.connect(str(db_path), timeout=5)
         conn.execute("PRAGMA busy_timeout=3000")
     except sqlite3.Error as exc:
         _log(f"db connect failed: {exc}")
@@ -230,17 +223,22 @@ def main() -> int:
     alert_title = "Memory digest: pattern detected"
     alert_body = "\n".join(findings)
 
-    if not _check_dedup(alert_body):
+    if not _check_dedup(alert_body, state_path):
         _log(f"dedup suppressed: {alert_body.replace(chr(10), ' | ')}")
         return 0
 
-    secrets = _load_secrets()
-    sent = _send_pushover(alert_title, alert_body, secrets)
-    if sent:
-        _write_state(alert_body)
-        _log(f"pushover sent: {alert_body.replace(chr(10), ' | ')}")
-    else:
-        _log(f"pushover FAILED: {alert_body.replace(chr(10), ' | ')}")
+    if not handler_pattern:
+        _write_state(alert_body, state_path)
+        _log(f"quiet pattern recorded without item: {alert_body.replace(chr(10), ' | ')}")
+        return 0
+
+    sent = _publish_anomaly_item(alert_title, alert_body, dry_run=args.dry_run)
+    if not sent:
+        _log(f"anomaly item FAILED: {alert_body.replace(chr(10), ' | ')}")
+        return 0
+
+    _write_state(alert_body, state_path)
+    _log(f"anomaly item published: {alert_body.replace(chr(10), ' | ')}")
 
     return 0
 

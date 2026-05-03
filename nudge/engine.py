@@ -13,6 +13,7 @@ Usage:
 
 import argparse
 import asyncio
+import hashlib
 import os
 import sqlite3
 import sys
@@ -50,6 +51,7 @@ NUDGE_PROFILES = {
 
 STACK_FIRST_TIERS = {"week_ahead", "day_before", "morning_preview"}
 PUSH_ONLY_TIERS = {"fifteen_min", "five_min"}
+STACK_VERBS = ("SNOOZE", "ACK", "OPEN", "KILL")
 
 
 def _clip(value: str, limit: int) -> str:
@@ -406,15 +408,19 @@ def _publish_stack_item(
     message: str,
     tier: str,
     priority: int,
+    dedup_key: str,
     url: str | None = None,
     url_title: str | None = None,
 ) -> bool:
     payload = {
         "title": title,
         "message": message,
+        "body": message,
         "kind": "nudge",
         "tier": tier,
         "priority": priority,
+        "dedup_key": dedup_key,
+        "verbs": STACK_VERBS,
         "sources": ("ui",),
     }
     if url:
@@ -428,6 +434,11 @@ def _publish_stack_item(
         return False
 
 
+def _stack_dedup_key(tier: str, message: str) -> str:
+    digest = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+    return f"nudge:{tier}:{digest}"
+
+
 async def _send_nudge(
     message: str,
     dry_run: bool = False,
@@ -438,6 +449,7 @@ async def _send_nudge(
     sound: str | None = None,
     url: str | None = None,
     url_title: str | None = None,
+    dedup_key: str | None = None,
 ):
     """Send nudge through the tier's preferred non-LLM delivery path."""
     prof = _profile(tier, title=title)
@@ -464,6 +476,7 @@ async def _send_nudge(
             message=message,
             tier=tier,
             priority=push_priority,
+            dedup_key=dedup_key or _stack_dedup_key(tier, message),
             url=url,
             url_title=url_title,
         ):
@@ -580,6 +593,7 @@ async def run_nudges(dry_run: bool = False, force_tier: str | None = None, bypas
                     msg,
                     dry_run,
                     tier="week_ahead",
+                    dedup_key=week_key,
                     url=portal_url("/work"),
                     url_title="Open week",
                 )
@@ -617,6 +631,7 @@ async def run_nudges(dry_run: bool = False, force_tier: str | None = None, bypas
                 msg,
                 dry_run,
                 tier="day_before",
+                dedup_key=day_key,
                 url=portal_url("/work"),
                 url_title="Open tomorrow",
             )
@@ -663,6 +678,8 @@ async def run_nudges(dry_run: bool = False, force_tier: str | None = None, bypas
                 msg,
                 dry_run,
                 tier="morning_preview",
+                title=f"Today: {len(schedulable)} events",
+                dedup_key=morning_key,
                 url=portal_url("/work"),
                 url_title="Open today",
             )

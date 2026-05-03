@@ -348,9 +348,49 @@ def test_preview_tiers_publish_stack_first(monkeypatch):
         "message": "Body",
         "tier": "morning_preview",
         "priority": 1,
+        "dedup_key": "nudge:morning_preview:6ccaa6415b5ee449",
         "url": "https://example.test/work",
         "url_title": "Open today",
     }]
+
+
+def test_publish_stack_item_payload_contains_stack_contract(monkeypatch):
+    events = []
+
+    def fake_event(agent, kind, payload=None, **_kwargs):
+        events.append((agent, kind, payload))
+        return 99
+
+    monkeypatch.setattr(_engine.cp, "event", fake_event)
+
+    ok = _engine._publish_stack_item(
+        title="Today: 2 events",
+        message="Body",
+        tier="morning_preview",
+        priority=1,
+        dedup_key="morning-2026-05-03",
+        url="https://example.test/work",
+        url_title="Open today",
+    )
+
+    assert ok is True
+    assert events == [(
+        "nudge-engine",
+        "nudge",
+        {
+            "title": "Today: 2 events",
+            "message": "Body",
+            "body": "Body",
+            "kind": "nudge",
+            "tier": "morning_preview",
+            "priority": 1,
+            "dedup_key": "morning-2026-05-03",
+            "verbs": ("SNOOZE", "ACK", "OPEN", "KILL"),
+            "sources": ("ui",),
+            "url": "https://example.test/work",
+            "url_title": "Open today",
+        },
+    )]
 
 
 def test_preview_tiers_fall_back_to_push_when_stack_fails(monkeypatch):

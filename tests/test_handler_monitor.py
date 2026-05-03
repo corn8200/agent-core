@@ -49,17 +49,19 @@ def test_deliver_actionable_alert_uses_stack_first_without_outbound(monkeypatch)
     monitor = _load_monitor(monkeypatch)
     anomaly = {"severity": "high", "source": "vps", "message": "Service down: cp-api"}
     stack_calls = []
+    pushes = []
+    emails = []
     saved = []
 
     def fake_stack(*args, **kwargs):
         stack_calls.append((args, kwargs))
         return True
 
-    async def fake_push(*_args, **_kwargs):
-        raise AssertionError("push should not run when Stack publish succeeds")
+    async def fake_push(title, message):
+        pushes.append((title, message))
 
-    async def fake_email(*_args, **_kwargs):
-        raise AssertionError("email should not run when Stack publish succeeds")
+    async def fake_email(anomalies, data):
+        emails.append((anomalies, data))
 
     monkeypatch.setattr(monitor, "_publish_stack_alert", fake_stack)
     monkeypatch.setattr(monitor, "send_pushover", fake_push)
@@ -82,6 +84,8 @@ def test_deliver_actionable_alert_uses_stack_first_without_outbound(monkeypatch)
 
     assert delivered is True
     assert len(stack_calls) == 1
+    assert pushes == [("Handler: 1 issue", "Service down: cp-api")]
+    assert emails == [([anomaly], {"vps": {"raw": "sample"}})]
     assert saved == [{
         "last_alert_hash": "abc123",
         "last_alert_ts": "2026-05-03T12:00:00",
@@ -172,3 +176,28 @@ def test_deliver_actionable_alert_falls_back_to_existing_push_email(monkeypatch)
         "alert_count": 5,
         "anomalies": [anomaly],
     }]
+
+
+def test_quick_check_posts_silent_heartbeat_when_clear(monkeypatch):
+    monitor = _load_monitor(monkeypatch)
+    heartbeats = []
+
+    async def fake_gather_all(force=False):
+        assert force is False
+        return {"vps": {"raw": ""}}
+
+    async def fake_heartbeat(*, ok=True):
+        heartbeats.append(ok)
+        return True
+
+    async def fail_push(*_args, **_kwargs):
+        raise AssertionError("clear check should not push")
+
+    monkeypatch.setattr(monitor, "gather_all", fake_gather_all)
+    monkeypatch.setattr(monitor, "post_handler_heartbeat", fake_heartbeat)
+    monkeypatch.setattr(monitor, "send_pushover", fail_push)
+    monkeypatch.setattr(monitor, "_publish_stack_alert", lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("clear check should not publish Stack")))
+
+    asyncio.run(monitor.quick_check(dry_run=False))
+
+    assert heartbeats == [True]

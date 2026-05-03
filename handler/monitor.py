@@ -18,8 +18,10 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import urllib.error
+import urllib.request
 sys_path_inserted = True
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'core'))
@@ -305,6 +307,7 @@ def _publish_stack_alert(
     payload = {
         "title": title,
         "message": message,
+        "body": message,
         "kind": "anomaly",
         "priority": _handler_alert_priority(anomalies),
         "sources": ("ui",),
@@ -318,6 +321,62 @@ def _publish_stack_alert(
     except Exception as exc:
         print(f"[handler] stack publish failed: {exc}", file=sys.stderr)
         return False
+
+
+def _cp_bearer_token() -> str:
+    try:
+        from core.vault import get_secret, hydrate_env
+        hydrate_env(["CP_API_BEARER_TOKEN", "APPLE_BRIDGE_TOKEN"])
+        return (
+            os.environ.get("CP_API_BEARER_TOKEN")
+            or os.environ.get("APPLE_BRIDGE_TOKEN")
+            or get_secret("CP_API_BEARER_TOKEN")
+            or get_secret("APPLE_BRIDGE_TOKEN")
+            or ""
+        )
+    except Exception:
+        return os.environ.get("CP_API_BEARER_TOKEN") or os.environ.get("APPLE_BRIDGE_TOKEN") or ""
+
+
+def _post_handler_heartbeat_sync(*, ok: bool = True) -> bool:
+    token = _cp_bearer_token()
+    if not token:
+        print("[handler] heartbeat skipped: missing cp-api bearer token", file=sys.stderr)
+        return False
+    if os.environ.get("AGENT_CP_URL"):
+        url = os.environ["AGENT_CP_URL"].rstrip("/")
+    else:
+        try:
+            from core.endpoints import get as endpoint_get
+            url = endpoint_get("agent_cp.base_url").rstrip("/")
+        except Exception:
+            url = getattr(cp, "VPS_URL", "").rstrip("/")
+    if not url:
+        print("[handler] heartbeat skipped: missing cp-api endpoint", file=sys.stderr)
+        return False
+    payload = json.dumps({
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "ok": bool(ok),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{url}/api/cockpit/handler/heartbeat",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return 200 <= int(resp.status) < 300
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"[handler] heartbeat failed: {exc}", file=sys.stderr)
+        return False
+
+
+async def post_handler_heartbeat(*, ok: bool = True) -> bool:
+    return await asyncio.to_thread(_post_handler_heartbeat_sync, ok=ok)
 
 
 async def _deliver_actionable_alert(
@@ -346,16 +405,6 @@ async def _deliver_actionable_alert(
 
     if stack_sent:
         print(f"[{now:%H:%M:%S}] Stack alert published (hash={fingerprint}).")
-        if high:
-            save_state({
-                "last_alert_hash": fingerprint,
-                "last_alert_ts": now.isoformat(),
-                "alert_count": state.get("alert_count", 0) + 1,
-                "anomalies": anomalies,
-            })
-        else:
-            print(f"[{now:%H:%M:%S}] Medium only, stack row published.")
-        return True
 
     await send_pushover(title, message)
 
@@ -363,18 +412,21 @@ async def _deliver_actionable_alert(
     if high and should_email:
         await send_alert_email(anomalies, data)
         print(f"[{now:%H:%M:%S}] Alert email sent (hash={fingerprint}).")
-        save_state({
-            "last_alert_hash": fingerprint,
-            "last_alert_ts": now.isoformat(),
-            "alert_count": state.get("alert_count", 0) + 1,
-            "anomalies": anomalies,
-        })
+        if high:
+            save_state({
+                "last_alert_hash": fingerprint,
+                "last_alert_ts": now.isoformat(),
+                "alert_count": state.get("alert_count", 0) + 1,
+                "anomalies": anomalies,
+            })
     elif high:
         print(f"[{now:%H:%M:%S}] Email skipped: {skip_reason}. Push sent instead.")
+    elif stack_sent:
+        print(f"[{now:%H:%M:%S}] Medium only, stack row published.")
     else:
         print(f"[{now:%H:%M:%S}] Medium only, no email.")
 
-    return False
+    return stack_sent
 
 
 # --- SDK Diagnosis ---
@@ -471,6 +523,7 @@ async def quick_check(dry_run: bool = False):
     anomalies = detect_anomalies(data)
 
     if not anomalies:
+        await post_handler_heartbeat(ok=True)
         print(f"[{datetime.now():%H:%M:%S}] All clear.")
         return
 

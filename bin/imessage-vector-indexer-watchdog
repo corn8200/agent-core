@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Reload the scheduled iMessage vector indexer if launchd loses the label.
+set -euo pipefail
+
+LABEL="com.john.imessage-vector-indexer"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+LOG="$HOME/logs/imessage-vector-indexer-watchdog.log"
+
+mkdir -p "$HOME/logs"
+ts() { date '+%Y-%m-%d %H:%M:%S'; }
+
+if launchctl list | awk '{print $3}' | grep -qx "$LABEL"; then
+  exit 0
+fi
+
+if [ ! -f "$PLIST" ]; then
+  echo "[$(ts)] missing plist $PLIST" >>"$LOG"
+  exit 0
+fi
+
+echo "[$(ts)] $LABEL missing from launchctl; loading $PLIST" >>"$LOG"
+launchctl bootstrap "gui/$UID" "$PLIST" >>"$LOG" 2>&1 || \
+  launchctl load "$PLIST" >>"$LOG" 2>&1 || true

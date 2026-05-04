@@ -38,6 +38,8 @@ swarm/
   engine.py         — Swarm class: parallel/series/hybrid modes
 daemon/
   imessage_daemon.py — Unified iMessage bus: reader + router + retry loop (LaunchAgent, KeepAlive)
+bin/
+  imessage_vector_indexer.py — Scheduled iMessage corpus vector indexer
 nudge/
   engine.py         — Calendar nudge engine: 5 tiers, SQLite dedup, --dry-run (LaunchAgent, every 5 min)
 ```
@@ -76,6 +78,8 @@ nudge/
 - `com.john.handler-agent` — Every 30 min anomaly detection (Mac-side, VPS has matching timer)
 - `com.john.watch-commander` — Always-on, SDK Opus, iMessage bus
 - `com.john.imessage-bus` — KeepAlive daemon, polls chat.db, routes to agents
+- `com.john.imessage-vector-indexer` — every 30 min, catches up iMessage vector corpus gaps
+- `com.john.imessage-vector-indexer-watchdog` — every 15 min, reloads missing indexer LaunchAgent
 - `com.john.nudge-engine` — every 5 min, calendar nudges via iMessage
 
 ## Model Strategy (Max subscription = flat-monthly, no per-call $ cap)

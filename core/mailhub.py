@@ -13,6 +13,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import re
+
 import httpx
 
 DEFAULT_BASE_URL = os.environ.get("MAILHUB_URL", "http://127.0.0.1:8770")
@@ -234,6 +236,102 @@ def _normalize_attachments(
     return out
 
 
+# ── client-side body preflight — mirrors mailhub/validation.py ───────────
+_DOCTYPE_RE = re.compile(r"^\s*<!DOCTYPE\b", re.IGNORECASE)
+_HTML_TAG_RE = re.compile(r"<(html|body|head|style|script)\b", re.IGNORECASE)
+_ANY_TAG_RE = re.compile(r"^\s*<[a-zA-Z/][^>]*>")
+_TRUNC_LINES_RE = re.compile(r"\[\d+\s+more\s+lines?\b", re.IGNORECASE)
+_TRUNC_GENERIC_RE = re.compile(
+    r"\[truncated\b|\[full\s+output:|\.\.\.\s*<full\s+at\b", re.IGNORECASE
+)
+_MIDTAG_RE = re.compile(r"<[^\s>][^>]*$")
+
+
+class MailhubValidationError(ValueError):
+    """Body validation failed client-side before any network call."""
+
+
+def _preflight_validate_body(
+    body: str | None,
+    html: str | None,
+    is_html: bool,
+) -> None:
+    """Raise MailhubValidationError if body fields are malformed.
+
+    Mirrors mailhub.validation.validate_send_body — keep in sync.
+    """
+    body_text = body
+    body_html = html if html else (body if is_html else None)
+    if is_html and not html:
+        body_html = body
+        body_text = None
+
+    if not body_text and not body_html:
+        raise MailhubValidationError(
+            "at least one body required — body_text or body_html must be non-empty"
+        )
+    if is_html and not body_html:
+        raise MailhubValidationError(
+            "is_html=1 but body_html missing — set body_html or clear is_html"
+        )
+    if body_html and not is_html:
+        raise MailhubValidationError(
+            "body_html is populated but is_html=0 — set is_html=1 or move content to body_text"
+        )
+
+    if body_text:
+        if _DOCTYPE_RE.match(body_text):
+            raise MailhubValidationError(
+                "body_text starts with <!DOCTYPE — pass HTML in html= and set is_html=True"
+            )
+        first200 = body_text[:200]
+        if _HTML_TAG_RE.search(first200):
+            raise MailhubValidationError(
+                "body_text contains HTML structural tags in the first 200 chars — "
+                "pass HTML in html= and set is_html=True"
+            )
+        lines = body_text.splitlines()
+        if lines:
+            tag_lines = sum(1 for ln in lines if _ANY_TAG_RE.match(ln))
+            if tag_lines / len(lines) > 0.50:
+                raise MailhubValidationError(
+                    "body_text has >50% lines starting with HTML tags — "
+                    "pass HTML in html= and set is_html=True"
+                )
+        if _TRUNC_LINES_RE.search(body_text):
+            raise MailhubValidationError(
+                "body_text looks pre-truncated with '[N more lines ...]' marker — "
+                "send full content or use a mailhub attachment"
+            )
+        if _TRUNC_GENERIC_RE.search(body_text):
+            raise MailhubValidationError(
+                "body_text contains a truncation marker — "
+                "send full content or use a mailhub attachment"
+            )
+        tail = body_text[-50:] if len(body_text) > 50 else body_text
+        if _MIDTAG_RE.search(tail):
+            raise MailhubValidationError(
+                "body_text appears to end mid-tag (possible truncation)"
+            )
+
+    if body_html:
+        if _TRUNC_LINES_RE.search(body_html):
+            raise MailhubValidationError(
+                "body_html looks pre-truncated with '[N more lines ...]' marker — "
+                "send full content or use a mailhub attachment"
+            )
+        if _TRUNC_GENERIC_RE.search(body_html):
+            raise MailhubValidationError(
+                "body_html contains a truncation marker — "
+                "send full content or use a mailhub attachment"
+            )
+        tail = body_html[-50:] if len(body_html) > 50 else body_html
+        if _MIDTAG_RE.search(tail):
+            raise MailhubValidationError(
+                "body_html appears to end mid-tag (possible truncation)"
+            )
+
+
 def _build_send_payload(
     *,
     to: str,
@@ -252,6 +350,7 @@ def _build_send_payload(
     approval_required: bool | None,
     attachments: list[Any] | None = None,
 ) -> dict[str, Any]:
+    _preflight_validate_body(body, html, is_html)
     payload: dict[str, Any] = {
         "sender_app": sender_app,
         "to": to,
@@ -447,6 +546,7 @@ __all__ = [
     "DEFAULT_TIMEOUT",
     "MailhubError",
     "MailhubAuthError",
+    "MailhubValidationError",
     "send_email",
     "send_email_async",
     "reply_email",

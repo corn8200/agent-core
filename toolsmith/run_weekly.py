@@ -101,6 +101,15 @@ Last 7 days of agent runs:
 
 Review these results and give me the weekly Toolsmith report."""
 
+    if DRY_RUN:
+        _log(f"[DRY-RUN] Skipping SDK call — {len(recent)} recent entries ready")
+        print(f"[DRY-RUN] Would call Opus with {len(recent)} recent entries")
+        print("[DRY-RUN] Success path: would send Pushover(title='Toolsmith Weekly', priority=0)")
+        print("[DRY-RUN] Empty path: would log silently, no notification")
+        result = await send_pushover(title="Toolsmith DRY-RUN", message=f"dry-run OK — {len(recent)} entries in window", priority=0)
+        _log(f"[DRY-RUN] Pushover test: {result.detail}")
+        return
+
     _log(f"Running SDK call — {len(recent)} recent entries (last 7d), {total} total")
 
     brief_text = ""
@@ -129,15 +138,12 @@ Review these results and give me the weekly Toolsmith report."""
 
     if brief_text.strip():
         _log(f"Got {len(brief_text)} chars of output")
-        if DRY_RUN:
-            print(f"[DRY-RUN] Would send Pushover:\n{brief_text.strip()}")
-        else:
-            result = await send_pushover(
-                title="Toolsmith Weekly",
-                message=brief_text.strip(),
-                priority=0,
-            )
-            _log(f"Pushover: {result.detail}")
+        result = await send_pushover(
+            title="Toolsmith Weekly",
+            message=brief_text.strip(),
+            priority=0,
+        )
+        _log(f"Pushover: {result.detail}")
     else:
         # Empty output is not actionable — log silently, no notification
         _log("SDK returned empty output — logging silently, skipping notification")

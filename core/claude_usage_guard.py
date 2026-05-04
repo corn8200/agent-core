@@ -67,8 +67,14 @@ def claude_usage_block_reason(phase: str = "claude", *, threshold: float | None 
         primary = _as_float(row.get("primary_pct"))
         five_status = str(row.get("five_hour_status") or "").lower()
         seven_status = str(row.get("seven_day_status") or "").lower()
+        try:
+            http_code = int(row.get("http_code") or 0)
+        except (TypeError, ValueError):
+            http_code = 0
         reset = _format_reset(row.get("five_hour_reset") or row.get("seven_day_reset"))
-        if row.get("hit_wall") or five_status == "rejected" or seven_status == "rejected":
+        # Older cache writers used hit_wall for overage rejection, which is normal
+        # on Max plans. Only a real 5h/7d rejection or HTTP 429 is a hard wall.
+        if five_status == "rejected" or seven_status == "rejected" or http_code == 429:
             parts = []
             if five is not None:
                 parts.append(f"5h={five:.0%}")

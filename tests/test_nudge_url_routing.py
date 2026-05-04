@@ -39,61 +39,107 @@ def test_url_constants_are_distinct_and_correct():
 
 
 def test_no_inline_portal_url_work_or_home_outside_constants():
-    """Structural poka-yoke. Strip the two constant initializations from the
-    source text; if anything else still references portal_url("/work") or
-    portal_url("/home"), a copy-paste regression has happened."""
+    """Structural poka-yoke. AST-scan the engine for `portal_url("/work")` and
+    `portal_url("/home")` calls. The only allowed sites are the two top-level
+    constant assignments. Anywhere else = copy-paste regression.
+
+    Quote style does not matter (single, double, triple) because the AST
+    represents string literals as values, not source text.
+    """
+    import ast
     text = ENGINE_PATH.read_text(encoding="utf-8")
+    tree = ast.parse(text)
 
-    # Allowed: the two constant init lines exactly once each.
-    work_init = '_WORK_MEETING_NUDGE_URL = portal_url("/work")'
-    home_init = '_CALENDAR_NUDGE_URL = portal_url("/home")'
-    assert text.count(work_init) == 1, (
-        "expected exactly one _WORK_MEETING_NUDGE_URL = portal_url(\"/work\") line"
-    )
-    assert text.count(home_init) == 1, (
-        "expected exactly one _CALENDAR_NUDGE_URL = portal_url(\"/home\") line"
-    )
+    # Build parent map so we can identify enclosing assignment for each call.
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            child.parent = parent  # type: ignore[attr-defined]
 
-    stripped = text.replace(work_init, "", 1).replace(home_init, "", 1)
-    assert 'portal_url("/work")' not in stripped, (
-        'Inline portal_url("/work") found in nudge/engine.py — '
-        'use _WORK_MEETING_NUDGE_URL instead.'
-    )
-    assert 'portal_url("/home")' not in stripped, (
-        'Inline portal_url("/home") found in nudge/engine.py — '
-        'use _CALENDAR_NUDGE_URL instead.'
+    allowed_targets = {
+        ("_WORK_MEETING_NUDGE_URL", "/work"),
+        ("_CALENDAR_NUDGE_URL", "/home"),
+    }
+
+    offenders: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not (isinstance(func, ast.Name) and func.id == "portal_url"):
+            continue
+        if not (len(node.args) == 1 and isinstance(node.args[0], ast.Constant)):
+            continue
+        path = node.args[0].value
+        if path not in {"/work", "/home"}:
+            continue
+
+        # Walk up to find the enclosing module-level assignment.
+        cur = getattr(node, "parent", None)
+        target_name: str | None = None
+        while cur is not None:
+            if isinstance(cur, ast.Assign) and len(cur.targets) == 1:
+                tgt = cur.targets[0]
+                if isinstance(tgt, ast.Name):
+                    # Must be at module scope (parent of the Assign is Module).
+                    if isinstance(getattr(cur, "parent", None), ast.Module):
+                        target_name = tgt.id
+                break
+            cur = getattr(cur, "parent", None)
+
+        if (target_name, path) not in allowed_targets:
+            offenders.append(
+                f"line {node.lineno}: portal_url({path!r}) — "
+                f"enclosing assignment {target_name!r} not in allow-list"
+            )
+
+    assert not offenders, (
+        "inline portal_url('/work' or '/home') found outside allowed "
+        "constant assignments:\n  " + "\n  ".join(offenders)
     )
 
 
 def test_only_work_meeting_branch_uses_work_url():
     """Confirm only the work-meeting branch references the work URL constant.
 
-    Uses AST enclosing-function detection — if a future refactor moves a
-    work URL into a calendar branch (`_send_calendar_nudges`, week_ahead,
-    etc.), this test fails loud."""
+    AST-walks the parent chain from each `_WORK_MEETING_NUDGE_URL` reference
+    to find the *innermost* enclosing FunctionDef. Robust against nested
+    functions, decorators, and method scopes — not just flat module-level
+    `def`s.
+    """
     import ast
     text = ENGINE_PATH.read_text(encoding="utf-8")
     tree = ast.parse(text)
 
-    def enclosing_func(target_line: int) -> str | None:
-        best: tuple[int, str] | None = None
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.lineno <= target_line and target_line <= (node.end_lineno or 0):
-                    if best is None or node.lineno > best[0]:
-                        best = (node.lineno, node.name)
-        return best[1] if best else None
+    for parent in ast.walk(tree):
+        for child in ast.iter_child_nodes(parent):
+            child.parent = parent  # type: ignore[attr-defined]
 
-    sites = [
-        i + 1
-        for i, ln in enumerate(text.splitlines())
-        if "url=_WORK_MEETING_NUDGE_URL" in ln
-    ]
-    assert sites, "expected at least one url=_WORK_MEETING_NUDGE_URL site"
-    for line_no in sites:
-        func = enclosing_func(line_no)
-        assert func == "_send_work_meeting_nudges", (
-            f"url=_WORK_MEETING_NUDGE_URL on line {line_no} is inside "
-            f"{func!r} — only _send_work_meeting_nudges may reference the "
-            f"work URL. Calendar branches must use _CALENDAR_NUDGE_URL."
+    def innermost_func(node: ast.AST) -> str | None:
+        cur = getattr(node, "parent", None)
+        while cur is not None:
+            if isinstance(cur, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return cur.name
+            cur = getattr(cur, "parent", None)
+        return None
+
+    sites: list[tuple[int, str | None]] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "_WORK_MEETING_NUDGE_URL":
+            # Skip the constant's own LHS assignment.
+            parent = getattr(node, "parent", None)
+            if (
+                isinstance(parent, ast.Assign)
+                and len(parent.targets) == 1
+                and parent.targets[0] is node
+            ):
+                continue
+            sites.append((node.lineno, innermost_func(node)))
+
+    assert sites, "expected at least one _WORK_MEETING_NUDGE_URL reference"
+    for line_no, func_name in sites:
+        assert func_name == "_send_work_meeting_nudges", (
+            f"_WORK_MEETING_NUDGE_URL referenced on line {line_no} from "
+            f"function {func_name!r} — only _send_work_meeting_nudges may "
+            f"reference the work URL. Calendar branches must use "
+            f"_CALENDAR_NUDGE_URL."
         )

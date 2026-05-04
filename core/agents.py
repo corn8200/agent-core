@@ -28,10 +28,10 @@ def _load_prompt(name: str) -> str:
 # --- Agent Definitions ---
 
 scout = AgentDefinition(
-    description="Research & intelligence specialist — deep web research, market analysis, company background, regulatory landscape, competitor scans. Uses WebSearch + WebFetch with Read/Grep/Write to surface facts, citations, and structured briefings. Pick over Turbo when a question needs multi-source synthesis. Read-only on local files (no Edit, no Bash). 20-turn budget, sonnet by default (escalates to opus on !opus or deep-dive keywords).",
+    description="Research & intelligence specialist — deep web research, market analysis, company background, regulatory landscape, competitor scans. Uses WebSearch + WebFetch + Playwright MCP with Read/Grep/Write to surface facts, citations, and structured briefings. Pick over Turbo when a question needs multi-source synthesis. Read-only on local files (no Edit, no Bash). 20-turn budget, sonnet by default (escalates to opus on !opus or deep-dive keywords).",
     prompt=_load_prompt("scout"),
     model="sonnet",
-    tools=["Read", "Grep", "Write", "WebSearch", "WebFetch"],
+    tools=["Read", "Grep", "Write", "WebSearch", "WebFetch", "mcp__playwright"],
     maxTurns=20,
     permissionMode="bypassPermissions",
     effort="max",
@@ -72,10 +72,10 @@ dispatch = AgentDefinition(
 )
 
 ledger = AgentDefinition(
-    description="Data & financial analysis specialist — budgets, spending reconciliation, CSV crunching, bill scanning, Monarch Money queries, transaction categorization. Uses Bash + Read/Write to run sqlite queries, build summary tables, and cross-reference Mail for upcoming bills. Pick when the answer is a number, table, or financial comparison. No web tools — local data only. 20-turn budget, sonnet.",
+    description="Data & financial analysis specialist — budgets, spending reconciliation, CSV crunching, bill scanning, Monarch Money queries, transaction categorization. Uses Bash + Read/Write plus Playwright MCP for browser auth flows to run sqlite queries, build summary tables, and cross-reference Mail for upcoming bills. Pick when the answer is a number, table, or financial comparison. 20-turn budget, sonnet.",
     prompt=_load_prompt("ledger"),
     model="sonnet",
-    tools=["Bash", "Read", "Write"],
+    tools=["Bash", "Read", "Write", "mcp__playwright"],
     maxTurns=20,
     permissionMode="bypassPermissions",
     effort="max",
@@ -94,10 +94,10 @@ toolsmith = AgentDefinition(
 )
 
 titan = AgentDefinition(
-    description="Maximum-firepower opus solver for genuinely hard problems — architectural decisions, multi-system debugging, deep research, complex refactors, end-to-end design work. Spawns parallel sub-agent swarms via the Agent tool, extended thinking, no token rationing. Full toolset: Read/Write/Edit/Grep/Glob/Bash/WebSearch/WebFetch/Agent/TodoWrite. Pick when the problem deserves the heaviest hammer; skip for quick lookups. 60-turn budget, xhigh effort.",
+    description="Maximum-firepower opus solver for genuinely hard problems — architectural decisions, multi-system debugging, deep research, complex refactors, end-to-end design work. Spawns parallel sub-agent swarms via the Agent tool, extended thinking, no token rationing. Full toolset: Read/Write/Edit/Grep/Glob/Bash/WebSearch/WebFetch/Playwright MCP/Agent/TodoWrite. Pick when the problem deserves the heaviest hammer; skip for quick lookups. 60-turn budget, xhigh effort.",
     prompt=_load_prompt("titan"),
     model="opus",
-    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "Agent", "TodoWrite"],
+    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "mcp__playwright", "Agent", "TodoWrite"],
     maxTurns=60,
     permissionMode="bypassPermissions",
     effort="xhigh",  # type: ignore[arg-type]  # xhigh added in CLI 2.1.112; SDK Literal not yet updated
@@ -105,10 +105,10 @@ titan = AgentDefinition(
 )
 
 anvil = AgentDefinition(
-    description="Code builder. Opus direct code lane — writes, refactors, and ships code. Worktree-first, test-driven, verifies its own diffs before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget.",
+    description="Code builder. Opus direct code lane — writes, refactors, and ships code. Worktree-first, test-driven, verifies its own diffs before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite plus Playwright MCP for UI/browser verification. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget.",
     prompt=_load_prompt("anvil"),
     model="opus",
-    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "TodoWrite"],
+    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "TodoWrite", "mcp__playwright"],
     maxTurns=40,
     permissionMode="bypassPermissions",
     effort="max",

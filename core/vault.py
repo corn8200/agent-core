@@ -303,24 +303,26 @@ def hydrate_claude_oauth() -> bool:
     this helper reads the active-account marker and exports the matching
     token file into os.environ.
 
-    Returns True if token was loaded (or already set), False otherwise.
-    Never overrides a token already in env. No-op if files are missing.
+    Returns True if the active account token is loaded. If the process still has
+    the other account's token from before a swap, replace it; stale env wins over
+    .credentials.json in Claude CLI and must not survive account swaps.
     """
-    if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"):
-        return True
     active_marker = Path.home() / ".claude" / ".active-account"
-    account = "icloud"  # matches shell-init's safe default
     try:
-        if active_marker.is_file():
-            account = active_marker.read_text().strip() or "icloud"
+        account = active_marker.read_text().strip()
     except Exception:
-        pass
+        account = ""
+    if account not in {"gmail", "icloud"}:
+        os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        return False
     token_file = Path.home() / ".config" / f"claude-oat01-{account}"
     try:
         if token_file.is_file():
             tok = token_file.read_text().strip()
             if tok:
-                os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+                if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") != tok:
+                    os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+                os.environ["CLAUDE_PANE_ACCOUNT"] = account
                 return True
     except Exception:
         pass

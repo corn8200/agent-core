@@ -604,7 +604,7 @@ async def run_nudges(dry_run: bool = False, force_tier: str | None = None, bypas
                     dry_run,
                     tier="week_ahead",
                     dedup_key=week_key,
-                    url=portal_url("/work"),
+                    url=_CALENDAR_NUDGE_URL,
                     url_title="Open week",
                 )
                 if sent:
@@ -642,7 +642,7 @@ async def run_nudges(dry_run: bool = False, force_tier: str | None = None, bypas
                 dry_run,
                 tier="day_before",
                 dedup_key=day_key,
-                url=portal_url("/work"),
+                url=_CALENDAR_NUDGE_URL,
                 url_title="Open tomorrow",
             )
             if sent:
@@ -690,7 +690,7 @@ async def run_nudges(dry_run: bool = False, force_tier: str | None = None, bypas
                 tier="morning_preview",
                 title=f"Today: {len(schedulable)} events",
                 dedup_key=morning_key,
-                url=portal_url("/work"),
+                url=_CALENDAR_NUDGE_URL,
                 url_title="Open today",
             )
             if sent:

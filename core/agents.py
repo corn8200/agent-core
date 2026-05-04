@@ -28,7 +28,7 @@ def _load_prompt(name: str) -> str:
 # --- Agent Definitions ---
 
 scout = AgentDefinition(
-    description="Research & intelligence specialist — deep web research, market analysis, company background, regulatory landscape, competitor scans. Uses WebSearch + WebFetch + Playwright/Chrome DevTools MCP with Read/Grep/Write to surface facts, citations, and structured briefings. Pick over Turbo when a question needs multi-source synthesis. Read-only on local files (no Edit, no Bash). 20-turn budget, sonnet by default (escalates to opus on !opus or deep-dive keywords).",
+    description="Research & intelligence specialist — deep web research, market analysis, company background, regulatory landscape, competitor scans. Uses WebSearch + WebFetch + Playwright WebKit/Chrome/Firefox and Chrome DevTools MCP with Read/Grep/Write to surface facts, citations, and structured briefings. Pick over Turbo when a question needs multi-source synthesis. Read-only on local files (no Edit, no Bash). 20-turn budget, sonnet by default (escalates to opus on !opus or deep-dive keywords).",
     prompt=_load_prompt("scout"),
     model="sonnet",
     tools=[
@@ -39,6 +39,7 @@ scout = AgentDefinition(
         "WebFetch",
         "mcp__playwright",
         "mcp__playwrightChrome",
+        "mcp__playwrightFirefox",
         "mcp__chrome-devtools",
     ],
     maxTurns=20,
@@ -81,7 +82,7 @@ dispatch = AgentDefinition(
 )
 
 ledger = AgentDefinition(
-    description="Data & financial analysis specialist — budgets, spending reconciliation, CSV crunching, bill scanning, Monarch Money queries, transaction categorization. Uses Bash + Read/Write plus Playwright/Chrome DevTools MCP for browser auth flows to run sqlite queries, build summary tables, and cross-reference Mail for upcoming bills. Pick when the answer is a number, table, or financial comparison. 20-turn budget, sonnet.",
+    description="Data & financial analysis specialist — budgets, spending reconciliation, CSV crunching, bill scanning, Monarch Money queries, transaction categorization. Uses Bash + Read/Write plus Playwright WebKit/Chrome/Firefox and Chrome DevTools MCP for browser auth flows to run sqlite queries, build summary tables, and cross-reference Mail for upcoming bills. Pick when the answer is a number, table, or financial comparison. 20-turn budget, sonnet.",
     prompt=_load_prompt("ledger"),
     model="sonnet",
     tools=[
@@ -90,6 +91,7 @@ ledger = AgentDefinition(
         "Write",
         "mcp__playwright",
         "mcp__playwrightChrome",
+        "mcp__playwrightFirefox",
         "mcp__chrome-devtools",
     ],
     maxTurns=20,
@@ -110,7 +112,7 @@ toolsmith = AgentDefinition(
 )
 
 titan = AgentDefinition(
-    description="Maximum-firepower opus solver for genuinely hard problems — architectural decisions, multi-system debugging, deep research, complex refactors, end-to-end design work. Spawns parallel sub-agent swarms via the Agent tool, extended thinking, no token rationing. Full toolset: Read/Write/Edit/Grep/Glob/Bash/WebSearch/WebFetch/Playwright/Chrome DevTools MCP/Agent/TodoWrite. Pick when the problem deserves the heaviest hammer; skip for quick lookups. 60-turn budget, xhigh effort.",
+    description="Maximum-firepower opus solver for genuinely hard problems — architectural decisions, multi-system debugging, deep research, complex refactors, end-to-end design work. Spawns parallel sub-agent swarms via the Agent tool, extended thinking, no token rationing. Full toolset: Read/Write/Edit/Grep/Glob/Bash/WebSearch/WebFetch/Playwright WebKit/Chrome/Firefox/Chrome DevTools MCP/Agent/TodoWrite. Pick when the problem deserves the heaviest hammer; skip for quick lookups. 60-turn budget, xhigh effort.",
     prompt=_load_prompt("titan"),
     model="opus",
     tools=[
@@ -124,6 +126,7 @@ titan = AgentDefinition(
         "WebFetch",
         "mcp__playwright",
         "mcp__playwrightChrome",
+        "mcp__playwrightFirefox",
         "mcp__chrome-devtools",
         "Agent",
         "TodoWrite",
@@ -135,7 +138,7 @@ titan = AgentDefinition(
 )
 
 anvil = AgentDefinition(
-    description="Code builder. Opus direct code lane — writes, refactors, and ships code. Worktree-first, test-driven, verifies its own diffs before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite plus Playwright/Chrome DevTools MCP for UI/browser verification. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget.",
+    description="Code builder. Opus direct code lane — writes, refactors, and ships code. Worktree-first, test-driven, verifies its own diffs before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite plus Playwright WebKit/Chrome/Firefox and Chrome DevTools MCP for UI/browser verification. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget.",
     prompt=_load_prompt("anvil"),
     model="opus",
     tools=[
@@ -148,6 +151,7 @@ anvil = AgentDefinition(
         "TodoWrite",
         "mcp__playwright",
         "mcp__playwrightChrome",
+        "mcp__playwrightFirefox",
         "mcp__chrome-devtools",
     ],
     maxTurns=40,

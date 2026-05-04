@@ -33,6 +33,16 @@ CP_AGENT = "nudge-engine"
 
 from core.interactive_links import portal_url
 
+# Nudge URL routing. Apple-Reminders work-meeting branch links to /work;
+# every other branch (calendar events, week/day/morning summaries) links to
+# /home. Calendar events come from many calendars (Family, Personal, Work);
+# /work is wrong for non-work events. The structural guard for this routing
+# lives in tests/test_nudge_url_routing.py.
+_WORK_MEETING_NUDGE_URL = portal_url("/work")
+_WORK_MEETING_NUDGE_URL_TITLE = "Open work"
+_CALENDAR_NUDGE_URL = portal_url("/home")
+_CALENDAR_NUDGE_URL_TITLE = "Open cockpit"
+
 
 @dataclass(frozen=True)
 class NudgeProfile:
@@ -275,8 +285,8 @@ async def _send_work_meeting_nudges(work_ctx: dict, now: datetime, dry_run: bool
                 dry_run,
                 tier="fifteen_min",
                 title=_meeting_title(f"{int(minutes_away)} min", meeting_name),
-                url=portal_url("/work"),
-                url_title="Open work",
+                url=_WORK_MEETING_NUDGE_URL,
+                url_title=_WORK_MEETING_NUDGE_URL_TITLE,
             )
             if sent:
                 log_nudge(uid, meeting_name, due_dt.isoformat(), "fifteen_min", msg)
@@ -288,8 +298,8 @@ async def _send_work_meeting_nudges(work_ctx: dict, now: datetime, dry_run: bool
                 dry_run,
                 tier="five_min",
                 title=_meeting_title("5 min", meeting_name),
-                url=portal_url("/work"),
-                url_title="Open work",
+                url=_WORK_MEETING_NUDGE_URL,
+                url_title=_WORK_MEETING_NUDGE_URL_TITLE,
             )
             if sent:
                 log_nudge(uid, meeting_name, due_dt.isoformat(), "five_min", msg)
@@ -709,8 +719,8 @@ async def run_nudges(dry_run: bool = False, force_tier: str | None = None, bypas
                     dry_run,
                     tier="fifteen_min",
                     title=_meeting_title(f"{int(minutes_away)} min", event.summary),
-                    url=portal_url("/work"),
-                    url_title="Open work",
+                    url=_CALENDAR_NUDGE_URL,
+                    url_title=_CALENDAR_NUDGE_URL_TITLE,
                 )
                 if sent:
                     log_nudge(uid, event.summary, event.start.isoformat(), "fifteen_min", msg)
@@ -727,8 +737,8 @@ async def run_nudges(dry_run: bool = False, force_tier: str | None = None, bypas
                         dry_run,
                         tier="five_min",
                         title=_meeting_title("5 min", event.summary),
-                        url=portal_url("/work"),
-                        url_title="Open work",
+                        url=_CALENDAR_NUDGE_URL,
+                        url_title=_CALENDAR_NUDGE_URL_TITLE,
                     )
                     if sent:
                         log_nudge(uid, event.summary, event.start.isoformat(), "five_min", msg)

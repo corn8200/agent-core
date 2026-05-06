@@ -225,7 +225,7 @@ async def _run() -> None:
         if not snippet:
             snippet = [f"[Them] {preview}"]
 
-        result = classify_thread(from_handle, snippet)
+        result = await classify_thread(from_handle, snippet)
         classified += 1
         category = result["category"]
         urgency = result["urgency"]

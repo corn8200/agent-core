@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -16,7 +17,7 @@ from core.imessage_triage.classify import (
     _parse_response,
     classify_thread,
 )
-from core.imessage_triage.publish import should_publish
+from core.imessage_triage.publish import should_publish, is_test_handle
 from core.imessage_triage.poll import _group_by_thread
 
 
@@ -79,47 +80,86 @@ def test_parse_response_urgency_clamped_to_range():
     assert high["urgency"] == 10
 
 
-def test_classify_thread_uses_haiku_call(monkeypatch):
-    calls = []
+def _make_fake_query(response_json: str):
+    """Build an async generator that yields a fake AssistantMessage."""
+    from core.mac_sdk import AssistantMessage, TextBlock
 
-    def fake_call_haiku(prompt, *, api_key):
-        calls.append(prompt)
-        return '{"category": "action_me", "urgency": 8}'
+    async def _fake_query(prompt, options=None, **kwargs):
+        msg = MagicMock(spec=AssistantMessage)
+        block = MagicMock(spec=TextBlock)
+        block.text = response_json
+        msg.content = [block]
+        yield msg
 
-    monkeypatch.setattr("core.imessage_triage.classify._call_haiku", fake_call_haiku)
-    # Pass the key directly so _api_key() vault lookup is bypassed
-    result = classify_thread(
-        "+15555550100", ["[Them] Need you to sign the document"],
-        api_key="sk-test-key",
-    )
+    return _fake_query
+
+
+def test_classify_thread_uses_mac_sdk(monkeypatch):
+    fake = _make_fake_query('{"category": "action_me", "urgency": 8}')
+    monkeypatch.setattr("core.imessage_triage.classify.query", fake)
+
+    result = asyncio.run(classify_thread("+15551234567", ["[Them] Need you to sign the document"]))
     assert result["category"] == "action_me"
     assert result["urgency"] == 8
-    assert calls, "expected haiku to be called"
-    assert "+15555550100" in calls[0]
-
-
-def test_classify_thread_no_key_returns_noise():
-    with patch("core.imessage_triage.classify._api_key", return_value=""):
-        result = classify_thread("+15555550100", ["[Them] Test"])
-    assert result["category"] == "noise"
-    assert result["urgency"] == 1
 
 
 def test_classify_thread_api_error_calls_doctor_and_returns_noise(monkeypatch):
-    def boom(prompt, *, api_key):
-        raise Exception("API 400")
+    async def boom(prompt, options=None, **kwargs):
+        raise Exception("SDK 500")
+        yield  # make it an async generator
 
-    monkeypatch.setattr("core.imessage_triage.classify._call_haiku", boom)
+    monkeypatch.setattr("core.imessage_triage.classify.query", boom)
     doctor_calls = []
     monkeypatch.setattr(
         "core.imessage_triage.classify.doctor_escalate",
         lambda **kw: doctor_calls.append(kw),
     )
-    result = classify_thread("+15555550100", ["[Them] Test"], api_key="dummy-key")
+    result = asyncio.run(classify_thread("+15551234567", ["[Them] Test"]))
     assert result["category"] == "noise"
     assert result["urgency"] == 1
-    assert doctor_calls, "expected doctor_escalate to be called on API failure"
+    assert doctor_calls, "expected doctor_escalate to be called on SDK failure"
     assert doctor_calls[0]["watcher"] == "imessage-triage"
+
+
+def test_classify_thread_quota_exceeded_returns_noise(monkeypatch):
+    from core.mac_sdk import SDKQuotaExceeded
+
+    async def quota_boom(prompt, options=None, **kwargs):
+        raise SDKQuotaExceeded("50/hr hit")
+        yield
+
+    monkeypatch.setattr("core.imessage_triage.classify.query", quota_boom)
+    result = asyncio.run(classify_thread("+15551234567", ["[Them] Test"]))
+    assert result["category"] == "noise"
+    assert result["urgency"] == 1
+
+
+# ---------------------------------------------------------------------------
+# publish.py — test-data filter
+# ---------------------------------------------------------------------------
+
+
+def test_is_test_handle_positive():
+    assert is_test_handle("+15555550100") is True
+    assert is_test_handle("+15559990100") is True
+
+
+def test_is_test_handle_negative():
+    assert is_test_handle("+13045551234") is False
+    assert is_test_handle("user@icloud.com") is False
+    assert is_test_handle("+44555123456") is False
+
+
+def test_publish_rejects_test_handle():
+    from core.imessage_triage.publish import publish_imessage_triage
+    result = publish_imessage_triage(
+        chat_db_msg_id=999,
+        category="action_me",
+        urgency=8,
+        from_handle="+15555550100",
+        preview="test",
+    )
+    assert result is False
 
 
 # ---------------------------------------------------------------------------

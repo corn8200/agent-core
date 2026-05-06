@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,9 +19,16 @@ def _publish_url() -> str:
 # Only these categories warrant a cockpit item (per spec)
 _PUBLISH_CATEGORIES = frozenset({"action_me", "scheduling"})
 
+# NANPA 555-01xx numbers are reserved for fictional/test use — never a real sender.
+_TEST_HANDLE_RE = re.compile(r"^\+1555\d{7}$")
+
 
 def should_publish(category: str) -> bool:
     return category in _PUBLISH_CATEGORIES
+
+
+def is_test_handle(from_handle: str) -> bool:
+    return bool(_TEST_HANDLE_RE.match(from_handle))
 
 
 def publish_imessage_triage(
@@ -37,6 +45,9 @@ def publish_imessage_triage(
 
     Silently returns False on any network/API error — never crashes the caller.
     """
+    if is_test_handle(from_handle):
+        print(f"[publish] skipping test/placeholder handle {from_handle}", flush=True)
+        return False
     if not should_publish(category):
         return False
     if dry_run:

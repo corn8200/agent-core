@@ -38,6 +38,7 @@ Channel = Literal["imessage", "email_personal", "email_business", "email_raw"]
 ALLOWED_SELF = {
     "corn82@icloud.com",
     "corn82@gmail.com",
+    "corn82@outlook.com",
     "13042684985",
     "3042684985",
     # Business GV — biz inbound only but John owns it, so self-send is fine.
@@ -101,6 +102,34 @@ async def _send_preview_imessage(text: str) -> None:
     # directly. _approved=True is redundant defense in case ALLOWED_SELF
     # is ever narrowed.
     await send_imessage_reliable(PREVIEW_RECIPIENT, text, _approved=True)
+
+
+async def _send_preview_pushover(record: dict) -> None:
+    """Send a one-way wake-up with a Mac pane action for local outbox review."""
+    try:
+        from core.interactive_links import alert_action_url
+        from core.pushover import send_pushover
+    except Exception:
+        return
+
+    uid = record["uuid"]
+    title = "Outbox approval queued"
+    recipient = record.get("recipient") or ""
+    subject = record.get("subject") or record.get("channel") or ""
+    message = f"{record.get('channel')} -> {recipient}\n{subject}\nAPPROVE:{uid} or DENY:{uid}"
+    url = alert_action_url(
+        source="outbox",
+        title=title,
+        message=f"Review local outbox pending record {uid}: {recipient} {subject}",
+        severity="approval",
+    )
+    await send_pushover(
+        title=title,
+        message=message,
+        priority=0,
+        url=url,
+        url_title="Send to Mac panel 3",
+    )
 
 
 def _write_pending(record: dict) -> Path:
@@ -180,6 +209,10 @@ async def queue_or_send(
         # Keep the pending record even if preview delivery failed — John can
         # still find it on disk. Log and return queued status.
         print(f"[outbox] preview delivery failed for {uid}: {e}", flush=True)
+    try:
+        await _send_preview_pushover(record)
+    except Exception as e:
+        print(f"[outbox] pushover preview failed for {uid}: {e}", flush=True)
     return {"status": "queued", "uuid": uid}
 
 

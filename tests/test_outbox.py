@@ -61,6 +61,7 @@ def test_is_self_matches_icloud():
     assert ob._is_self("corn82@icloud.com")
     assert ob._is_self("CORN82@icloud.com")
     assert ob._is_self("  corn82@icloud.com  ")
+    assert ob._is_self("corn82@outlook.com")
 
 
 def test_is_self_matches_phone_formats():

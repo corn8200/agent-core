@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Calendar nudge engine — proactive iMessage alerts for upcoming events.
+"""Calendar nudge engine — proactive Pushover alerts for upcoming events.
 
 Runs every 5 min via LaunchAgent. Pure Python — zero LLM tokens.
 Nudge tiers: week_ahead, day_before, morning_preview, fifteen_min, five_min.
@@ -13,9 +13,11 @@ Usage:
 
 import argparse
 import asyncio
+import hashlib
 import os
 import sqlite3
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -23,10 +25,65 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from core.calendar_service import get_events, get_week_view, SKIP_CALENDARS
 from core.constants import PERSONAL_EMAIL
+from core.work_context import refresh as refresh_work_context
 from home_ops.gather import gather_reminders
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))
 import agent_cp_client as cp  # noqa: E402
 CP_AGENT = "nudge-engine"
+
+from core.interactive_links import portal_url
+
+# Nudge URL routing. Apple-Reminders work-meeting branch links to /work;
+# every other branch (calendar events, week/day/morning summaries) links to
+# /home. Calendar events come from many calendars (Family, Personal, Work);
+# /work is wrong for non-work events. The structural guard for this routing
+# lives in tests/test_nudge_url_routing.py.
+_WORK_MEETING_NUDGE_URL = portal_url("/work")
+_WORK_MEETING_NUDGE_URL_TITLE = "Open work"
+_CALENDAR_NUDGE_URL = portal_url("/home")
+_CALENDAR_NUDGE_URL_TITLE = "Open cockpit"
+
+
+@dataclass(frozen=True)
+class NudgeProfile:
+    title: str
+    priority: int = 0
+    sound: str = "pushover"
+
+
+NUDGE_PROFILES = {
+    "week_ahead": NudgeProfile("Week ahead", priority=0, sound="intermission"),
+    "day_before": NudgeProfile("Tomorrow prep", priority=1, sound="vibrate"),
+    "morning_preview": NudgeProfile("Today preview", priority=1, sound="vibrate"),
+    "fifteen_min": NudgeProfile("Meeting soon", priority=1, sound="vibrate"),
+    "five_min": NudgeProfile("Meeting now", priority=1, sound="persistent"),
+}
+
+STACK_FIRST_TIERS = {"week_ahead", "day_before", "morning_preview"}
+PUSH_ONLY_TIERS = {"fifteen_min", "five_min"}
+STACK_VERBS = ("SNOOZE", "ACK", "OPEN", "KILL")
+
+
+def _clip(value: str, limit: int) -> str:
+    value = (value or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 3)].rstrip() + "..."
+
+
+def _profile(tier: str, *, title: str | None = None) -> NudgeProfile:
+    base = NUDGE_PROFILES.get(tier, NudgeProfile("Nudge"))
+    if title:
+        return NudgeProfile(_clip(title, 80), priority=base.priority, sound=base.sound)
+    return base
+
+
+def _pushover_device() -> str | None:
+    """Default nudges to the iPhone so they mirror to Watch instead of desktop-only."""
+    device = os.environ.get("NUDGE_PUSHOVER_DEVICE", "iPhone").strip()
+    if not device or device.casefold() in {"all", "*", "none"}:
+        return None
+    return device
 
 
 def _reminder_lines(reminders: dict, include_week: bool = False) -> list[str]:
@@ -53,6 +110,199 @@ def _reminder_lines(reminders: dict, include_week: bool = False) -> list[str]:
         if name:
             out.append(f"  • {name[:60]}")
     return out
+
+
+def _parse_iso_dt(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone().replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+def _strip_work_prefix(name: str) -> str:
+    cleaned = (name or "").strip()
+    for prefix in ("📅", "🗓", "🔴", "🟠", "🟡"):
+        if cleaned.startswith(prefix):
+            cleaned = cleaned[len(prefix):].strip()
+    return cleaned.lstrip("-— ").strip() or name
+
+
+def _work_item_due_dt(item: dict) -> datetime | None:
+    return _parse_iso_dt(item.get("due") if isinstance(item, dict) else None)
+
+
+def _work_items_for_date(items: list[dict], target_date, *, include_overdue: bool = False) -> list[dict]:
+    out = []
+    for item in items or []:
+        due_dt = _work_item_due_dt(item)
+        bucket = item.get("due_bucket")
+        if include_overdue and bucket == "overdue":
+            out.append(item)
+        elif due_dt and due_dt.date() == target_date:
+            out.append(item)
+    out.sort(key=lambda x: (_work_item_due_dt(x) or datetime.max, x.get("name", "")))
+    return out
+
+
+def _work_context_lines(
+    work_ctx: dict,
+    *,
+    target_date=None,
+    include_week: bool = False,
+    include_overdue: bool = False,
+    limit: int = 6,
+) -> list[str]:
+    """Format concise Work calendar/reminder signal for previews."""
+    if not work_ctx:
+        return []
+
+    lines: list[str] = []
+    entries: list[str] = []
+    calendar_ctx = work_ctx.get("calendar") or {}
+    events = calendar_ctx.get("events") or calendar_ctx.get("upcoming") or []
+    for event in events:
+        if event.get("status") == "past":
+            continue
+        start = _parse_iso_dt(event.get("start"))
+        if not start:
+            continue
+        if target_date and start.date() != target_date:
+            continue
+        if include_week and event.get("bucket") not in {"today", "tomorrow", "this_week"}:
+            continue
+        entries.append(f"{event.get('time') or start.strftime('%-I:%M %p')} - {event.get('summary')}")
+
+    work = work_ctx.get("work") or {}
+    meeting_items = work.get("meeting_reminders") or []
+    priority_items = work.get("priority_reminders") or []
+    if target_date:
+        selected_meetings = _work_items_for_date(meeting_items, target_date, include_overdue=False)
+        selected_priority = _work_items_for_date(priority_items, target_date, include_overdue=include_overdue)
+    elif include_week:
+        selected_meetings = [
+            item for item in meeting_items
+            if item.get("due_bucket") in {"overdue", "today", "tomorrow", "this_week"}
+        ]
+        selected_priority = [
+            item for item in priority_items
+            if item.get("due_bucket") in {"overdue", "today", "tomorrow", "this_week", "undated"}
+        ]
+    else:
+        selected_meetings = []
+        selected_priority = []
+
+    for item in selected_meetings:
+        due_dt = _work_item_due_dt(item)
+        when = due_dt.strftime("%-I:%M %p") if due_dt else "Work"
+        entries.append(f"{when} - {_strip_work_prefix(item.get('name', ''))}")
+    for item in selected_priority:
+        marker = item.get("priority_marker") or "P"
+        entries.append(f"{marker} - {_strip_work_prefix(item.get('name', ''))}")
+
+    deduped = []
+    seen = set()
+    for entry in entries:
+        if not entry or entry in seen:
+            continue
+        seen.add(entry)
+        deduped.append(entry)
+
+    if deduped:
+        lines.append("Work:")
+        lines.extend(f"  {entry[:90]}" for entry in deduped[:limit])
+    return lines
+
+
+def _has_upcoming_work_meeting(work_ctx: dict, now: datetime, minutes: int = 60) -> bool:
+    for item in ((work_ctx.get("work") or {}).get("meeting_reminders") or []):
+        due_dt = _work_item_due_dt(item)
+        if not due_dt:
+            continue
+        delta_min = (due_dt - now).total_seconds() / 60
+        if 0 <= delta_min <= minutes:
+            return True
+    return False
+
+
+def _nudge_uid(event) -> str:
+    """Stable per occurrence. Calendar UIDs alone can collapse recurring events."""
+    base = event.uid or event.summary
+    return f"{base}|{event.start.isoformat()}"
+
+
+def _meeting_title(prefix: str, summary: str) -> str:
+    return _clip(f"{prefix}: {summary}", 80)
+
+
+def _format_calendar_nudge(event, minutes_away: float) -> str:
+    lines = [
+        f"{event.start.strftime('%-I:%M %p')} - {event.summary}",
+        f"Calendar: {event.calendar}",
+    ]
+    if event.location:
+        lines.append(f"Where: {event.location}")
+    if event.notes:
+        lines.append(f"Notes: {event.notes[:240]}")
+    hint = _nudge_recall(event.summary)
+    if hint:
+        lines.append(hint)
+    if minutes_away <= 5:
+        lines.append("Move now.")
+    return "\n".join(lines)
+
+
+def _format_work_reminder_nudge(item: dict, due_dt: datetime, minutes_away: float) -> str:
+    title = _strip_work_prefix(item.get("name", "Work meeting"))
+    lines = [
+        f"{due_dt.strftime('%-I:%M %p')} - {title}",
+        "Source: Work reminders",
+    ]
+    notes = (item.get("notes") or "").strip()
+    if notes:
+        lines.append(f"Notes: {notes[:240]}")
+    if minutes_away <= 5:
+        lines.append("Move now.")
+    return "\n".join(lines)
+
+
+async def _send_work_meeting_nudges(work_ctx: dict, now: datetime, dry_run: bool = False):
+    for item in ((work_ctx.get("work") or {}).get("meeting_reminders") or []):
+        due_dt = _work_item_due_dt(item)
+        if not due_dt:
+            continue
+        minutes_away = (due_dt - now).total_seconds() / 60
+        uid_base = item.get("fingerprint") or item.get("id") or item.get("name")
+        uid = f"work-reminder|{uid_base}|{due_dt.isoformat()}"
+        meeting_name = _strip_work_prefix(item.get("name", "Work meeting"))
+
+        if 10 <= minutes_away <= 15 and not already_sent(uid, "fifteen_min"):
+            msg = _format_work_reminder_nudge(item, due_dt, minutes_away)
+            print(f"[nudge] work fifteen_min: {msg[:100]}")
+            sent = await _send_nudge(
+                msg,
+                dry_run,
+                tier="fifteen_min",
+                title=_meeting_title(f"{int(minutes_away)} min", meeting_name),
+                url=_WORK_MEETING_NUDGE_URL,
+                url_title=_WORK_MEETING_NUDGE_URL_TITLE,
+            )
+            if sent:
+                log_nudge(uid, meeting_name, due_dt.isoformat(), "fifteen_min", msg)
+        elif 2 <= minutes_away <= 5 and not already_sent(uid, "five_min"):
+            msg = _format_work_reminder_nudge(item, due_dt, minutes_away)
+            print(f"[nudge] work five_min: {msg[:100]}")
+            sent = await _send_nudge(
+                msg,
+                dry_run,
+                tier="five_min",
+                title=_meeting_title("5 min", meeting_name),
+                url=_WORK_MEETING_NUDGE_URL,
+                url_title=_WORK_MEETING_NUDGE_URL_TITLE,
+            )
+            if sent:
+                log_nudge(uid, meeting_name, due_dt.isoformat(), "five_min", msg)
 
 NUDGE_DB = Path.home() / "logs" / "nudge-state.db"
 
@@ -135,13 +385,142 @@ def _nudge_recall(event_title: str) -> str:
     return f"Prior: {content[:120]}"
 
 
-async def _send_nudge(message: str, dry_run: bool = False):
-    """Send via message bus or just print in dry-run mode."""
-    if dry_run:
-        print(f"  [DRY RUN] Would send: {message[:200]}")
-        return
+async def _send_pushover_notification(
+    *,
+    title: str,
+    message: str,
+    priority: int,
+    sound: str,
+    url: str | None = None,
+    url_title: str | None = None,
+):
+    from core.pushover import send_pushover
+    return await send_pushover(
+        title=title,
+        message=message,
+        priority=priority,
+        sound=sound,
+        url=url,
+        url_title=url_title,
+        device=_pushover_device(),
+        timestamp=int(datetime.now().timestamp()),
+    )
+
+
+async def _send_imessage_fallback(title: str, message: str):
     from core.message_bus import send_message
-    await send_message(message, agent="nudge", tier="normal", attribution=True)
+    return await send_message(f"{title}\n{message}", agent="nudge", tier="normal", attribution=True)
+
+
+def _publish_stack_item(
+    *,
+    title: str,
+    message: str,
+    tier: str,
+    priority: int,
+    dedup_key: str,
+    url: str | None = None,
+    url_title: str | None = None,
+) -> bool:
+    payload = {
+        "title": title,
+        "message": message,
+        "body": message,
+        "kind": "nudge",
+        "tier": tier,
+        "priority": priority,
+        "dedup_key": dedup_key,
+        "verbs": STACK_VERBS,
+        "sources": ("ui",),
+    }
+    if url:
+        payload["url"] = url
+    if url_title:
+        payload["url_title"] = url_title
+    try:
+        return cp.event(CP_AGENT, "nudge", payload=payload) is not None
+    except Exception as exc:
+        print(f"[nudge] stack publish failed: {exc}", file=sys.stderr)
+        return False
+
+
+def _stack_dedup_key(tier: str, message: str) -> str:
+    digest = hashlib.sha256(message.encode("utf-8")).hexdigest()[:16]
+    return f"nudge:{tier}:{digest}"
+
+
+async def _send_nudge(
+    message: str,
+    dry_run: bool = False,
+    *,
+    tier: str = "normal",
+    title: str | None = None,
+    priority: int | None = None,
+    sound: str | None = None,
+    url: str | None = None,
+    url_title: str | None = None,
+    dedup_key: str | None = None,
+):
+    """Send nudge through the tier's preferred non-LLM delivery path."""
+    prof = _profile(tier, title=title)
+    push_title = prof.title
+    push_priority = prof.priority if priority is None else priority
+    push_sound = sound or prof.sound
+    delivery = os.environ.get("NUDGE_DELIVERY", "").strip().casefold()
+    effective_delivery = delivery or ("stack" if tier in STACK_FIRST_TIERS else "pushover")
+    stack_first = tier in STACK_FIRST_TIERS and delivery not in {"pushover", "imessage", "both"}
+    push_only = tier in PUSH_ONLY_TIERS
+
+    if dry_run:
+        print(
+            "  [DRY RUN] Would send "
+            f"delivery={effective_delivery} title={push_title!r} "
+            f"priority={push_priority} sound={push_sound!r} "
+            f"url={url or ''!r}: {message[:240]}"
+        )
+        return False
+
+    if stack_first:
+        if _publish_stack_item(
+            title=push_title,
+            message=message,
+            tier=tier,
+            priority=push_priority,
+            dedup_key=dedup_key or _stack_dedup_key(tier, message),
+            url=url,
+            url_title=url_title,
+        ):
+            print("[nudge] stack delivery: published")
+            return True
+        print("[nudge] stack delivery failed; trying pushover", file=sys.stderr)
+
+    if delivery == "imessage" and not push_only:
+        ok, result = await _send_imessage_fallback(push_title, message)
+        print(f"[nudge] imessage delivery: {result}")
+        return ok
+
+    push = await _send_pushover_notification(
+        title=push_title,
+        message=message,
+        priority=push_priority,
+        sound=push_sound,
+        url=url,
+        url_title=url_title,
+    )
+    if push.ok:
+        print(f"[nudge] pushover delivery: {push.detail}")
+        if delivery == "both" and not push_only:
+            ok, result = await _send_imessage_fallback(push_title, message)
+            print(f"[nudge] imessage mirror: {result}")
+            return True
+        return True
+
+    print(f"[nudge] pushover failed: {push.detail}", file=sys.stderr)
+    if push_only:
+        return False
+    ok, result = await _send_imessage_fallback(push_title, message)
+    print(f"[nudge] imessage fallback: {result}")
+    return ok
 
 
 def _in_any_active_window(now: datetime, *, upcoming_events: bool = False) -> bool:
@@ -183,16 +562,24 @@ async def _has_upcoming_events(now: datetime) -> bool:
     return any(not _should_skip(e) for e in events)
 
 
-async def run_nudges(dry_run: bool = False):
+async def run_nudges(dry_run: bool = False, force_tier: str | None = None, bypass_window: bool = False):
     now = datetime.now()
     hour = now.hour
+    work_ctx = {}
+
+    try:
+        work_ctx = await refresh_work_context()
+        print(f"[nudge] work-context refreshed: {work_ctx.get('summary', {})}")
+    except Exception as e:
+        print(f"[nudge] work-context refresh failed: {e}", file=sys.stderr)
 
     # Top-of-loop gate: if no tier is in an active window AND no event is
     # imminent, skip all gather_* calls. This is the single biggest lever
     # for the 3800+ no-op fires/day.
-    if not _in_any_active_window(now):
+    if not bypass_window and not _in_any_active_window(now):
         has_events = await _has_upcoming_events(now)
-        if not has_events:
+        has_work_meeting = _has_upcoming_work_meeting(work_ctx, now)
+        if not has_events and not has_work_meeting:
             print(f"[nudge] outside active window, skipping")
             return
 
@@ -209,10 +596,19 @@ async def run_nudges(dry_run: bool = False):
                         parts.append(f"  {ke['day']} {ke['time']} — {ke['summary']}")
                 reminders = await gather_reminders()
                 parts.extend(_reminder_lines(reminders, include_week=True))
+                parts.extend(_work_context_lines(work_ctx, include_week=True))
                 msg = "\n".join(parts)
                 print(f"[nudge] week_ahead: {msg[:100]}")
-                await _send_nudge(msg, dry_run)
-                log_nudge(week_key, "week_ahead", now.isoformat(), "week_ahead", msg)
+                sent = await _send_nudge(
+                    msg,
+                    dry_run,
+                    tier="week_ahead",
+                    dedup_key=week_key,
+                    url=_CALENDAR_NUDGE_URL,
+                    url_title="Open week",
+                )
+                if sent:
+                    log_nudge(week_key, "week_ahead", now.isoformat(), "week_ahead", msg)
 
     # --- Day-before (6-8 PM) ---
     if 18 <= hour <= 20:
@@ -227,19 +623,33 @@ async def run_nudges(dry_run: bool = False):
         has_reminder_signal = bool(
             reminders and (reminders.get("overdue") or reminders.get("today"))
         )
+        work_lines = _work_context_lines(
+            work_ctx,
+            target_date=tomorrow,
+            include_overdue=True,
+        )
         # Fire if there are events OR any overdue/today reminders to surface
-        if (schedulable or has_reminder_signal) and not already_sent(day_key, "day_before"):
+        if (schedulable or has_reminder_signal or work_lines) and not already_sent(day_key, "day_before"):
             parts = [f"Tomorrow ({tomorrow.strftime('%A')}): {len(schedulable)} events"]
             for e in schedulable[:8]:
                 parts.append(f"  {e.start.strftime('%-I:%M %p')} — {e.summary}")
             parts.extend(_reminder_lines(reminders, include_week=False))
+            parts.extend(work_lines)
             msg = "\n".join(parts)
             print(f"[nudge] day_before: {msg[:100]}")
-            await _send_nudge(msg, dry_run)
-            log_nudge(day_key, "day_before", tomorrow.isoformat(), "day_before", msg)
+            sent = await _send_nudge(
+                msg,
+                dry_run,
+                tier="day_before",
+                dedup_key=day_key,
+                url=_CALENDAR_NUDGE_URL,
+                url_title="Open tomorrow",
+            )
+            if sent:
+                log_nudge(day_key, "day_before", tomorrow.isoformat(), "day_before", msg)
 
-    # --- Morning preview (7-8 AM) ---
-    if 7 <= hour <= 8:
+    # --- Morning preview (7-8 AM, or forced) ---
+    if (7 <= hour <= 8) or force_tier == "morning_preview":
         today = now.date()
         today_start = datetime.combine(today, datetime.min.time()).replace(hour=0)
         today_end = datetime.combine(today, datetime.min.time()).replace(hour=23, minute=59)
@@ -247,7 +657,7 @@ async def run_nudges(dry_run: bool = False):
         schedulable = [e for e in events if not _should_skip(e)]
 
         morning_key = f"morning-{today.isoformat()}"
-        if not already_sent(morning_key, "morning_preview"):
+        if force_tier == "morning_preview" or not already_sent(morning_key, "morning_preview"):
             from core.calendar_service import _compute_free_slots, get_schedule_view
             view = await get_schedule_view()
 
@@ -266,16 +676,31 @@ async def run_nudges(dry_run: bool = False):
                 due_today = len(view.reminders.get("today", []))
                 if overdue or due_today:
                     parts.append(f"Reminders: {overdue} overdue, {due_today} due today")
+            parts.extend(_work_context_lines(
+                work_ctx,
+                target_date=today,
+                include_overdue=True,
+            ))
 
             msg = "\n".join(parts)
             print(f"[nudge] morning_preview: {msg[:100]}")
-            await _send_nudge(msg, dry_run)
-            log_nudge(morning_key, "morning_preview", today.isoformat(), "morning_preview", msg)
+            sent = await _send_nudge(
+                msg,
+                dry_run,
+                tier="morning_preview",
+                title=f"Today: {len(schedulable)} events",
+                dedup_key=morning_key,
+                url=_CALENDAR_NUDGE_URL,
+                url_title="Open today",
+            )
+            if sent:
+                log_nudge(morning_key, "morning_preview", today.isoformat(), "morning_preview", msg)
 
     # --- 15-min and 5-min event nudges ---
     window_start = now
     window_end = now + timedelta(minutes=20)
     events = await get_events(window_start, window_end)
+    await _send_work_meeting_nudges(work_ctx, now, dry_run)
 
     for event in events:
         if _should_skip(event):
@@ -285,34 +710,38 @@ async def run_nudges(dry_run: bool = False):
 
         # 15-min nudge (10-15 min before)
         if 10 <= minutes_away <= 15:
-            uid = event.uid or f"{event.summary}-{event.start.isoformat()}"
+            uid = _nudge_uid(event)
             if not already_sent(uid, "fifteen_min"):
-                msg = f"Meeting in {int(minutes_away)} min: {event.summary} ({event.start.strftime('%-I:%M %p')})"
-                if event.location:
-                    msg += f"\nLocation: {event.location}"
-                hint = _nudge_recall(event.summary)
-                if hint:
-                    msg += f"\n{hint}"
+                msg = _format_calendar_nudge(event, minutes_away)
                 print(f"[nudge] fifteen_min: {msg[:100]}")
-                await _send_nudge(msg, dry_run)
-                log_nudge(uid, event.summary, event.start.isoformat(), "fifteen_min", msg)
+                sent = await _send_nudge(
+                    msg,
+                    dry_run,
+                    tier="fifteen_min",
+                    title=_meeting_title(f"{int(minutes_away)} min", event.summary),
+                    url=_CALENDAR_NUDGE_URL,
+                    url_title=_CALENDAR_NUDGE_URL_TITLE,
+                )
+                if sent:
+                    log_nudge(uid, event.summary, event.start.isoformat(), "fifteen_min", msg)
 
         # 5-min nudge (2-5 min before, only if event has location or notes)
         elif 2 <= minutes_away <= 5:
-            if event.location or event.notes:
-                uid = event.uid or f"{event.summary}-{event.start.isoformat()}"
+            if event.location or event.notes or event.calendar.casefold() == "work":
+                uid = _nudge_uid(event)
                 if not already_sent(uid, "five_min"):
-                    msg = f"5 min: {event.summary} ({event.start.strftime('%-I:%M %p')})"
-                    if event.location:
-                        msg += f"\n{event.location}"
-                    if event.notes:
-                        msg += f"\nNotes: {event.notes[:200]}"
-                    hint = _nudge_recall(event.summary)
-                    if hint:
-                        msg += f"\n{hint}"
+                    msg = _format_calendar_nudge(event, minutes_away)
                     print(f"[nudge] five_min: {msg[:100]}")
-                    await _send_nudge(msg, dry_run)
-                    log_nudge(uid, event.summary, event.start.isoformat(), "five_min", msg)
+                    sent = await _send_nudge(
+                        msg,
+                        dry_run,
+                        tier="five_min",
+                        title=_meeting_title("5 min", event.summary),
+                        url=_CALENDAR_NUDGE_URL,
+                        url_title=_CALENDAR_NUDGE_URL_TITLE,
+                    )
+                    if sent:
+                        log_nudge(uid, event.summary, event.start.isoformat(), "five_min", msg)
 
 
 async def show_status():
@@ -333,6 +762,8 @@ async def main():
     parser = argparse.ArgumentParser(description="Calendar nudge engine")
     parser.add_argument("--dry-run", action="store_true", help="Log without sending")
     parser.add_argument("--status", action="store_true", help="Show recent nudge history")
+    parser.add_argument("--force-tier", metavar="TIER", help="Force a specific tier regardless of time window or dedup")
+    parser.add_argument("--bypass-window", action="store_true", help="Skip the active-window gate")
     args = parser.parse_args()
 
     init_nudge_db()
@@ -345,8 +776,8 @@ async def main():
         await show_status()
         return
 
-    print(f"[nudge] Running at {datetime.now():%Y-%m-%d %H:%M:%S} (dry_run={args.dry_run})")
-    await run_nudges(dry_run=args.dry_run)
+    print(f"[nudge] Running at {datetime.now():%Y-%m-%d %H:%M:%S} (dry_run={args.dry_run}, force_tier={args.force_tier}, bypass_window={args.bypass_window})")
+    await run_nudges(dry_run=args.dry_run, force_tier=args.force_tier, bypass_window=args.bypass_window)
     print("[nudge] Done.")
 
 

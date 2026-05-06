@@ -31,6 +31,7 @@ os.environ["ANTHROPIC_API_KEY"] = _console_key
 from core.managed import managed_query  # noqa: E402
 from claude_agent_sdk import query, ClaudeAgentOptions  # noqa: E402  # allow-direct-sdk
 from core.hooks import AGENT_HOOKS  # noqa: E402
+from core.thinking import STANDARD  # noqa: E402
 
 # A realistic enrichment-style prompt — exactly the shape the old research pipeline used
 SAMPLE_RESEARCH = """The DJI Matrice 30T is a commercial thermal drone with a 640x512 radiometric thermal
@@ -83,8 +84,10 @@ async def run_sdk() -> tuple[str, float]:
                 model="opus",
                 permission_mode="bypassPermissions",
                 max_turns=2,
-                max_budget_usd=0.15,
+                # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
                 hooks=AGENT_HOOKS,
+                thinking=STANDARD,
+                effort="max",
             ),
         ):
             if hasattr(msg, "content"):

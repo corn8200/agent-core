@@ -14,11 +14,10 @@ core/
   tools.py          — 12 MCP tools: SSH, iMessage, email, osascript, Pushover, calendar (4), swarm context (3)
   hooks.py          — guard_hook (blocks destructive cmds) + audit_hook (logs to ~/logs/agent-audit.jsonl)
   thinking.py       — Extended thinking presets: HEAVY / STANDARD / LIGHT / ADAPTIVE / OFF
-  agents.py         — 10 AgentDefinitions: Scout, Forge, Wrench, Dispatch, Ledger, Toolsmith, Titan, Anvil, Critic, Herald
+  agents.py         — 12 AgentDefinitions: Scout, Forge, Wrench, Dispatch, Ledger, Toolsmith, Titan, Anvil, Critic, Herald, Foreman, Turbo
   agent_cp_client.py — Control plane telemetry (events, kill switches). Silent-fail. Reads APPLE_BRIDGE_TOKEN from env or secrets.env.legacy.
   vault.py          — 1Password MachineAuto loader: hydrate_env(), get_secret(). Billing guard excludes ANTHROPIC_* keys.
   sdk_guard.py      — Structural rate-limit guard. Auto-patches query() via sitecustomize.py.
-  modes.py          — Thrifty mode helpers (check/enter/exit thrifty state)
   browser.py        — Playwright persistent sessions: with_site(), capture_session(), list_sites()
   safari.py         — Safari osascript+JS helpers for interactive browser mode
   constants.py      — HOME, PERSONAL_EMAIL, VPS_SSH, IPs, DB paths, SKIP_CALENDARS
@@ -39,6 +38,8 @@ swarm/
   engine.py         — Swarm class: parallel/series/hybrid modes
 daemon/
   imessage_daemon.py — Unified iMessage bus: reader + router + retry loop (LaunchAgent, KeepAlive)
+bin/
+  imessage_vector_indexer.py — Scheduled iMessage corpus vector indexer
 nudge/
   engine.py         — Calendar nudge engine: 5 tiers, SQLite dedup, --dry-run (LaunchAgent, every 5 min)
 ```
@@ -77,15 +78,24 @@ nudge/
 - `com.john.handler-agent` — Every 30 min anomaly detection (Mac-side, VPS has matching timer)
 - `com.john.watch-commander` — Always-on, SDK Opus, iMessage bus
 - `com.john.imessage-bus` — KeepAlive daemon, polls chat.db, routes to agents
+- `com.john.imessage-vector-indexer` — every 30 min, catches up iMessage vector corpus gaps
+- `com.john.imessage-vector-indexer-watchdog` — every 15 min, reloads missing indexer LaunchAgent
 - `com.john.nudge-engine` — every 5 min, calendar nudges via iMessage
 
-## Model Strategy (Max subscription = free)
-- **Opus:** Morning brief synthesis, handler diagnosis, memo execution, research passes 1+2, job tailoring
-- **Sonnet:** Ask commands, research passes 3-5, general agent work
-- **Haiku:** Dictation fix only ($0.02 budget)
+## Model Strategy (Max subscription = flat-monthly, no per-call $ cap)
+- **Tier system is canonical** — see `~/.claude/rules/agent-routing.md` and `AGENT_TIERS` in `core/agents.py`
+  - **heavy** (opus always): titan, critic, herald, anvil
+  - **adaptive** (sonnet → opus on keyword / `!opus`): wrench, scout, forge, foreman
+  - **standard** (sonnet, never opus): dispatch, toolsmith, ledger
+  - **light** (haiku): turbo
+- **Workload-level guidance** (where automation chooses model directly, not via named agent):
+  - Synthesis / multi-system diagnosis / hard tailoring → Opus
+  - Watcher loops / classification / general agent work → Sonnet
+  - Pure extraction / template filling → Haiku
+- **Dollar caps were retired 2026-04-22 (#183).** Usage-window readout (`5h:X% wk:Y%`) is the gate — `max_budget_usd` kwargs removed; only `max_turns` is enforced. See `~/.claude/rules/agent-routing.md`.
 
 ## Rules
-- All automated agents: `permission_mode="bypassPermissions"`, always set `max_turns` + `max_budget_usd`
+- All automated agents: `permission_mode="bypassPermissions"`, always set `max_turns`. Do NOT set `max_budget_usd` on oat01-metered work — it was retired 2026-04-22 (#183) as vestigial under the flat-monthly Max subscription. Runaway-loop protection is `max_turns` + the 50-calls/hour HOURLY_CAP in `core/mac_sdk.py` + R5 fan-out / R6 titan hooks.
 - Always include `hooks=AGENT_HOOKS` on SDK calls
 - Always pass `thinking=<preset>` + `effort=<level>` — pick per task:
   - `ULTRA` (64k) + `effort="xhigh"` → **Titan** / architectural decisions / hardest multi-system problems
@@ -97,11 +107,15 @@ nudge/
 - VPS SSH hostname is `vps`, NOT jcornelius.net
 
 ## Email Sending
-- Business (info@sentryaithermal.com): `send_business_email` MCP tool → sentry-mailqueue → Resend
-- Personal/system (notify@jcornelius.net): `send_personal_email` MCP tool → VPS send-email wrapper → Gmail SMTP
-- NEVER SCP scripts to VPS for email — use MCP tools
+- **Canonical agent path: mailhub** — `from mailhub import send_email, reply_email` (helper at `/srv/apps/lib/mailhub.py` on VPS, `agent-core/core/mailhub.py` on Mac/Air). Picks SMTP backend by `from_addr`, enforces reply-from-received-at server-side, auto-gates third-party approval queue, schedule-send + retry/bounce handled. Each agent passes `sender_app="<name>"`. See `~/.claude/rules/messaging.md`.
+- **Sentry biz** (info@sentryaithermal.com): `send_business_email` MCP tool → sentry-mailqueue → Resend (still authoritative — mailhub Phase 4+ will subsume).
+- **Outlook personal** (corn82@outlook.com): John-owned address/calendar identity, but no mailhub SMTP/Graph backend exists yet. Do not send/reply from another address when the inbound was received at Outlook; build the Outlook backend first.
+- **Legacy MCP tools** (`send_personal_email`, `send_business_email` in `core/tools.py`): still functional but route via the legacy ssh `send-email` path, NOT mailhub. New code should call mailhub directly. These remain for automated agents (handler, watch-commander) that have them registered as MCP tools.
+- NEVER SCP scripts to VPS for email — use mailhub
+- NEVER use raw smtplib from agent code — go through mailhub
 - NEVER use Gmail MCP drafts
 
 ## Email Receive
 - corn82@icloud.com: mailtriage daemon (auto-classify, Pushover urgent, approval-queue drafts)
 - corn82@gmail.com: mailgw-idle (forwards important → iCloud → mailtriage)
+- corn82@outlook.com: personal Microsoft account; calendar/free-busy integration is via macOS Internet Accounts once signed in. No mailhub receive monitor until credentials/OAuth are added.

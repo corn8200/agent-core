@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Weekly Toolsmith review — reads agent_performance.json and sends iMessage summary.
+"""Weekly Toolsmith review — reads agent_performance.json and sends Pushover summary.
 
 Runs every Monday at 9 AM via com.john.toolsmith-weekly LaunchAgent.
 """
@@ -21,10 +21,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from core.vault import hydrate_env
 hydrate_env()
 
-from core.constants import HOME, PERSONAL_EMAIL
-from core.tools import send_imessage_reliable
+from core.constants import HOME
+from core.pushover import send_pushover
 from core.hooks import AGENT_HOOKS
 from core.thinking import STANDARD
+
+DRY_RUN = "--dry-run" in sys.argv
+LOG_PATH = Path.home() / "logs" / "toolsmith-weekly.log"
 
 PERF_LOG = Path.home() / ".claude/projects/-Users-johncornelius/memory/agent_performance.json"
 
@@ -36,22 +39,36 @@ Analyze the provided performance data and return a concise weekly report coverin
 
 Rules:
 - Keep total response under 350 words
-- Plain text only, no markdown, no bullet symbols — this goes via iMessage
+- Plain text only, no markdown
 - Be direct and specific (file paths, function names, root causes)
 - Skip agents with no issues"""
+
+
+def _log(msg: str) -> None:
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    line = f"[{ts}] {msg}"
+    print(line, flush=True)
+    try:
+        LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with LOG_PATH.open("a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 
 
 async def run():
     try:
         from core.mac_sdk import query, ClaudeAgentOptions
     except ImportError as e:
-        msg = f"[Toolsmith] Import failed: {e}"
-        print(msg, file=sys.stderr)
-        await send_imessage_reliable(PERSONAL_EMAIL, msg)
+        _log(f"Import failed: {e}")
+        if not DRY_RUN:
+            await send_pushover(title="Toolsmith Error", message=f"Import failed: {e}", priority=0)
         return
 
     if not PERF_LOG.exists():
-        await send_imessage_reliable(PERSONAL_EMAIL, "[Toolsmith] No agent_performance.json found — nothing to review.")
+        _log("No agent_performance.json found — nothing to review.")
+        if not DRY_RUN:
+            await send_pushover(title="Toolsmith Weekly", message="No agent_performance.json found — nothing to review.", priority=0)
         return
 
     # Parse the log (may be mixed JSON array + NDJSON)
@@ -84,6 +101,17 @@ Last 7 days of agent runs:
 
 Review these results and give me the weekly Toolsmith report."""
 
+    if DRY_RUN:
+        _log(f"[DRY-RUN] Skipping SDK call — {len(recent)} recent entries ready")
+        print(f"[DRY-RUN] Would call Opus with {len(recent)} recent entries")
+        print("[DRY-RUN] Success path: would send Pushover(title='Toolsmith Weekly', priority=0)")
+        print("[DRY-RUN] Empty path: would log silently, no notification")
+        result = await send_pushover(title="Toolsmith DRY-RUN", message=f"dry-run OK — {len(recent)} entries in window", priority=0)
+        _log(f"[DRY-RUN] Pushover test: {result.detail}")
+        return
+
+    _log(f"Running SDK call — {len(recent)} recent entries (last 7d), {total} total")
+
     brief_text = ""
     try:
         async for msg in query(
@@ -93,7 +121,6 @@ Review these results and give me the weekly Toolsmith report."""
                 model="opus",
                 permission_mode="bypassPermissions",
                 max_turns=3,
-                max_budget_usd=0.20,
                 cwd=str(HOME),
                 hooks=AGENT_HOOKS,
                 thinking=STANDARD,
@@ -106,13 +133,20 @@ Review these results and give me the weekly Toolsmith report."""
                         brief_text += block.text
             if hasattr(msg, "result") and msg.result:
                 brief_text = msg.result
-    except Exception:
-        pass  # SDK throws on CLI exit after result received
+    except Exception as exc:
+        _log(f"SDK exception (may be normal CLI exit): {exc!r}")
 
     if brief_text.strip():
-        await send_imessage_reliable(PERSONAL_EMAIL, f"[Toolsmith Weekly]\n\n{brief_text.strip()}")
+        _log(f"Got {len(brief_text)} chars of output")
+        result = await send_pushover(
+            title="Toolsmith Weekly",
+            message=brief_text.strip(),
+            priority=0,
+        )
+        _log(f"Pushover: {result.detail}")
     else:
-        await send_imessage_reliable(PERSONAL_EMAIL, "[Toolsmith] Review ran but no output captured.")
+        # Empty output is not actionable — log silently, no notification
+        _log("SDK returned empty output — logging silently, skipping notification")
 
 
 if __name__ == "__main__":

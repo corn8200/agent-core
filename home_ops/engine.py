@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import fcntl
 import json
 import os
 import re
 import sys
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -51,6 +53,7 @@ from home_ops import state as state_mod  # noqa: E402
 
 GATHER_DUMP_PATH = Path("/tmp/home-ops-gather.json")
 BRIEF_TEXT_PATH = Path("/tmp/home-ops-brief.txt")
+_LOCAL_MODE_LOCKS: set[str] = set()
 
 
 async def deliver_tts(brief_text: str) -> bool:
@@ -63,8 +66,8 @@ async def _pushover_shrink_alert(
     mode: str, orig: int, final: int, lim: int, cleared: bool
 ) -> None:
     """Fire P0 Pushover when shrink fires 2 days in a row. HARD RULE: P0 only."""
-    import asyncio as _asyncio
-    from core.constants import PUSHOVER_USER, PUSHOVER_TOKEN
+    from core.interactive_links import alert_action_url
+    from core.pushover import send_pushover
 
     title = f"home-ops shrink 2 days in a row ({mode})"
     msg = (
@@ -72,18 +75,13 @@ async def _pushover_shrink_alert(
         f"(limit {lim}). Cleared={cleared}. Payload growing; investigate "
         f"home_ops/prompts.py _shrink_payload reason."
     )
-    proc = await _asyncio.create_subprocess_exec(
-        "curl", "-s", "-o", "/dev/null", "--max-time", "10",
-        "-F", f"token={PUSHOVER_TOKEN}",
-        "-F", f"user={PUSHOVER_USER}",
-        "-F", f"title={title}",
-        "-F", f"message={msg}",
-        "-F", "priority=0",
-        "https://api.pushover.net/1/messages.json",
-        stdout=_asyncio.subprocess.PIPE,
-        stderr=_asyncio.subprocess.PIPE,
+    await send_pushover(
+        title=title,
+        message=msg,
+        priority=0,
+        url=alert_action_url(source="home-ops", title=title, message=msg, severity="warn"),
+        url_title="Send to Mac panel 3",
     )
-    await _asyncio.wait_for(proc.communicate(), timeout=12)
 
 
 async def synthesize(gather: dict, mode: str) -> tuple[str, dict]:
@@ -104,7 +102,7 @@ async def synthesize(gather: dict, mode: str) -> tuple[str, dict]:
                 system_prompt=system_prompt,
                 permission_mode="bypassPermissions",
                 max_turns=2,
-                max_budget_usd=0.20,
+                # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
                 cwd=str(HOME),
                 hooks=AGENT_HOOKS,
                 thinking=HEAVY,
@@ -197,6 +195,36 @@ def extract_loose_ends(brief_text: str) -> list[str]:
         if cleaned:
             out.append(cleaned[:200])
     return out
+
+
+@contextmanager
+def _mode_lock(mode: str):
+    safe_mode = re.sub(r"[^A-Za-z0-9_.-]+", "_", mode or "default").strip("_") or "default"
+    if safe_mode in _LOCAL_MODE_LOCKS:
+        yield False
+        return
+
+    lock_dir = Path(HOME) / "logs"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    lock_file = (lock_dir / f"home-ops-{safe_mode}.lock").open("a")
+    acquired = False
+    try:
+        try:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            acquired = True
+        except BlockingIOError:
+            yield False
+            return
+
+        _LOCAL_MODE_LOCKS.add(safe_mode)
+        try:
+            yield True
+        finally:
+            _LOCAL_MODE_LOCKS.discard(safe_mode)
+    finally:
+        if acquired:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+        lock_file.close()
 
 
 async def run(mode: str, dry_run: bool = False, gather_only: bool = False,
@@ -339,14 +367,19 @@ def main():
             print(f"[home-ops] {agent_name} killed via agent-cp, exiting")
             sys.exit(0)
     try:
-        code = asyncio.run(run(
-            mode=mode,
-            dry_run=args.dry_run,
-            gather_only=args.gather_only,
-            force=args.force,
-            recipients=recipients,
-            audio=(mode == "morning" and not args.no_audio),
-        ))
+        with _mode_lock(mode) as acquired:
+            if not acquired:
+                print(f"[home-ops] {mode} run already active, exiting")
+                code = 0
+            else:
+                code = asyncio.run(run(
+                    mode=mode,
+                    dry_run=args.dry_run,
+                    gather_only=args.gather_only,
+                    force=args.force,
+                    recipients=recipients,
+                    audio=(mode == "morning" and not args.no_audio),
+                ))
     except BaseException as _e:
         import traceback as _tb
         _tbs = _tb.format_exc()

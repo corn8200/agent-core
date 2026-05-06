@@ -46,13 +46,17 @@ from core.message_db import (
 
 PREFIXES = ("research:", "quick:", "compare:", "local:")
 SELF_CHATS = ("corn82@icloud.com", "+13042684985")
-APPROVAL_QUEUE_URL = "http://100.118.21.64:8766/api/respond"
+try:
+    from core.endpoints import get as _ep_get
+    APPROVAL_QUEUE_URL = _ep_get("approval_queue.respond")
+    VPS_REPLY_BASE_URL = _ep_get("agent_cp.base_url") + "/api"
+except Exception:
+    APPROVAL_QUEUE_URL = ""
+    VPS_REPLY_BASE_URL = ""
 
 # Task C: VPS reply tag interface.
 # Format (fixed by Mac+VPS coordination): "[V:<service>:<ref>] <reply text>"
 # service is lowercase letters; ref is short alphanumeric assigned by the service.
-VPS_HOST_IP = "100.118.21.64"
-VPS_REPLY_BASE_URL = f"http://{VPS_HOST_IP}:8767"
 VPS_REPLY_SERVICES = {"sentinel", "mailtriage", "jobagent", "notify"}
 VPS_TAG_RE = re.compile(
     r"^\s*\[\s*v\s*:\s*(?P<service>[a-zA-Z]+)\s*:\s*(?P<ref>[A-Za-z0-9_-]+)\s*\]\s*",
@@ -720,6 +724,12 @@ async def _classify_with_opus(msg: InboundMessage) -> dict:
             "--output-format", "json",
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env={
+                **os.environ,
+                "CLAUDE_RUN_MODE": "automation",
+                "CLAUDE_RUN_PROFILE": "quick",
+                "CLAUDE_RUN_REASON": "message-router intent classification",
+            },
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
         output = stdout.decode().strip()
@@ -845,6 +855,10 @@ async def run():
         ["/opt/homebrew/bin/claude", "-p", prompt,
          "--model", "{model}", {session_flag}, "--max-turns", "10"],
         capture_output=True, text=True, timeout=300,
+        env={{**os.environ,
+             "CLAUDE_RUN_MODE": "automation",
+             "CLAUDE_RUN_PROFILE": "strong",
+             "CLAUDE_RUN_REASON": "message-router dispatch {agent_name} #{short_id}"}},
     )
     result = proc.stdout.strip()
     if not result:

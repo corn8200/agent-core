@@ -37,15 +37,29 @@ def _pushover_fail(detail: str) -> None:
             print("[audit-heartbeat] pushover skipped: no creds", file=sys.stderr)
             return
         host = os.uname().nodename
+        title = f"Audit log heartbeat FAILED ({host})"
+        data = {
+            "token": token,
+            "user": user,
+            "title": title,
+            "message": detail[:1024],
+            "priority": 0,
+        }
+        try:
+            from core.interactive_links import alert_action_url
+
+            data["url"] = alert_action_url(
+                source="audit-heartbeat",
+                title=title,
+                message=detail,
+                severity="warn",
+            )
+            data["url_title"] = "Send to Mac panel 3"
+        except Exception:
+            pass
         httpx.post(
             "https://api.pushover.net/1/messages.json",
-            data={
-                "token": token,
-                "user": user,
-                "title": f"Audit log heartbeat FAILED ({host})",
-                "message": detail[:1024],
-                "priority": 0,
-            },
+            data=data,
             timeout=10.0,
         )
     except Exception as e:

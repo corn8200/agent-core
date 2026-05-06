@@ -2,6 +2,7 @@
 
 Agentic code gets its own browser (WebKit by default) with cookies and local
 storage persisted per-site under ~/.config/playwright-states/<site>.json.
+If the WebKit cache is missing or stale, launch falls back to system Chrome.
 
 Usage:
     from core.browser import with_site
@@ -22,6 +23,7 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+import sys
 from typing import AsyncIterator
 
 from playwright.async_api import (
@@ -34,6 +36,7 @@ from playwright.async_api import (
 
 STATES_DIR = Path.home() / ".config" / "playwright-states"
 PROFILE_DIR = Path.home() / ".config" / "playwright-profile"
+SYSTEM_CHROME_PATH = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
 
 def _state_path(site_name: str) -> Path:
@@ -47,8 +50,29 @@ async def _launch_browser(
     browser_kind: str = "webkit",
     headless: bool = True,
 ) -> Browser:
+    if browser_kind == "chrome":
+        if not SYSTEM_CHROME_PATH.exists():
+            raise FileNotFoundError(f"system Chrome not found at {SYSTEM_CHROME_PATH}")
+        return await p.chromium.launch(
+            executable_path=str(SYSTEM_CHROME_PATH),
+            headless=headless,
+        )
+
     launcher = getattr(p, browser_kind)
-    return await launcher.launch(headless=headless)
+    try:
+        return await launcher.launch(headless=headless)
+    except Exception as exc:
+        if browser_kind != "webkit" or not SYSTEM_CHROME_PATH.exists():
+            raise
+        print(
+            "[browser] WebKit launch failed; falling back to system Chrome: "
+            f"{type(exc).__name__}: {exc}",
+            file=sys.stderr,
+        )
+        return await p.chromium.launch(
+            executable_path=str(SYSTEM_CHROME_PATH),
+            headless=headless,
+        )
 
 
 async def get_context(
@@ -169,4 +193,5 @@ __all__ = [
     "forget_site",
     "STATES_DIR",
     "PROFILE_DIR",
+    "SYSTEM_CHROME_PATH",
 ]

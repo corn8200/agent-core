@@ -28,7 +28,12 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-VPS_URL = "http://100.118.21.64:8767"
+try:
+    from core.endpoints import get as _ep_get
+    _DEFAULT_VPS_URL = _ep_get("agent_cp.base_url")
+except Exception:
+    _DEFAULT_VPS_URL = ""
+VPS_URL = os.environ.get("AGENT_CP_URL", _DEFAULT_VPS_URL)
 LOCAL_DB = Path("/srv/apps/agent-cp/events.db")
 LOCAL_FLAGS = Path("/srv/apps/agent-cp/flags")
 
@@ -105,7 +110,7 @@ def _post_remote(host, agent, kind, payload, cost, duration_ms, trace_id, error_
             "duration_ms": duration_ms, "trace_id": trace_id, "error_text": error_text,
         }).encode()
         req = urllib.request.Request(
-            f"{VPS_URL}/ingest",
+            f"{VPS_URL}/api/ingest",
             data=body,
             headers={
                 "Content-Type": "application/json",
@@ -174,7 +179,7 @@ def is_killed(agent: str) -> bool:
     killed = False
     try:
         req = urllib.request.Request(
-            f"{VPS_URL}/is_killed/{agent}",
+            f"{VPS_URL}/api/agents/{agent}/is-killed",
             headers={"Authorization": f"Bearer {_token()}"},
         )
         with urllib.request.urlopen(req, timeout=3) as resp:

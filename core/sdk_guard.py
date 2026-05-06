@@ -15,6 +15,7 @@ Neither check requires any caller to opt in.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import time
@@ -27,6 +28,77 @@ if TYPE_CHECKING:
 CALL_LOG = Path("/tmp/agent-sdk-calls.json")
 HOURLY_CAP = 50
 ALERT_COOLDOWN = 3600  # only alert once per hour even if cap stays exceeded
+DEFAULT_MODEL = "opus"
+DEFAULT_MAX_TURNS = 20
+DEFAULT_PERMISSION_MODE = "bypassPermissions"
+DEFAULT_EFFORT = "max"
+_EMPTY_MCP_CONFIG = str(Path(__file__).resolve().parent / "mcp-empty.json")
+
+
+def _default_reason() -> str:
+    frame = inspect.currentframe()
+    for _ in range(4):
+        frame = frame.f_back if frame else None
+    if not frame:
+        return "sdk_guard Claude automation"
+    return f"sdk_guard Claude automation from {frame.f_code.co_filename}:{frame.f_lineno}"
+
+
+def _intent_env(existing=None) -> dict:
+    env = dict(existing or {})
+    env.setdefault("CLAUDE_RUN_MODE", os.environ.get("CLAUDE_RUN_MODE", "automation"))
+    env.setdefault("CLAUDE_RUN_PROFILE", os.environ.get("CLAUDE_RUN_PROFILE", "normal"))
+    env.setdefault("CLAUDE_RUN_REASON", os.environ.get("CLAUDE_RUN_REASON") or _default_reason())
+    return env
+
+
+def _apply_intent_defaults(sdk, options):
+    try:
+        from core.hooks import AGENT_HOOKS
+        from core.thinking import STANDARD
+    except Exception:
+        AGENT_HOOKS = None
+        STANDARD = None
+
+    if options is None:
+        kwargs = {
+            "model": DEFAULT_MODEL,
+            "permission_mode": DEFAULT_PERMISSION_MODE,
+            "max_turns": DEFAULT_MAX_TURNS,
+            "cwd": str(Path.home()),
+            "mcp_servers": _EMPTY_MCP_CONFIG,
+            "env": _intent_env(),
+            "effort": DEFAULT_EFFORT,
+        }
+        if AGENT_HOOKS is not None:
+            kwargs["hooks"] = AGENT_HOOKS
+        if STANDARD is not None:
+            kwargs["thinking"] = STANDARD
+        return sdk.ClaudeAgentOptions(**kwargs)
+    try:
+        options.env = _intent_env(getattr(options, "env", None))
+    except (AttributeError, TypeError):
+        pass
+    defaults = {
+        "model": DEFAULT_MODEL,
+        "permission_mode": DEFAULT_PERMISSION_MODE,
+        "max_turns": DEFAULT_MAX_TURNS,
+        "cwd": str(Path.home()),
+        "mcp_servers": _EMPTY_MCP_CONFIG,
+        "effort": DEFAULT_EFFORT,
+    }
+    if AGENT_HOOKS is not None:
+        defaults["hooks"] = AGENT_HOOKS
+    if STANDARD is not None:
+        defaults["thinking"] = STANDARD
+    for attr, value in defaults.items():
+        try:
+            if getattr(options, attr, None) is None:
+                setattr(options, attr, value)
+        except (AttributeError, TypeError):
+            pass
+    return options
+
 
 RATE_LIMIT_PHRASES = [
     "hit your limit",
@@ -88,13 +160,28 @@ def _pushover_alert(count: int) -> None:
             return
 
         import urllib.request, urllib.parse
-        data = urllib.parse.urlencode({
+        title = "SDK runaway alert"
+        message = f"agent-core made {count} SDK calls in the last hour (cap={HOURLY_CAP}). Check logs."
+        payload = {
             "token": token,
             "user": user,
-            "title": "SDK runaway alert",
-            "message": f"agent-core made {count} SDK calls in the last hour (cap={HOURLY_CAP}). Check logs.",
+            "title": title,
+            "message": message,
             "priority": "0",
-        }).encode()
+        }
+        try:
+            from core.interactive_links import alert_action_url
+
+            payload["url"] = alert_action_url(
+                source="sdk-guard",
+                title=title,
+                message=message,
+                severity="warn",
+            )
+            payload["url_title"] = "Send to Mac panel 3"
+        except Exception:
+            pass
+        data = urllib.parse.urlencode(payload).encode()
         urllib.request.urlopen(
             "https://api.pushover.net/1/messages.json",
             data=data,
@@ -126,12 +213,13 @@ def patch() -> None:
 
     original_query = _sdk.query
 
-    async def guarded_query(**kwargs):  # type: ignore[override]
+    async def guarded_query(*args, **kwargs):  # type: ignore[override]
+        kwargs["options"] = _apply_intent_defaults(_sdk, kwargs.get("options"))
         count, should_alert = _record_and_check()
         if should_alert:
             _pushover_alert(count)
 
-        async for msg in original_query(**kwargs):
+        async for msg in original_query(*args, **kwargs):
             # Inspect text blocks for rate-limit signals
             text = None
             if hasattr(msg, "text"):

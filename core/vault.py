@@ -46,42 +46,8 @@ _DANGEROUS_NAMES: Final = frozenset({
     "ANTHROPIC_CONSOLE_KEY_VPS",
 })
 
-# Paid-API keys blocked from hydrate_env() when THRIFTY_MODE=1. Downstream
-# callers see empty strings and fall through to free alternatives:
-#   OPENAI_API_KEY        → memory search falls back to keyword-only
-#   TAVILY_API_KEY        → prepper/groundtruth skip fresh web lookups
-#   ELEVENLABS_API_KEY    → brief TTS falls through to macOS `say`
-#   MAPBOX_API_KEY        → groundtruth skips map tiles
-#   GOOGLE_MAPS_API_KEY   → geocoding skipped
-# Resend and Pushover are NOT on this list — business email + alerts must flow.
-_THRIFTY_SKIP_NAMES: Final = frozenset({
-    "OPENAI_API_KEY",
-    "TAVILY_API_KEY",
-    "ELEVENLABS_API_KEY",
-    "MAPBOX_API_KEY",
-    "GOOGLE_MAPS_API_KEY",
-})
-
-
-def _thrifty_on() -> bool:
-    if os.environ.get("THRIFTY_MODE") == "1":
-        return True
-    env_file = Path.home() / ".config" / "thrifty.env"
-    if not env_file.exists():
-        return False
-    try:
-        for line in env_file.read_text().splitlines():
-            if line.startswith("export THRIFTY_MODE=") and line.endswith("=1"):
-                return True
-    except Exception:
-        pass
-    return False
-
-
 def _should_skip(name: str) -> bool:
     if name in _DANGEROUS_NAMES:
-        return True
-    if name in _THRIFTY_SKIP_NAMES and _thrifty_on():
         return True
     return False
 
@@ -195,16 +161,22 @@ def _op_read(key: str, vault: str = "MachineAutoBiz") -> str | None:
     token = _service_account_token()
     if not token:
         return None
-    try:
-        out = subprocess.run(
-            ["op", "read", f"op://{vault}/{key}/password"],
-            env={"OP_SERVICE_ACCOUNT_TOKEN": token, "PATH": os.environ.get("PATH", "")},
-            capture_output=True, text=True, timeout=10,
-        )
-        if out.returncode == 0:
-            return out.stdout.strip() or None
-    except Exception:
-        pass
+    # API_CREDENTIAL category items store the secret under `credential`, not
+    # `password`. Try both so new-style items (e.g. AGENT_CP_TOKEN, created
+    # 2026-04-23) resolve without needing a second write.
+    for field in ("password", "credential"):
+        try:
+            out = subprocess.run(
+                ["op", "read", f"op://{vault}/{key}/{field}"],
+                env={"OP_SERVICE_ACCOUNT_TOKEN": token, "PATH": os.environ.get("PATH", "")},
+                capture_output=True, text=True, timeout=10,
+            )
+            if out.returncode == 0:
+                val = out.stdout.strip()
+                if val:
+                    return val
+        except Exception:
+            pass
     return None
 
 
@@ -240,6 +212,11 @@ def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAutoBiz")
         keys = sorted(_load_legacy().keys())
     keys = [k for k in keys if not _should_skip(k) and k not in _BASH_NOISE]
     result: dict[str, bool] = {}
+
+    # Always populate CLAUDE_CODE_OAUTH_TOKEN from per-host oat01 cache.
+    # Independent of vault: this is the canonical on-disk source and is
+    # load-bearing for any LaunchAgent that spawns `claude -p`.
+    hydrate_claude_oauth()
 
     token = _service_account_token()
     launchd = _is_launchd_context()
@@ -318,4 +295,38 @@ def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAutoBiz")
     return result
 
 
-__all__ = ["get_secret", "hydrate_env"]
+def hydrate_claude_oauth() -> bool:
+    """Load CLAUDE_CODE_OAUTH_TOKEN from per-host oat01 cache.
+
+    Mirrors the shell-init logic at ~/.config/claude-oat01-shell-init.sh.
+    LaunchAgent-spawned Python doesn't inherit the env var from .zshenv, so
+    this helper reads the active-account marker and exports the matching
+    token file into os.environ.
+
+    Returns True if the active account token is loaded. If the process still has
+    the other account's token from before a swap, replace it; stale env wins over
+    .credentials.json in Claude CLI and must not survive account swaps.
+    """
+    active_marker = Path.home() / ".claude" / ".active-account"
+    try:
+        account = active_marker.read_text().strip()
+    except Exception:
+        account = ""
+    if account not in {"gmail", "icloud"}:
+        os.environ.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        return False
+    token_file = Path.home() / ".config" / f"claude-oat01-{account}"
+    try:
+        if token_file.is_file():
+            tok = token_file.read_text().strip()
+            if tok:
+                if os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") != tok:
+                    os.environ["CLAUDE_CODE_OAUTH_TOKEN"] = tok
+                os.environ["CLAUDE_PANE_ACCOUNT"] = account
+                return True
+    except Exception:
+        pass
+    return False
+
+
+__all__ = ["get_secret", "hydrate_env", "hydrate_claude_oauth"]

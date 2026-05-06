@@ -28,10 +28,20 @@ def _load_prompt(name: str) -> str:
 # --- Agent Definitions ---
 
 scout = AgentDefinition(
-    description="Research & intelligence specialist — deep web research, market analysis, company background, regulatory landscape, competitor scans. Uses WebSearch + WebFetch with Read/Grep/Write to surface facts, citations, and structured briefings. Pick over Turbo when a question needs multi-source synthesis. Read-only on local files (no Edit, no Bash). 20-turn budget, sonnet by default (escalates to opus on !opus or deep-dive keywords).",
+    description="Research & intelligence specialist — deep web research, market analysis, company background, regulatory landscape, competitor scans. Uses WebSearch + WebFetch + Playwright WebKit/Chrome/Firefox and Chrome DevTools MCP with Read/Grep/Write to surface facts, citations, and structured briefings. Pick over Turbo when a question needs multi-source synthesis. Read-only on local files (no Edit, no Bash). 20-turn budget, sonnet by default (escalates to opus on !opus or deep-dive keywords).",
     prompt=_load_prompt("scout"),
     model="sonnet",
-    tools=["Read", "Grep", "Write", "WebSearch", "WebFetch"],
+    tools=[
+        "Read",
+        "Grep",
+        "Write",
+        "WebSearch",
+        "WebFetch",
+        "mcp__playwright",
+        "mcp__playwrightChrome",
+        "mcp__playwrightFirefox",
+        "mcp__chrome-devtools",
+    ],
     maxTurns=20,
     permissionMode="bypassPermissions",
     effort="max",
@@ -72,10 +82,18 @@ dispatch = AgentDefinition(
 )
 
 ledger = AgentDefinition(
-    description="Data & financial analysis specialist — budgets, spending reconciliation, CSV crunching, bill scanning, Monarch Money queries, transaction categorization. Uses Bash + Read/Write to run sqlite queries, build summary tables, and cross-reference Mail for upcoming bills. Pick when the answer is a number, table, or financial comparison. No web tools — local data only. 20-turn budget, sonnet.",
+    description="Data & financial analysis specialist — budgets, spending reconciliation, CSV crunching, bill scanning, Monarch Money queries, transaction categorization. Uses Bash + Read/Write plus Playwright WebKit/Chrome/Firefox and Chrome DevTools MCP for browser auth flows to run sqlite queries, build summary tables, and cross-reference Mail for upcoming bills. Pick when the answer is a number, table, or financial comparison. 20-turn budget, sonnet.",
     prompt=_load_prompt("ledger"),
     model="sonnet",
-    tools=["Bash", "Read", "Write"],
+    tools=[
+        "Bash",
+        "Read",
+        "Write",
+        "mcp__playwright",
+        "mcp__playwrightChrome",
+        "mcp__playwrightFirefox",
+        "mcp__chrome-devtools",
+    ],
     maxTurns=20,
     permissionMode="bypassPermissions",
     effort="max",
@@ -94,10 +112,25 @@ toolsmith = AgentDefinition(
 )
 
 titan = AgentDefinition(
-    description="Maximum-firepower opus solver for genuinely hard problems — architectural decisions, multi-system debugging, deep research, complex refactors, end-to-end design work. Spawns parallel sub-agent swarms via the Agent tool, extended thinking, no token rationing. Full toolset: Read/Write/Edit/Grep/Glob/Bash/WebSearch/WebFetch/Agent/TodoWrite. Pick when the problem deserves the heaviest hammer; skip for quick lookups. 60-turn budget, xhigh effort.",
+    description="Maximum-firepower opus solver for genuinely hard problems — architectural decisions, multi-system debugging, deep research, complex refactors, end-to-end design work. Spawns parallel sub-agent swarms via the Agent tool, extended thinking, no token rationing. Full toolset: Read/Write/Edit/Grep/Glob/Bash/WebSearch/WebFetch/Playwright WebKit/Chrome/Firefox/Chrome DevTools MCP/Agent/TodoWrite. Pick when the problem deserves the heaviest hammer; skip for quick lookups. 60-turn budget, xhigh effort.",
     prompt=_load_prompt("titan"),
     model="opus",
-    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "Agent", "TodoWrite"],
+    tools=[
+        "Read",
+        "Write",
+        "Edit",
+        "Grep",
+        "Glob",
+        "Bash",
+        "WebSearch",
+        "WebFetch",
+        "mcp__playwright",
+        "mcp__playwrightChrome",
+        "mcp__playwrightFirefox",
+        "mcp__chrome-devtools",
+        "Agent",
+        "TodoWrite",
+    ],
     maxTurns=60,
     permissionMode="bypassPermissions",
     effort="xhigh",  # type: ignore[arg-type]  # xhigh added in CLI 2.1.112; SDK Literal not yet updated
@@ -105,10 +138,22 @@ titan = AgentDefinition(
 )
 
 anvil = AgentDefinition(
-    description="Code builder and implementation specialist — writes, refactors, and ships working code. Worktree-first, test-driven, verifies its own diffs in an isolated branch before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget, sonnet by default (auto-escalates to opus on refactor/architect/multi-file/rewrite keywords or !opus).",
+    description="Code builder. Opus direct code lane — writes, refactors, and ships code. Worktree-first, test-driven, verifies its own diffs before reporting done. Uses Read/Write/Edit/Grep/Glob/Bash/TodoWrite plus Playwright WebKit/Chrome/Firefox and Chrome DevTools MCP for UI/browser verification. Pick over Forge for code deliverables, over Titan for routine implementation work, over Scout when the task ends in shipped code rather than research. 40-turn budget.",
     prompt=_load_prompt("anvil"),
-    model="sonnet",
-    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "TodoWrite"],
+    model="opus",
+    tools=[
+        "Read",
+        "Write",
+        "Edit",
+        "Grep",
+        "Glob",
+        "Bash",
+        "TodoWrite",
+        "mcp__playwright",
+        "mcp__playwrightChrome",
+        "mcp__playwrightFirefox",
+        "mcp__chrome-devtools",
+    ],
     maxTurns=40,
     permissionMode="bypassPermissions",
     effort="max",
@@ -127,11 +172,34 @@ critic = AgentDefinition(
 )
 
 herald = AgentDefinition(
+    # heavy — client-facing deliverables always justify Opus
     description="Brand & deliverable QC — reads brand-kit (3 tiers: Professional/Family/Sentry AI Thermal), enforces John's taste + industry-standard quality rules on resumes, proposals, decks, client reports, websites, emails, and any other artifact. Runs mechanical QC (page count, fill ratio, section-across-page splits, ATS text extraction via pdftotext, brand-token drift) and auto-fixes mechanical violations by editing content (compress/expand bullets, restructure sections, adjust page breaks). Blocks + reports on subjective violations: images in ATS resumes, wrong tier tokens, fancy fonts where plain is required, brand voice drift, factual errors (UEI/CAGE/phone). Uses Read/Write/Edit/Bash/Grep/Glob. Pick for any pre-delivery review or brand-consistency check. 25-turn budget, opus, max effort.",
     prompt=_load_prompt("herald"),
     model="opus",
     tools=["Read", "Write", "Edit", "Bash", "Grep", "Glob"],
     maxTurns=25,
+    permissionMode="bypassPermissions",
+    effort="max",
+    memory="project",
+)
+
+foreman = AgentDefinition(
+    description="Invisible dispatcher — parses raw unstructured input (voice memos, multi-intent requests), classifies intents, fans out to named specialists in parallel, and synthesizes a tight unified reply. Never asks questions, always acts. Uses Agent tool to dispatch to Scout/Wrench/Dispatch/Ledger/Forge/Anvil/Critic/Herald/Turbo/Titan plus direct osascript for Reminders/notes. Default delivery: iMessage via tmux relay. Pick behind any pipeline feeding raw user input (voice memos, handler polling, inbound webhooks). 30-turn budget, sonnet by default (escalates to opus on !opus or adaptive keywords).",
+    prompt=_load_prompt("foreman"),
+    model="sonnet",
+    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch", "Agent", "TodoWrite"],
+    maxTurns=30,
+    permissionMode="bypassPermissions",
+    effort="max",
+    memory="project",
+)
+
+turbo = AgentDefinition(
+    description="Speed-optimized quick-action agent on Haiku — fast lookups, quick sends, simple tasks. Invoked with 'turbo, <thing>' prefix. Read/Write/Edit/Grep/Glob/Bash/WebSearch/WebFetch. Pick for single-shot lookups, quick grep, simple ping checks, short iMessage sends. Skip for architectural decisions, multi-file refactors, complex debugging. 10-turn budget, haiku.",
+    prompt=_load_prompt("turbo"),
+    model="haiku",
+    tools=["Read", "Write", "Edit", "Grep", "Glob", "Bash", "WebSearch", "WebFetch"],
+    maxTurns=10,
     permissionMode="bypassPermissions",
     effort="max",
     memory="project",
@@ -149,6 +217,8 @@ ALL_AGENTS = {
     "anvil": anvil,
     "critic": critic,
     "herald": herald,
+    "foreman": foreman,
+    "turbo": turbo,
 }
 
 
@@ -158,7 +228,7 @@ ALL_AGENTS = {
 # in ~/.claude/agents/*.md.
 #
 # Tiers:
-#   heavy    — always Opus. Task requires it (titan, critic).
+#   heavy    — always Opus. Task requires it (titan, critic, anvil).
 #   adaptive — default Sonnet, promotes to Opus on !opus or keyword triggers.
 #   standard — always Sonnet. No promotion path.
 #   light    — Haiku only.
@@ -166,25 +236,26 @@ AGENT_TIERS: dict[str, str] = {
     "scout":     "adaptive",
     "forge":     "adaptive",
     "wrench":    "adaptive",
-    "anvil":     "adaptive",
-    "herald":    "adaptive",
+    "anvil":     "heavy",
+    "foreman":   "adaptive",
+    "herald":    "heavy",
     "critic":    "heavy",
     "titan":     "heavy",
     "dispatch":  "standard",
     "toolsmith": "standard",
     "ledger":    "standard",
+    "turbo":     "light",
 }
 
 # Keywords that auto-escalate an adaptive agent from Sonnet to Opus.
 # Matched case-insensitive against the Agent() prompt body.
 # Per-agent keyword lists keep the heuristic targeted (e.g. wrench cares about
-# outage words; anvil cares about code-structure words).
+# outage words; scout cares about research-depth words).
 ADAPTIVE_ESCALATION_KEYWORDS: dict[str, tuple[str, ...]] = {
     "wrench":  ("outage", "down", "broken", "debug", "root cause", "crashed", "failing", "unreachable"),
-    "anvil":   ("refactor", "architect", "multi-file", "cross-system", "end-to-end", "rewrite"),
     "scout":   ("deep dive", "deep-dive", "comprehensive", "synthesize across", "cross-reference"),
     "forge":   ("proposal", "capability statement", "business plan", "client report"),
-    "herald":  (),  # herald has internal two-pass tier logic; no keyword trigger needed
+    "foreman": ("multi-intent", "complex memo", "dispatch swarm"),
 }
 
 

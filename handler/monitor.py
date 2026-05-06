@@ -18,8 +18,10 @@ import json
 import os
 import subprocess
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import urllib.error
+import urllib.request
 sys_path_inserted = True
 import sys as _sys
 _sys.path.insert(0, str(Path(__file__).resolve().parent.parent / 'core'))
@@ -165,60 +167,50 @@ def is_quiet_hours(now: datetime | None = None) -> bool:
 
 # --- Anomaly Detection (pure Python, 0 tokens) ---
 
-def _vps_thrifty() -> bool:
-    """Return True if VPS is in thrifty mode (services intentionally killed)."""
-    result = subprocess.run(
-        ["ssh", "-o", "ConnectTimeout=5", "vps", "test -f ~/.thrifty.mode"],
-        capture_output=True,
-    )
-    return result.returncode == 0
-
-
 def detect_anomalies(data: dict) -> list[dict]:
     """Check gathered data for anomalies. Returns list of {severity, source, message}."""
     anomalies = []
 
     vps_raw = data.get("vps", {}).get("raw", "")
-    if not _vps_thrifty():
-        # VPS services down
-        if "=== SERVICES ===" in vps_raw:
-            services_block = vps_raw.split("=== SERVICES ===")[1].split("===")[0]
-            for line in services_block.strip().splitlines():
-                if "inactive" in line or "failed" in line:
-                    svc = line.split(":")[0].strip()
-                    anomalies.append({
-                        "severity": "high",
-                        "source": "vps",
-                        "message": f"Service down: {svc}",
-                    })
+    # VPS services down
+    if "=== SERVICES ===" in vps_raw:
+        services_block = vps_raw.split("=== SERVICES ===")[1].split("===")[0]
+        for line in services_block.strip().splitlines():
+            if "inactive" in line or "failed" in line:
+                svc = line.split(":")[0].strip()
+                anomalies.append({
+                    "severity": "high",
+                    "source": "vps",
+                    "message": f"Service down: {svc}",
+                })
 
-        # VPS disk usage
-        if "=== HEALTH ===" in vps_raw:
-            health_block = vps_raw.split("=== HEALTH ===")[1].split("===")[0]
-            for line in health_block.strip().splitlines():
-                if "%" in line and "/" in line:
-                    parts = line.split()
-                    for p in parts:
-                        if p.endswith("%"):
-                            pct = int(p.rstrip("%"))
-                            if pct > 85:
-                                anomalies.append({
-                                    "severity": "high" if pct > 95 else "medium",
-                                    "source": "vps",
-                                    "message": f"VPS disk at {pct}%",
-                                })
+    # VPS disk usage
+    if "=== HEALTH ===" in vps_raw:
+        health_block = vps_raw.split("=== HEALTH ===")[1].split("===")[0]
+        for line in health_block.strip().splitlines():
+            if "%" in line and "/" in line:
+                parts = line.split()
+                for p in parts:
+                    if p.endswith("%"):
+                        pct = int(p.rstrip("%"))
+                        if pct > 85:
+                            anomalies.append({
+                                "severity": "high" if pct > 95 else "medium",
+                                "source": "vps",
+                                "message": f"VPS disk at {pct}%",
+                            })
 
-        # VPS errors in last 24h
-        if "=== ERRORS ===" in vps_raw:
-            errors_block = vps_raw.split("=== ERRORS ===")[1].split("===")[0].strip()
-            if errors_block and len(errors_block) > 10:
-                error_count = len(errors_block.splitlines())
-                if error_count > 10:
-                    anomalies.append({
-                        "severity": "medium",
-                        "source": "vps",
-                        "message": f"{error_count} errors in last 24h",
-                    })
+    # VPS errors in last 24h
+    if "=== ERRORS ===" in vps_raw:
+        errors_block = vps_raw.split("=== ERRORS ===")[1].split("===")[0].strip()
+        if errors_block and len(errors_block) > 10:
+            error_count = len(errors_block.splitlines())
+            if error_count > 10:
+                anomalies.append({
+                    "severity": "medium",
+                    "source": "vps",
+                    "message": f"{error_count} errors in last 24h",
+                })
 
     # Mac disk
     mac = data.get("mac", {})
@@ -296,6 +288,147 @@ async def send_alert_email(anomalies: list[dict], data: dict):
         print(f"[handler] {stdout.decode().strip()}")
 
 
+def _handler_alert_priority(anomalies: list[dict]) -> int:
+    if any(a.get("severity") == "high" for a in anomalies):
+        return 2
+    if any(a.get("severity") == "medium" for a in anomalies):
+        return 1
+    return 0
+
+
+def _publish_stack_alert(
+    title: str,
+    message: str,
+    *,
+    anomalies: list[dict],
+    diagnosis: str,
+    fingerprint: str,
+) -> bool:
+    payload = {
+        "title": title,
+        "message": message,
+        "body": message,
+        "kind": "anomaly",
+        "priority": _handler_alert_priority(anomalies),
+        "sources": ("ui",),
+        "fingerprint": fingerprint,
+        "anomalies": anomalies[:10],
+    }
+    if diagnosis:
+        payload["diagnosis"] = diagnosis[:1200]
+    try:
+        return cp.event(CP_AGENT, "anomaly", payload=payload) is not None
+    except Exception as exc:
+        print(f"[handler] stack publish failed: {exc}", file=sys.stderr)
+        return False
+
+
+def _cp_bearer_token() -> str:
+    try:
+        from core.vault import get_secret, hydrate_env
+        hydrate_env(["CP_API_BEARER_TOKEN", "APPLE_BRIDGE_TOKEN"])
+        return (
+            os.environ.get("CP_API_BEARER_TOKEN")
+            or os.environ.get("APPLE_BRIDGE_TOKEN")
+            or get_secret("CP_API_BEARER_TOKEN")
+            or get_secret("APPLE_BRIDGE_TOKEN")
+            or ""
+        )
+    except Exception:
+        return os.environ.get("CP_API_BEARER_TOKEN") or os.environ.get("APPLE_BRIDGE_TOKEN") or ""
+
+
+def _post_handler_heartbeat_sync(*, ok: bool = True) -> bool:
+    token = _cp_bearer_token()
+    if not token:
+        print("[handler] heartbeat skipped: missing cp-api bearer token", file=sys.stderr)
+        return False
+    if os.environ.get("AGENT_CP_URL"):
+        url = os.environ["AGENT_CP_URL"].rstrip("/")
+    else:
+        try:
+            from core.endpoints import get as endpoint_get
+            url = endpoint_get("agent_cp.base_url").rstrip("/")
+        except Exception:
+            url = getattr(cp, "VPS_URL", "").rstrip("/")
+    if not url:
+        print("[handler] heartbeat skipped: missing cp-api endpoint", file=sys.stderr)
+        return False
+    payload = json.dumps({
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z"),
+        "ok": bool(ok),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        f"{url}/api/cockpit/handler/heartbeat",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return 200 <= int(resp.status) < 300
+    except (urllib.error.URLError, OSError) as exc:
+        print(f"[handler] heartbeat failed: {exc}", file=sys.stderr)
+        return False
+
+
+async def post_handler_heartbeat(*, ok: bool = True) -> bool:
+    return await asyncio.to_thread(_post_handler_heartbeat_sync, ok=ok)
+
+
+async def _deliver_actionable_alert(
+    *,
+    title: str,
+    message: str,
+    anomalies: list[dict],
+    data: dict,
+    diagnosis: str,
+    fingerprint: str,
+    state: dict,
+    now: datetime,
+    high: list[dict],
+    should_email: bool,
+    skip_reason: str | None,
+) -> bool:
+    stack_sent = False
+    if should_email:
+        stack_sent = _publish_stack_alert(
+            title,
+            message,
+            anomalies=anomalies,
+            diagnosis=diagnosis,
+            fingerprint=fingerprint,
+        )
+
+    if stack_sent:
+        print(f"[{now:%H:%M:%S}] Stack alert published (hash={fingerprint}).")
+
+    await send_pushover(title, message)
+
+    # Email ONLY if: high severity AND not deduped AND not quiet hours
+    if high and should_email:
+        await send_alert_email(anomalies, data)
+        print(f"[{now:%H:%M:%S}] Alert email sent (hash={fingerprint}).")
+        if high:
+            save_state({
+                "last_alert_hash": fingerprint,
+                "last_alert_ts": now.isoformat(),
+                "alert_count": state.get("alert_count", 0) + 1,
+                "anomalies": anomalies,
+            })
+    elif high:
+        print(f"[{now:%H:%M:%S}] Email skipped: {skip_reason}. Push sent instead.")
+    elif stack_sent:
+        print(f"[{now:%H:%M:%S}] Medium only, stack row published.")
+    else:
+        print(f"[{now:%H:%M:%S}] Medium only, no email.")
+
+    return stack_sent
+
+
 # --- SDK Diagnosis ---
 
 async def diagnose_anomalies(anomalies: list[dict], data: dict, heal_context: str = "") -> str:
@@ -349,7 +482,7 @@ Be concise. This goes to a push notification."""
                 model="opus",
                 permission_mode="bypassPermissions",
                 max_turns=5,
-                max_budget_usd=0.30,
+                # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
                 cwd=str(HOME),
                 hooks=AGENT_HOOKS,
                 thinking=STANDARD,
@@ -390,6 +523,7 @@ async def quick_check(dry_run: bool = False):
     anomalies = detect_anomalies(data)
 
     if not anomalies:
+        await post_handler_heartbeat(ok=True)
         print(f"[{datetime.now():%H:%M:%S}] All clear.")
         return
 
@@ -517,26 +651,22 @@ async def quick_check(dry_run: bool = False):
     age_map = prune_anomaly_age(age_map, {diag_fp}, now)
     save_anomaly_age(age_map)
 
-    # Push notification always fires (cheap, silent on phone at night)
     heal_prefix = f"[{len(healed)} auto-healed] " if healed else ""
     title = f"Handler: {heal_prefix}{len(actionable)} issue{'s' if len(actionable)>1 else ''}"
     push_msg = diagnosis[:400] if diagnosis else "; ".join(a["message"] for a in actionable)[:400]
-    await send_pushover(title, push_msg)
-
-    # Email ONLY if: high severity AND not deduped AND not quiet hours
-    if high and should_email:
-        await send_alert_email(anomalies, data)
-        print(f"[{now:%H:%M:%S}] Alert email sent (hash={fingerprint}).")
-        save_state({
-            "last_alert_hash": fingerprint,
-            "last_alert_ts": now.isoformat(),
-            "alert_count": state.get("alert_count", 0) + 1,
-            "anomalies": actionable,
-        })
-    elif high:
-        print(f"[{now:%H:%M:%S}] Email skipped: {skip_reason}. Push sent instead.")
-    else:
-        print(f"[{now:%H:%M:%S}] Medium only, no email.")
+    await _deliver_actionable_alert(
+        title=title,
+        message=push_msg,
+        anomalies=actionable,
+        data=data,
+        diagnosis=diagnosis,
+        fingerprint=fingerprint,
+        state=state,
+        now=now,
+        high=high,
+        should_email=should_email,
+        skip_reason=skip_reason,
+    )
 
     print(f"[{now:%H:%M:%S}] Handler check complete.")
 
@@ -575,7 +705,7 @@ Keep it under 300 words. No fluff."""
             model="opus",
             permission_mode="bypassPermissions",
             max_turns=5,
-            max_budget_usd=0.25,
+            # max_budget_usd removed 2026-04-22 (#183) — vestigial under Max
             cwd=str(HOME),
             mcp_servers={"core": create_core_server()},
             hooks=AGENT_HOOKS,

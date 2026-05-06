@@ -7,6 +7,7 @@ dependencies = [
     "claude-agent-sdk>=0.1.50",
     "anyio>=4.0",
     "fastapi>=0.100",
+    "httpx>=0.28",
     "uvicorn>=0.20",
     "jinja2>=3.1",
     "playwright>=1.58.0",
@@ -17,4 +18,4 @@ requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
-include = ["core*", "briefs*", "swarm*", "handler*"]
+include = ["core*", "briefs*", "swarm*", "handler*", "cockpit*"]

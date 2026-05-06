@@ -12,12 +12,14 @@ What this guarantees (so individual callers don't have to):
      scrub running first.
   2. Wrapped query() appends every invocation to /tmp/mac-sdk-calls.json
      and raises SDKQuotaExceeded HARD (not a Pushover warning) when the
-     50-calls-per-hour ceiling is hit. Prevents runaway loops.
-  3. When called with options=None, a sane default ClaudeAgentOptions is
-     built with AGENT_HOOKS installed and max_budget_usd=1.00. If the
-     caller supplies their own options, only hooks is back-filled (when
-     hooks is None) — max_budget_usd is left exactly as the caller passed
-     it (including explicit None), matching existing call-site behavior.
+     50-calls-per-hour ceiling is hit. This is a runaway-loop / fan-out
+     guard measured in CALLS, NOT DOLLARS — Max subscription is flat-
+     monthly so dollar caps on oat01 work are vestigial (see
+     ~/.claude/rules/agent-routing.md and memory/feedback_max_metered_
+     no_dollar_cap.md).
+  3. When called with options=None, a strong default ClaudeAgentOptions is
+     built for code-quality work: Opus, max_turns, bypass permissions,
+     STANDARD thinking, max effort, AGENT_HOOKS, and an empty MCP config.
 """
 from __future__ import annotations
 
@@ -48,17 +50,37 @@ from claude_agent_sdk import *  # noqa: E402, F401, F403
 from claude_agent_sdk import ClaudeAgentOptions  # noqa: E402
 
 from core.hooks import AGENT_HOOKS  # noqa: E402
+from core.claude_usage_guard import assert_claude_usage_allowed  # noqa: E402
+from core.thinking import STANDARD  # noqa: E402
 
 
 CALL_LOG = Path("/tmp/mac-sdk-calls.json")
 HOURLY_CAP = 50
 HOURLY_WINDOW = 3600
 PRUNE_WINDOW = 7200
-DEFAULT_MAX_BUDGET_USD = 1.00
-
-_OPTIONS_SUPPORTS_BUDGET = "max_budget_usd" in inspect.signature(ClaudeAgentOptions).parameters
 
 _EMPTY_MCP_CONFIG = str(Path(__file__).resolve().parent / "mcp-empty.json")
+DEFAULT_MODEL = "opus"
+DEFAULT_MAX_TURNS = 20
+DEFAULT_PERMISSION_MODE = "bypassPermissions"
+DEFAULT_EFFORT = "max"
+
+
+def _default_reason() -> str:
+    frame = inspect.currentframe()
+    for _ in range(4):
+        frame = frame.f_back if frame else None
+    if not frame:
+        return "mac_sdk Claude automation"
+    return f"mac_sdk Claude automation from {frame.f_code.co_filename}:{frame.f_lineno}"
+
+
+def _intent_env(existing=None) -> dict:
+    env = dict(existing or {})
+    env.setdefault("CLAUDE_RUN_MODE", os.environ.get("CLAUDE_RUN_MODE", "automation"))
+    env.setdefault("CLAUDE_RUN_PROFILE", os.environ.get("CLAUDE_RUN_PROFILE", "normal"))
+    env.setdefault("CLAUDE_RUN_REASON", os.environ.get("CLAUDE_RUN_REASON") or _default_reason())
+    return env
 
 
 class SDKQuotaExceeded(RuntimeError):
@@ -131,10 +153,40 @@ def _entry_ts(entry: dict) -> float:
 
 def _apply_defaults(options: ClaudeAgentOptions | None) -> ClaudeAgentOptions:
     if options is None:
-        kwargs: dict = {"hooks": AGENT_HOOKS, "mcp_servers": _EMPTY_MCP_CONFIG}
-        if _OPTIONS_SUPPORTS_BUDGET:
-            kwargs["max_budget_usd"] = DEFAULT_MAX_BUDGET_USD
-        return ClaudeAgentOptions(**kwargs)
+        # No max_budget_usd default (removed 2026-04-22, #183). Max
+        # subscription = flat monthly; dollar caps on oat01 work are
+        # vestigial. Runaway-loop guard is HOURLY_CAP + max_turns.
+        return ClaudeAgentOptions(
+            model=DEFAULT_MODEL,
+            permission_mode=DEFAULT_PERMISSION_MODE,
+            max_turns=DEFAULT_MAX_TURNS,
+            cwd=str(Path.home()),
+            hooks=AGENT_HOOKS,
+            mcp_servers=_EMPTY_MCP_CONFIG,
+            env=_intent_env(),
+            thinking=STANDARD,
+            effort=DEFAULT_EFFORT,
+        )
+
+    try:
+        options.env = _intent_env(getattr(options, "env", None))
+    except (AttributeError, TypeError):
+        pass
+
+    defaults = {
+        "model": DEFAULT_MODEL,
+        "permission_mode": DEFAULT_PERMISSION_MODE,
+        "max_turns": DEFAULT_MAX_TURNS,
+        "cwd": str(Path.home()),
+        "thinking": STANDARD,
+        "effort": DEFAULT_EFFORT,
+    }
+    for attr, value in defaults.items():
+        try:
+            if getattr(options, attr, None) is None:
+                setattr(options, attr, value)
+        except (AttributeError, TypeError):
+            pass
 
     if getattr(options, "hooks", None) is None:
         try:
@@ -160,7 +212,7 @@ async def query(
 
     - Enforces 50/hr HARD cap via SDKQuotaExceeded
     - Back-fills AGENT_HOOKS when options has none
-    - Builds a sane default ClaudeAgentOptions when options is None
+    - Builds a strong default ClaudeAgentOptions when options is None
     - Forwards all messages from the underlying SDK query
 
     skip_ambient: when True, callers signal that they do NOT want this
@@ -171,6 +223,7 @@ async def query(
     don't accidentally read like ambient text if a future revision adds
     injection here. Tailor's `_call_claude` already honors the same flag.
     """
+    assert_claude_usage_allowed("mac_sdk")
     _check_and_record_call()
     options = _apply_defaults(options)
     _ = skip_ambient

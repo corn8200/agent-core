@@ -44,6 +44,14 @@ SKIP_HANDLE_PATTERNS = (
     "chat",  # group chat identifiers that are UUID-based often start with "chat"
 )
 
+# NANPA 555-01xx numbers are reserved for fictional/test use (TV, movies, smoke tests).
+# Never a real iMessage sender — skip before classification to avoid false doctor escalations.
+_TEST_HANDLE_PREFIXES = ("+1555",)
+
+
+def _is_test_handle(handle: str) -> bool:
+    return any(handle.startswith(p) for p in _TEST_HANDLE_PREFIXES)
+
 DRY_RUN = os.environ.get("IMESSAGE_TRIAGE_DRY_RUN", "").lower() in {"1", "true", "yes"}
 
 
@@ -192,6 +200,10 @@ async def _run() -> None:
     errors = 0
 
     for chat_id, thread_rows in threads.items():
+        if any(chat_id.startswith(p) for p in SKIP_HANDLE_PATTERNS) or _is_test_handle(chat_id):
+            print(f"[{AGENT}] skip test/placeholder handle {chat_id[:40]}", flush=True)
+            continue
+
         thread_last = thread_rowids.get(chat_id, 0)
         new_rows = [r for r in thread_rows if r["rowid"] > thread_last]
         if not new_rows:

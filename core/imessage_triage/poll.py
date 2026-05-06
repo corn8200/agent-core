@@ -138,13 +138,15 @@ async def _query_new_messages(last_rowid: int) -> list[dict]:
 
 async def _get_thread_snippet(chat_identifier: str, limit: int = 15) -> list[str]:
     """Return last N messages of a thread for classification context."""
-    safe_id = chat_identifier.replace("'", "'\\''")
+    # Quoting: _sqlite_relay_cmd handles shell-level single-quote escaping.
+    # We only need to escape the SQL string literal itself here.
+    sql_safe_id = chat_identifier.replace("'", "''")
     sql = (
         f"SELECT m.text, m.is_from_me "
         f"FROM message m "
         f"JOIN chat_message_join cmj ON m.ROWID = cmj.message_id "
         f"JOIN chat c ON cmj.chat_id = c.ROWID "
-        f"WHERE c.chat_identifier = '{safe_id}' "
+        f"WHERE c.chat_identifier = '{sql_safe_id}' "
         f"AND (m.text IS NOT NULL AND length(trim(m.text)) > 0) "
         f"ORDER BY m.ROWID DESC LIMIT {limit};"
     )

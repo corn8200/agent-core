@@ -29,6 +29,7 @@ import httpx
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from core.vault import get_secret  # noqa: E402
+from core.doctor_escalate import doctor_escalate  # noqa: E402
 
 MODEL_ID = "claude-haiku-4-5-20251001"
 ANTHROPIC_MESSAGES_URL = "https://api.anthropic.com/v1/messages"
@@ -137,4 +138,13 @@ def classify_thread(
         return _parse_response(raw)
     except Exception as exc:
         print(f"[classify] haiku call failed: {exc}", flush=True)
+        doctor_escalate(
+            watcher="imessage-triage",
+            severity="warn",
+            summary=f"iMessage triage classifier failed: {exc}",
+            context={"from_handle": from_handle, "error": str(exc)},
+            fix_hints=["Check ANTHROPIC_API_KEY in MachineAuto vault",
+                       "Verify Haiku API quota at console.anthropic.com"],
+            dedup_scope="imessage-triage-classify-fail",
+        )
         return {"category": "noise", "urgency": 1}

@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from core.tools import tmux_relay_shell  # noqa: E402
 from core.imessage_triage.classify import classify_thread  # noqa: E402
 from core.imessage_triage.publish import publish_imessage_triage  # noqa: E402
+from core.claude_usage_guard import claude_usage_block_reason  # noqa: E402
 
 AGENT = "imessage-triage"
 CACHE_DIR = Path.home() / ".cache" / "imessage-triage"
@@ -183,6 +184,11 @@ def _group_by_thread(rows: list[dict]) -> dict[str, list[dict]]:
 
 
 async def _run() -> None:
+    usage_block = claude_usage_block_reason("imessage_triage")
+    if usage_block:
+        print(f"[{AGENT}] deferred: {usage_block}", flush=True)
+        return
+
     state = _load_state()
     last_rowid = int(state.get("last_rowid") or 0)
     thread_rowids: dict[str, int] = dict(state.get("thread_rowids") or {})
@@ -198,6 +204,7 @@ async def _run() -> None:
     published = 0
     classified = 0
     errors = 0
+    deferred_min_rowid: int | None = None
 
     for chat_id, thread_rows in threads.items():
         if any(chat_id.startswith(p) for p in SKIP_HANDLE_PATTERNS) or _is_test_handle(chat_id):
@@ -226,6 +233,16 @@ async def _run() -> None:
             snippet = [f"[Them] {preview}"]
 
         result = await classify_thread(from_handle, snippet)
+        if result.get("deferred"):
+            rowid = min(r["rowid"] for r in new_rows)
+            deferred_min_rowid = rowid if deferred_min_rowid is None else min(deferred_min_rowid, rowid)
+            print(
+                f"[{AGENT}] deferred thread={chat_id[:40]} rowid={rowid} "
+                f"reason={str(result.get('reason') or '')[:160]}",
+                flush=True,
+            )
+            continue
+
         classified += 1
         category = result["category"]
         urgency = result["urgency"]
@@ -253,13 +270,17 @@ async def _run() -> None:
 
         thread_rowids[chat_id] = max(r["rowid"] for r in new_rows)
 
+    saved_last_rowid = new_max_rowid
+    if deferred_min_rowid is not None:
+        saved_last_rowid = min(new_max_rowid, deferred_min_rowid - 1)
+
     _save_state({
-        "last_rowid": new_max_rowid,
+        "last_rowid": saved_last_rowid,
         "thread_rowids": thread_rowids,
     })
     print(
         f"[{AGENT}] threads={len(threads)} classified={classified} "
-        f"published={published} errors={errors}",
+        f"published={published} errors={errors} deferred={deferred_min_rowid is not None}",
         flush=True,
     )
 

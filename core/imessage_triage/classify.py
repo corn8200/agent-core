@@ -18,8 +18,10 @@ Categories:
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,9 +34,13 @@ from core.mac_sdk import (  # noqa: E402
     TextBlock,
     query,
 )
+from core.claude_usage_guard import ClaudeUsageGateError  # noqa: E402
 from core.doctor_escalate import doctor_escalate  # noqa: E402
 
 MODEL_ID = "claude-haiku-4-5-20251001"
+CACHE_DIR = Path.home() / ".cache" / "imessage-triage"
+CLASSIFY_FAILURE_STATE = CACHE_DIR / "classify-failures.json"
+CLASSIFY_FAILURE_THRESHOLD = int(os.environ.get("IMESSAGE_TRIAGE_FAILURE_THRESHOLD", "3"))
 
 VALID_CATEGORIES = frozenset({
     "action_me",
@@ -70,6 +76,37 @@ Classify this iMessage thread snippet:
   from_handle: {from_handle}
   messages (newest last):
 {messages}"""
+
+
+def _reset_failure_state() -> None:
+    try:
+        CLASSIFY_FAILURE_STATE.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def _record_failure(exc: Exception) -> int:
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    try:
+        state = json.loads(CLASSIFY_FAILURE_STATE.read_text())
+    except Exception:
+        state = {}
+    try:
+        count = int(state.get("count") or 0) + 1
+    except Exception:
+        count = 1
+    next_state = {
+        "count": count,
+        "first_ts": state.get("first_ts") or now,
+        "last_ts": now,
+        "last_error": str(exc),
+    }
+    try:
+        CLASSIFY_FAILURE_STATE.write_text(json.dumps(next_state))
+    except Exception:
+        pass
+    return count
 
 
 async def _call_sdk(prompt: str) -> str:
@@ -123,21 +160,42 @@ async def classify_thread(
     prompt = _PROMPT_TEMPLATE.format(from_handle=from_handle, messages=snippet)
     try:
         raw = await _call_sdk(prompt)
-        return _parse_response(raw)
-    except SDKQuotaExceeded as exc:
-        print(f"[classify] mac_sdk quota exceeded: {exc}", flush=True)
-        return {"category": "noise", "urgency": 1}
+        result = _parse_response(raw)
+        _reset_failure_state()
+        return result
+    except (SDKQuotaExceeded, ClaudeUsageGateError) as exc:
+        print(f"[classify] deferred by Claude backpressure: {exc}", flush=True)
+        return {
+            "category": "noise",
+            "urgency": 1,
+            "deferred": True,
+            "reason": str(exc),
+        }
     except Exception as exc:
-        print(f"[classify] sdk call failed: {exc}", flush=True)
-        doctor_escalate(
-            watcher="imessage-triage",
-            severity="warn",
-            summary=f"iMessage triage classifier failed: {exc}",
-            context={"from_handle": from_handle, "error": str(exc)},
-            fix_hints=[
-                "Check mac_sdk hourly cap (50/hr) at /tmp/mac-sdk-calls.json",
-                "Verify claude CLI is reachable: /opt/homebrew/bin/claude --version",
-            ],
-            dedup_scope="imessage-triage-classify-fail",
+        fail_count = _record_failure(exc)
+        print(
+            f"[classify] sdk call failed ({fail_count}/{CLASSIFY_FAILURE_THRESHOLD}): {exc}",
+            flush=True,
         )
-        return {"category": "noise", "urgency": 1}
+        if fail_count >= CLASSIFY_FAILURE_THRESHOLD:
+            doctor_escalate(
+                watcher="imessage-triage",
+                severity="warn",
+                summary=f"iMessage triage classifier failed: {exc}",
+                context={
+                    "from_handle": from_handle,
+                    "error": str(exc),
+                    "consecutive_failures": fail_count,
+                },
+                fix_hints=[
+                    "Check mac_sdk hourly cap (50/hr) at /tmp/mac-sdk-calls.json",
+                    "Verify claude CLI is reachable: /opt/homebrew/bin/claude --version",
+                ],
+                dedup_scope="imessage-triage-classify-fail",
+            )
+        return {
+            "category": "noise",
+            "urgency": 1,
+            "deferred": True,
+            "reason": str(exc),
+        }

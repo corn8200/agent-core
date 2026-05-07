@@ -103,22 +103,36 @@ def test_classify_thread_uses_mac_sdk(monkeypatch):
     assert result["urgency"] == 8
 
 
-def test_classify_thread_api_error_calls_doctor_and_returns_noise(monkeypatch):
+def test_classify_thread_api_error_calls_doctor_after_repeated_failures(monkeypatch, tmp_path):
+    from core.imessage_triage import classify as classify_mod
+
     async def boom(prompt, options=None, **kwargs):
         raise Exception("SDK 500")
         yield  # make it an async generator
 
     monkeypatch.setattr("core.imessage_triage.classify.query", boom)
+    monkeypatch.setattr(classify_mod, "CLASSIFY_FAILURE_STATE", tmp_path / "failures.json")
     doctor_calls = []
     monkeypatch.setattr(
         "core.imessage_triage.classify.doctor_escalate",
         lambda **kw: doctor_calls.append(kw),
     )
+
     result = asyncio.run(classify_thread("+15551234567", ["[Them] Test"]))
     assert result["category"] == "noise"
     assert result["urgency"] == 1
-    assert doctor_calls, "expected doctor_escalate to be called on SDK failure"
+    assert result["deferred"] is True
+    assert not doctor_calls
+
+    asyncio.run(classify_thread("+15551234567", ["[Them] Test"]))
+    result = asyncio.run(classify_thread("+15551234567", ["[Them] Test"]))
+
+    assert result["category"] == "noise"
+    assert result["urgency"] == 1
+    assert result["deferred"] is True
+    assert doctor_calls, "expected doctor_escalate after repeated SDK failures"
     assert doctor_calls[0]["watcher"] == "imessage-triage"
+    assert doctor_calls[0]["context"]["consecutive_failures"] == 3
 
 
 def test_classify_thread_quota_exceeded_returns_noise(monkeypatch):
@@ -132,6 +146,84 @@ def test_classify_thread_quota_exceeded_returns_noise(monkeypatch):
     result = asyncio.run(classify_thread("+15551234567", ["[Them] Test"]))
     assert result["category"] == "noise"
     assert result["urgency"] == 1
+    assert result["deferred"] is True
+
+
+def test_classify_thread_usage_gate_defers_without_doctor(monkeypatch):
+    from core.claude_usage_guard import ClaudeUsageGateError
+
+    async def usage_boom(prompt, options=None, **kwargs):
+        raise ClaudeUsageGateError("icloud-20x is above Claude automation gate")
+        yield
+
+    monkeypatch.setattr("core.imessage_triage.classify.query", usage_boom)
+    doctor_calls = []
+    monkeypatch.setattr(
+        "core.imessage_triage.classify.doctor_escalate",
+        lambda **kw: doctor_calls.append(kw),
+    )
+
+    result = asyncio.run(classify_thread("+15551234567", ["[Them] Test"]))
+
+    assert result["category"] == "noise"
+    assert result["urgency"] == 1
+    assert result["deferred"] is True
+    assert not doctor_calls
+
+
+def test_poll_usage_gate_defers_before_query(monkeypatch):
+    from core.imessage_triage import poll as poll_mod
+
+    queried = False
+
+    async def fake_query_new_messages(last_rowid):
+        nonlocal queried
+        queried = True
+        return []
+
+    monkeypatch.setattr(
+        poll_mod,
+        "claude_usage_block_reason",
+        lambda phase: "icloud-20x is above Claude automation gate",
+    )
+    monkeypatch.setattr(poll_mod, "_query_new_messages", fake_query_new_messages)
+
+    asyncio.run(poll_mod._run())
+
+    assert queried is False
+
+
+def test_poll_deferred_classification_keeps_rowid_for_retry(monkeypatch):
+    from core.imessage_triage import poll as poll_mod
+
+    saved_state = {}
+
+    async def fake_query_new_messages(last_rowid):
+        return _make_rows((101, "+13045551234", "need help", False))
+
+    async def fake_snippet(chat_identifier, limit=15):
+        return ["[Them] need help"]
+
+    async def fake_classify(from_handle, messages):
+        return {
+            "category": "noise",
+            "urgency": 1,
+            "deferred": True,
+            "reason": "usage gate",
+        }
+
+    monkeypatch.setattr(poll_mod, "claude_usage_block_reason", lambda phase: None)
+    monkeypatch.setattr(poll_mod, "_load_state", lambda: {"last_rowid": 100, "thread_rowids": {}})
+    monkeypatch.setattr(poll_mod, "_query_new_messages", fake_query_new_messages)
+    monkeypatch.setattr(poll_mod, "_get_thread_snippet", fake_snippet)
+    monkeypatch.setattr(poll_mod, "classify_thread", fake_classify)
+    monkeypatch.setattr(poll_mod, "_save_state", lambda state: saved_state.update(state))
+    monkeypatch.setattr(poll_mod, "publish_imessage_triage", lambda **kw: pytest.fail("should not publish"))
+
+    asyncio.run(poll_mod._run())
+
+    assert saved_state["last_rowid"] == 100
+    assert saved_state["thread_rowids"] == {}
 
 
 # ---------------------------------------------------------------------------

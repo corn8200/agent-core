@@ -111,6 +111,12 @@ async def send_pushover(
     timeout: int = 10,
 ) -> PushoverResult:
     """Send a Pushover notification without blocking the event loop."""
+    try:
+        from core.voice_reroute import voice_reroute_send
+        if voice_reroute_send(title, message, priority, url, url_title):
+            return PushoverResult(True, "rerouted to voice (claude:9)")
+    except Exception:
+        pass
     token, user = _credentials()
     if not token or not user:
         return PushoverResult(False, "pushover credentials unavailable")

@@ -154,14 +154,20 @@ def _record_and_check() -> tuple[int, bool]:
 
 def _pushover_alert(count: int) -> None:
     try:
+        title = "SDK runaway alert"
+        message = f"agent-core made {count} SDK calls in the last hour (cap={HOURLY_CAP}). Check logs."
+        try:
+            from core.voice_reroute import voice_reroute_send
+            if voice_reroute_send(title, message, 0):
+                return
+        except Exception:
+            pass
         token = os.environ.get("PUSHOVER_APP_TOKEN", "")
         user = os.environ.get("PUSHOVER_USER_KEY", "")
         if not token or not user:
             return
 
         import urllib.request, urllib.parse
-        title = "SDK runaway alert"
-        message = f"agent-core made {count} SDK calls in the last hour (cap={HOURLY_CAP}). Check logs."
         payload = {
             "token": token,
             "user": user,

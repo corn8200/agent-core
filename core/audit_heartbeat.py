@@ -38,6 +38,12 @@ def _pushover_fail(detail: str) -> None:
             return
         host = os.uname().nodename
         title = f"Audit log heartbeat FAILED ({host})"
+        try:
+            from core.voice_reroute import voice_reroute_send
+            if voice_reroute_send(title, detail[:1024], 0):
+                return
+        except Exception:
+            pass
         data = {
             "token": token,
             "user": user,

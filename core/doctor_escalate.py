@@ -317,6 +317,12 @@ def _pushover_direct(
     url: str | None = None,
     url_title: str | None = None,
 ) -> bool:
+    try:
+        from core.voice_reroute import voice_reroute_send
+        if voice_reroute_send(title, message, priority, url, url_title):
+            return True
+    except Exception:
+        pass
     token = os.environ.get("PUSHOVER_APP_TOKEN")
     user = os.environ.get("PUSHOVER_USER_KEY")
     if not (token and user):

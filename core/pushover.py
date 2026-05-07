@@ -3,15 +3,27 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
+from core.endpoints import get as get_endpoint
 from core.vault import get_secret
 
 
 PUSHOVER_API_URL = "https://api.pushover.net/1/messages.json"
+DIRECT_TITLE_PREFIXES = (
+    "[SPILL]",
+    "[OVERSEER-DOWN]",
+    "[OVERSEER-RECOVERED]",
+    "[DOCTOR-DOWN]",
+    "[DOCTOR-BYPASS",
+    "[BRAIN-PHANTOM-ACTION]",
+    "[BRAIN-WAKE-FLOOD]",
+    "[BRAIN-EMPTY-FILE-REJECTED]",
+)
 
 
 @dataclass(frozen=True)
@@ -95,6 +107,77 @@ def _send_sync(payload: dict[str, str | int], *, timeout: int = 10) -> PushoverR
         return PushoverResult(False, f"pushover error: {exc}")
 
 
+def _should_bypass_gateway(title: str) -> bool:
+    if os.environ.get("OVERSEER_GATEWAY_BYPASS") == "1":
+        return True
+    return any(title.startswith(prefix) for prefix in DIRECT_TITLE_PREFIXES)
+
+
+def _gateway_token() -> str:
+    return os.environ.get("OVERSEER_GATEWAY_TOKEN") or get_secret("CP_API_BEARER_TOKEN") or ""
+
+
+def _cp_api_base() -> str:
+    return os.environ.get("CP_API_BASE") or get_endpoint("agent_cp.base_url")
+
+
+def _send_gateway_sync(
+    *,
+    title: str,
+    message: str,
+    priority: int = 0,
+    sound: str | None = None,
+    url: str | None = None,
+    url_title: str | None = None,
+    device: str | None = None,
+    html: bool = False,
+    timeout: int = 10,
+) -> PushoverResult:
+    token = _gateway_token()
+    if not token:
+        return PushoverResult(False, "overseer gateway token unavailable")
+    payload: dict[str, Any] = {
+        "source": "agent-core.pushover",
+        "payload": {
+            "channel": "pushover",
+            "title": _clip(title, 250),
+            "body": _clip(message, 4000),
+            "priority": max(-2, min(2, int(priority))),
+            "tags": [],
+        },
+    }
+    for key, value in (
+        ("sound", sound),
+        ("url", url),
+        ("url_title", url_title),
+        ("device", device),
+    ):
+        if value:
+            payload["payload"][key] = value
+    if html:
+        payload["payload"]["html"] = 1
+    data = json.dumps(payload).encode()
+    base_url = _cp_api_base().rstrip("/")
+    req = urllib.request.Request(
+        f"{base_url}/api/overseer/gateway/enqueue",
+        data=data,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode(errors="replace")
+            parsed = json.loads(raw) if raw else {}
+            if 200 <= resp.status < 300 and parsed.get("ok", True):
+                return PushoverResult(True, f"overseer gateway accepted {parsed.get('envelope_id')}", parsed)
+            return PushoverResult(False, f"overseer gateway HTTP {resp.status}: {raw[:300]}", parsed)
+    except Exception as exc:
+        return PushoverResult(False, f"overseer gateway error: {exc}")
+
+
 async def send_pushover(
     *,
     title: str,
@@ -117,6 +200,19 @@ async def send_pushover(
             return PushoverResult(True, "rerouted to voice (claude:9)")
     except Exception:
         pass
+    if not _should_bypass_gateway(title):
+        return await asyncio.to_thread(
+            _send_gateway_sync,
+            title=title,
+            message=message,
+            priority=priority,
+            sound=sound,
+            url=url,
+            url_title=url_title,
+            device=device,
+            html=html,
+            timeout=timeout,
+        )
     token, user = _credentials()
     if not token or not user:
         return PushoverResult(False, "pushover credentials unavailable")

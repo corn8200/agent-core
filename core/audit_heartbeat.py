@@ -20,54 +20,39 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from core.hooks import AUDIT_LOG, audit_write
+from core.pushover import send_pushover
 
 AUDIT_LOG_PATH = Path(AUDIT_LOG)
 
 
-def _pushover_fail(detail: str) -> None:
-    """Fire a Pushover P0 alert when the heartbeat fails. Silent on any error."""
+async def _pushover_fail(detail: str) -> None:
+    """Route a heartbeat failure through the Overseer-aware Pushover helper."""
     try:
-        import httpx
-
-        from core.vault import get_secret
-
-        user = get_secret("PUSHOVER_USER_KEY")
-        token = get_secret("PUSHOVER_APP_TOKEN")
-        if not user or not token:
-            print("[audit-heartbeat] pushover skipped: no creds", file=sys.stderr)
-            return
         host = os.uname().nodename
         title = f"Audit log heartbeat FAILED ({host})"
-        try:
-            from core.voice_reroute import voice_reroute_send
-            if voice_reroute_send(title, detail[:1024], 0):
-                return
-        except Exception:
-            pass
-        data = {
-            "token": token,
-            "user": user,
-            "title": title,
-            "message": detail[:1024],
-            "priority": 0,
-        }
+        url = None
+        url_title = None
         try:
             from core.interactive_links import alert_action_url
 
-            data["url"] = alert_action_url(
+            url = alert_action_url(
                 source="audit-heartbeat",
                 title=title,
                 message=detail,
                 severity="warn",
             )
-            data["url_title"] = "Send to Mac panel 3"
+            url_title = "Send to Mac panel 3"
         except Exception:
             pass
-        httpx.post(
-            "https://api.pushover.net/1/messages.json",
-            data=data,
-            timeout=10.0,
+        result = await send_pushover(
+            title=title,
+            message=detail[:1024],
+            priority=0,
+            url=url,
+            url_title=url_title,
         )
+        if not result.ok:
+            print(f"[audit-heartbeat] pushover skipped: {result.detail}", file=sys.stderr)
     except Exception as e:
         print(f"[audit-heartbeat] pushover fallback failed: {e}", file=sys.stderr)
 
@@ -88,7 +73,7 @@ async def main() -> int:
     if not AUDIT_LOG_PATH.exists():
         msg = f"audit log does not exist at {AUDIT_LOG_PATH}"
         print(f"FAIL: {msg}", file=sys.stderr)
-        _pushover_fail(msg)
+        await _pushover_fail(msg)
         return 2
 
     try:
@@ -96,14 +81,14 @@ async def main() -> int:
     except Exception as e:
         msg = f"cannot read audit log at {AUDIT_LOG_PATH}: {e}"
         print(f"FAIL: {msg}", file=sys.stderr)
-        _pushover_fail(msg)
+        await _pushover_fail(msg)
         return 2
 
     found = any(marker in line for line in tail)
     if not found:
         msg = f"marker {marker} not found in tail of {AUDIT_LOG_PATH}"
         print(f"FAIL: {msg}", file=sys.stderr)
-        _pushover_fail(msg)
+        await _pushover_fail(msg)
         return 2
 
     print(f"OK: heartbeat {marker} round-tripped to {AUDIT_LOG_PATH}")

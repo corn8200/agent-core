@@ -1,9 +1,10 @@
-"""doctor_escalate — canonical entry point for routing infra alerts to a doctor pane.
+"""doctor_escalate — canonical entry point for routing infra alerts to Overseer.
 
 Replaces direct-to-Pushover / direct-email alerting from watchers, daemons, and
-schedulers. The doctor pane on the relevant host (Mac or VPS) reasons about the
-alert, applies safe fixes, writes backlog rows for sticky issues, and iMessages
-John only if human hands are needed. See ~/.claude/rules/infra-alerts.md.
+schedulers. Doctor panes were retired in the 2026-05-08 pane reduction; alerts
+now land in the Mac Overseer Voice pane, which coordinates fixes, writes
+backlog rows for sticky issues, and wakes John only if human hands are needed.
+See ~/.claude/rules/infra-alerts.md.
 
 Usage (from any watcher on VPS or Mac):
 
@@ -60,9 +61,11 @@ logger = logging.getLogger(__name__)
 
 _SOURCE_HOST = "mac" if sys.platform == "darwin" else "vps"
 
+OVERSEER_VOICE_PANE = "claude:9"
+OVERSEER_VOICE_HOST = "mac"
 DOCTOR_PANES = {
-    "mac": "claude:8",
-    "vps": "claude-vps:6",
+    "mac": OVERSEER_VOICE_PANE,
+    "vps": OVERSEER_VOICE_PANE,
 }
 DOCTOR_LOG_PATHS = {
     "mac": Path.home() / "Library/Logs/doctor.jsonl",
@@ -106,7 +109,11 @@ def _doctor_log_path() -> Path:
 
 
 def _resolve_target(target_host: Optional[str]) -> tuple[str, str, list[str]]:
-    """Return (resolved_host, pane, ssh_args)."""
+    """Return (resolved_host, pane, ssh_args).
+
+    ``target_host`` still describes where the fix may need to run. The receiving
+    pane is always Mac Overseer Voice after the doctor-pane retirement.
+    """
     if target_host is None:
         target_host = _SOURCE_HOST
     if target_host not in DOCTOR_PANES:
@@ -115,10 +122,7 @@ def _resolve_target(target_host: Optional[str]) -> tuple[str, str, list[str]]:
         )
     pane = DOCTOR_PANES[target_host]
     on_mac = _on_mac()
-    if target_host == "mac":
-        ssh_args = [] if on_mac else ["--ssh", "mac"]
-    else:
-        ssh_args = ["--ssh", "vps"] if on_mac else []
+    ssh_args = [] if on_mac else ["--ssh", OVERSEER_VOICE_HOST]
     return target_host, pane, ssh_args
 
 
@@ -425,7 +429,7 @@ def _format_briefing(
     log_path = _doctor_log_path()
     lines = [
         f"[DOCTOR-ESCALATION {watcher} {ts}]",
-        f"target_host={target_host} source_host={_SOURCE_HOST} (fix runs on target_host's doctor)",
+        f"target_host={target_host} source_host={_SOURCE_HOST} receiver={OVERSEER_VOICE_PANE} (Overseer coordinates the fix)",
         f"severity={severity} summary={summary[:200]}",
         f"fingerprint={fingerprint} (dedup TTL {DEDUP_TTL_SECONDS//3600}h)",
     ]
@@ -449,10 +453,10 @@ def _format_briefing(
     lines += [
         "",
         "Your job:",
-        "1. If a fix_hint is obviously safe and applicable, run it; log the outcome.",
+        "1. If a fix_hint is obviously safe and applicable, run it or assign it; log the outcome.",
         "2. If the issue is structural/recurring, POST /backlog to agent-cp with tags=[infra,auto-filed].",
         "3. iMessage John only if human hands are required.",
-        "Do NOT escalate to Pushover/email directly from doctor — that's the watcher's bypass path.",
+        "Do NOT escalate to Pushover/email directly from an agent pane; use the Overseer/gateway path.",
         "",
         "Standing briefing: ~/claude-config/doctor/COMMON.md + ~/claude-config/doctor/{MAC,VPS}.md",
         f"Log this escalation: {log_path}",

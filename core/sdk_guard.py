@@ -154,45 +154,40 @@ def _record_and_check() -> tuple[int, bool]:
 
 def _pushover_alert(count: int) -> None:
     try:
+        import asyncio
+
         title = "SDK runaway alert"
         message = f"agent-core made {count} SDK calls in the last hour (cap={HOURLY_CAP}). Check logs."
-        try:
-            from core.voice_reroute import voice_reroute_send
-            if voice_reroute_send(title, message, 0):
-                return
-        except Exception:
-            pass
-        token = os.environ.get("PUSHOVER_APP_TOKEN", "")
-        user = os.environ.get("PUSHOVER_USER_KEY", "")
-        if not token or not user:
-            return
-
-        import urllib.request, urllib.parse
-        payload = {
-            "token": token,
-            "user": user,
-            "title": title,
-            "message": message,
-            "priority": "0",
-        }
+        url = None
+        url_title = None
         try:
             from core.interactive_links import alert_action_url
 
-            payload["url"] = alert_action_url(
+            url = alert_action_url(
                 source="sdk-guard",
                 title=title,
                 message=message,
                 severity="warn",
             )
-            payload["url_title"] = "Send to Mac panel 3"
+            url_title = "Send to Mac panel 3"
         except Exception:
             pass
-        data = urllib.parse.urlencode(payload).encode()
-        urllib.request.urlopen(
-            "https://api.pushover.net/1/messages.json",
-            data=data,
+        from core.pushover import send_pushover
+
+        coro = send_pushover(
+            title=title,
+            message=message,
+            priority=0,
+            url=url,
+            url_title=url_title,
             timeout=5,
         )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(coro)
+        else:
+            loop.create_task(coro)
     except Exception:
         pass  # never block a real agent call over an alert failure
 

@@ -195,9 +195,9 @@ async def send_pushover(
 ) -> PushoverResult:
     """Send a Pushover notification without blocking the event loop."""
     try:
-        from core.voice_reroute import voice_reroute_send
+        from core.voice_reroute import VOICE_TARGET_PANE, voice_reroute_send
         if voice_reroute_send(title, message, priority, url, url_title):
-            return PushoverResult(True, "rerouted to voice (claude:9)")
+            return PushoverResult(True, f"rerouted to voice ({VOICE_TARGET_PANE})")
     except Exception:
         pass
     if not _should_bypass_gateway(title):

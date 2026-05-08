@@ -1,3 +1,5 @@
+import asyncio
+
 from core.pushover import _build_payload
 
 
@@ -35,3 +37,15 @@ def test_pushover_payload_clips_title_and_message():
     assert payload["sound"] == "updown"
     assert payload["url"] == "https://example.com"
     assert payload["url_title"] == "Example"
+
+
+def test_send_pushover_reports_current_voice_reroute_target(monkeypatch):
+    from core import voice_reroute
+    from core.pushover import send_pushover
+
+    monkeypatch.setattr(voice_reroute, "voice_reroute_send", lambda *_args: True)
+
+    result = asyncio.run(send_pushover(title="Alarm", message="Wake up"))
+
+    assert result.ok is True
+    assert result.detail == "rerouted to voice (claude:9)"

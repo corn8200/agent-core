@@ -1,9 +1,9 @@
 """Pushover-to-Voice reroute helper.
 
 When the kill-switch flag is active, Pushover sends are rerouted to the
-overseer voice pane (claude:9 on Mac) via pane-ask-v2, instead of going
-to John's phone. Also writes a durable queue log so alerts are preserved
-even if the dispatch fails.
+overseer Voice pane via pane-ask-v2, instead of going to John's phone.
+Also writes a durable queue log so alerts are preserved even if the
+dispatch fails.
 
 Activated by either:
   - env var PUSHOVER_TO_VOICE=1
@@ -44,7 +44,7 @@ def voice_reroute_send(
     url: str | None = None,
     url_title: str | None = None,
 ) -> bool:
-    """Reroute a Pushover-style alert to claude:9 voice pane.
+    """Reroute a Pushover-style alert to the Voice pane.
 
     Always returns True when reroute is active (the queue log captures the
     alert even if the pane-ask-v2 dispatch itself fails). Returns False if

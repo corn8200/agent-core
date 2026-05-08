@@ -121,7 +121,12 @@ def _sqlite_via_relay_cmd(sql: str, db_path: str = "~/Library/Messages/chat.db")
 
 STATE_FILE = Path.home() / ".imessage_bus_state"
 LEGACY_STATE = Path.home() / ".research_chain_state"
-SELF_CHATS = ("corn82@icloud.com", "+13042684985")
+# Self-chats moved to the dedicated Overseer rail 2026-05-07
+# (~/bin/imessage-overseer-watcher.py + LaunchAgent
+# com.john.imessage-overseer-watcher). The old bus daemon was double-replying
+# with [Router]/[NN] noise on John's watch dictations. Keep this empty so the
+# bus daemon only handles non-self threads (VPS-tag replies, mailtriage, etc).
+SELF_CHATS: tuple[str, ...] = ()
 DB_PATH = "~/Library/Messages/chat.db"
 
 

@@ -1,6 +1,6 @@
 # Mac Capability Inventory
 
-*Auto-generated 2026-05-06 03:08 UTC by `mac-capabilities-inventory`. Do not hand-edit.*
+*Auto-generated 2026-05-08 16:18 UTC by `mac-capabilities-inventory`. Do not hand-edit.*
 
 ## Installed Apps (31 total, 6 AppleScript-capable)
 
@@ -38,7 +38,7 @@
 | Visual Studio Code |  | `/Applications/Visual Studio Code.app` |
 | Windows App |  | `/Applications/Windows App.app` |
 
-## MCP Servers (12)
+## MCP Servers (15)
 
 | Name | Source | Command |
 |------|--------|---------|
@@ -53,7 +53,10 @@
 | home-assistant | `~/.claude/.mcp.json` | `uvx` |
 | apple-voice-memos | `~/.claude/.mcp.json` | `npx` |
 | sentry | `~/.claude/.mcp.json` | `node` |
+| overseer | `~/.claude/.mcp.json` | `node` |
 | codex:chatgpt-codex-bridge | `~/.codex/config.toml` | `` |
+| codex:overseer | `~/.codex/config.toml` | `` |
+| codex:openaiDeveloperDocs | `~/.codex/config.toml` | `` |
 
 ## Apple Data Sources (9)
 
@@ -69,7 +72,7 @@
 | Music | `osascript` | library metadata |
 | Safari | `osascript` | history+bookmarks |
 
-## LaunchAgents — com.john.* (51)
+## LaunchAgents — com.john.* (61)
 
 | Label | Schedule |
 |-------|----------|
@@ -86,18 +89,20 @@
 | `com.john.cockpit-imessage-sender` | every 30s |
 | `com.john.codex-auth-watch` | daily 09:30 |
 | `com.john.codex-cleanup` | daily 03:15 |
-| `com.john.doctor-pulse-watch` | every 5m |
 | `com.john.groundtruth-admin` | always-alive |
 | `com.john.handler-agent` | every 30m |
 | `com.john.imessage-bus-watchdog` | every 5m |
 | `com.john.imessage-bus` | always-alive |
 | `com.john.imessage-drainer` | always-alive |
 | `com.john.imessage-inbound` | every 5m |
+| `com.john.imessage-overseer-watcher` | always-alive |
+| `com.john.imessage-triage` | every 60s |
 | `com.john.imessage-vector-indexer-watchdog` | every 15m |
 | `com.john.imessage-vector-indexer` | every 30m |
 | `com.john.infra-docs` | daily 04:00 |
+| `com.john.league-sync` | daily 06:00 |
 | `com.john.mac-active-account-publish` | always-alive |
-| `com.john.mac-doctor-pulse-watch` | every 5m |
+| `com.john.mac-tmux-state-publish` | always-alive |
 | `com.john.mail-app-restart` | daily 04:00 |
 | `com.john.memory-digest` | every 15m |
 | `com.john.nightly-infra` | daily 23:00 |
@@ -105,11 +110,14 @@
 | `com.john.nudge-engine` | every 5m |
 | `com.john.op-lint-watch` | daily 09:00 |
 | `com.john.operator-calendar-collect` | every 5m |
+| `com.john.operator-ops-data-collect` | every 15m |
+| `com.john.overseer-voice-bootstrap` | every 5m |
 | `com.john.pane-ask-drift` | every 6h |
 | `com.john.pane-autoapprove` | always-alive |
 | `com.john.pane-commander-daemon` | every 60s |
 | `com.john.pane-heartbeat` | every 60s |
 | `com.john.pane-msg-followup-watch` | every 5m |
+| `com.john.pane-stale-creds` | every 10m |
 | `com.john.routines-guard` | daily 07:30 |
 | `com.john.rq-mac-scheduler` | always-alive |
 | `com.john.rq-worker-2` | always-alive |
@@ -120,7 +128,12 @@
 | `com.john.titan-backlog-1000` | daily 10:00 |
 | `com.john.tmux-snap` | every 30m |
 | `com.john.toolsmith-weekly` | daily 09:05 |
+| `com.john.voice-action-executor` | every 60s |
+| `com.john.voice-blocker-stall-watch` | every 5m |
+| `com.john.voice-down-watch` | every 5m |
 | `com.john.voice-memo-intake` | every 60s |
+| `com.john.voice-rotate-watch` | every 2m |
+| `com.john.voice-state-publish` | every 60s |
 | `com.john.watch-commander` | always-alive |
 | `com.john.wc-watchdog` | every 60s |
 | `com.john.weekly-status` | daily 17:00 |

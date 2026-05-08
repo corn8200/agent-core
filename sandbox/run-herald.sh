@@ -12,7 +12,7 @@ source "${SCRIPT_DIR}/_lib.sh"
 
 sandbox_guard_creds
 sandbox_pick_docker
-sandbox_ensure_colima
+sandbox_ensure_docker
 
 cd "${REPO_DIR}"
 

@@ -20,14 +20,15 @@ Usage (from any watcher on VPS or Mac):
         target_host="mac",                     # optional: "mac" | "vps" | None (= calling host)
     )
 
-Routing semantics (mac-doctor-pane plan, 2026-04-27):
-    target_host  — where the FIX should run (which doctor pane gets dispatched).
+Routing semantics:
+    target_host  — where the FIX may need to run.
                    Default: the host the call was made from.
     source_host  — where the watcher detected the symptom from (the calling
                    host). Stamped in the briefing for human context only.
 
 Fallback: 3 retries with backoff (5s/15s/45s) via pane-ask-v2; if all fail,
-direct Pushover with [DOCTOR-BYPASS-<host>] prefix so the alert still lands.
+last-ditch direct Pushover with [OVERSEER-VOICE-BYPASS-<host>] prefix so a
+real Overseer/transport failure still lands.
 """
 from __future__ import annotations
 
@@ -77,7 +78,7 @@ PANE_ASK_PATHS = (
 )
 DEDUP_TTL_SECONDS = 6 * 3600
 BYPASS_WINDOW_SECONDS = 15 * 60
-BYPASS_THRESHOLD = 3          # N bypasses in window → wake John about doctor-down
+BYPASS_THRESHOLD = 3          # N bypasses in window -> wake John about Voice transport failure
 # Doctor bypass alerts are still infra alerts. Per rules/messaging.md, P2 is
 # family/home safety only; P1 is reserved for rare true infra emergencies.
 SEVERITIES = {"ok": 0, "notice": 0, "warn": 0, "error": 0, "critical": 1}
@@ -371,8 +372,8 @@ def _pushover_direct(
 def _record_bypass(redis_conn, target_host: str) -> int:
     """[CRITIC-FIX SEV-1#2] Bypass counter scoped per host.
 
-    Mac and VPS doctor get separate bypass counters. A failure on one host
-    should never trigger a doctor-down alarm on the other.
+    Mac and VPS targets get separate bypass counters. A failure on one target
+    should never trigger a Voice-route alarm on the other.
     """
     if redis_conn is not None:
         try:
@@ -671,26 +672,28 @@ def _deliver_bypass(
     prio = bypass_priority if bypass_priority is not None else SEVERITIES.get(severity, 0)
     # [CRITIC-FIX SEV-2#1] Distinct subtype for rate-limited bypasses.
     if "rate_limited" in reason or "rc=7" in reason:
-        title_prefix = f"[DOCTOR-RATE-LIMITED-{target_host}]"
+        title_prefix = f"[OVERSEER-VOICE-RATE-LIMITED-{target_host}]"
+        transport_status = f"Overseer Voice route rate-limited - {reason}"
     else:
-        title_prefix = f"[DOCTOR-BYPASS-{target_host}]"
+        title_prefix = f"[OVERSEER-VOICE-BYPASS-{target_host}]"
+        transport_status = f"Overseer Voice route failed - {reason}"
     title = f"{title_prefix} {watcher}/{severity}: {summary[:80]}"
     body_parts = [
-        f"doctor unreachable - {reason}",
+        transport_status,
         f"bypass #{bypass_count} in last {BYPASS_WINDOW_SECONDS//60}m (host={target_host})",
         "",
         briefing,
     ]
     if bypass_count >= BYPASS_THRESHOLD and "rate_limited" not in reason:
         prio = max(prio, 1)
-        body_parts.insert(0, f"WARN: doctor[{target_host}] appears DOWN ({bypass_count} bypasses in window)")
+        body_parts.insert(0, f"WARN: Overseer Voice route for {target_host} failed {bypass_count} times in window")
     body = "\n".join(body_parts)
     url = None
     try:
         from interactive_links import alert_action_url
 
         url = alert_action_url(
-            source=f"doctor-bypass-{target_host}",
+            source=f"overseer-voice-bypass-{target_host}",
             title=title,
             message=body,
             severity=severity,
@@ -702,7 +705,7 @@ def _deliver_bypass(
         body,
         priority=prio,
         url=url,
-        url_title="Send to Mac panel 3" if url else None,
+        url_title="Send to Overseer Voice" if url else None,
     )
     _log_event({
         "ts": canonical_ts(),

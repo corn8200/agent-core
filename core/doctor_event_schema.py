@@ -7,9 +7,9 @@ for the ts field rather than datetime.isoformat().
 Event types (event field):
 
   Producer-side — written by doctor_escalate.py:
-    dispatched   — briefing successfully delivered to doctor pane via pane-ask-v2
+    dispatched   — briefing successfully delivered to Overseer Voice via pane-ask-v2
     dedup_hit    — suppressed; same fingerprint still live in Redis within TTL
-    bypass       — doctor unreachable; routed direct to Pushover as [DOCTOR-BYPASS]
+    bypass       — Voice route failed; routed direct to Pushover as [OVERSEER-VOICE-BYPASS]
     rate_limited — dropped by producer-side token-bucket (#648)
 
   Doctor-side — written by doctor pane after handling an escalation:
@@ -26,7 +26,7 @@ Optional — producer events (dispatched|dedup_hit|bypass|rate_limited):
     fingerprint   str   hex SHA-1 dedup key  (alias: dedup_key)
     context_json  str   JSON-serialized producer context dict (auto-derived from context if absent)
     source_host   str   mac|vps
-    bypass        bool  True when DOCTOR-BYPASS path fired  (default False)
+    bypass        bool  True when Overseer Voice bypass path fired  (default False)
     attempt       int   dispatch attempt number             (dispatched only)
     ttl_remaining_s int seconds left on dedup key          (dedup_hit only)
     reason        str   why bypassed or deduped            (bypass|dedup_hit)

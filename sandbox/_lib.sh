@@ -4,7 +4,7 @@
 # Functions:
 #   sandbox_guard_creds            — abort if ANTHROPIC_API_KEY/AUTH_TOKEN set
 #   sandbox_pick_docker            — export DOCKER=<path to docker binary>
-#   sandbox_ensure_colima          — start Colima if `docker info` fails
+#   sandbox_ensure_docker          — require a reachable Docker daemon
 #   sandbox_need_build <image>     — echo 1 if image missing OR Dockerfile newer; else 0
 
 sandbox_guard_creds() {
@@ -29,29 +29,12 @@ sandbox_pick_docker() {
   export DOCKER
 }
 
-sandbox_ensure_colima() {
+sandbox_ensure_docker() {
   if "${DOCKER}" info >/dev/null 2>&1; then
     return 0
   fi
-  echo "[sandbox] Docker not responding — attempting Colima start..." >&2
-  local colima_bin=""
-  for candidate in /opt/homebrew/bin/colima /usr/local/bin/colima; do
-    [[ -x "$candidate" ]] && { colima_bin="$candidate"; break; }
-  done
-  [[ -z "$colima_bin" ]] && command -v colima >/dev/null 2>&1 && colima_bin=$(command -v colima)
-  if [[ -z "$colima_bin" ]]; then
-    echo "[sandbox] colima not found — cannot auto-start. Install with: brew install colima" >&2
-    return 1
-  fi
-  "$colima_bin" start --cpu 2 --memory 4 --disk 40 >&2 || return 1
-  # Give docker daemon a moment to settle after Colima reports done
-  local tries=0
-  while ! "${DOCKER}" info >/dev/null 2>&1; do
-    tries=$((tries + 1))
-    [[ $tries -ge 10 ]] && { echo "[sandbox] docker still not responding after colima start" >&2; return 1; }
-    sleep 1
-  done
-  return 0
+  echo "[sandbox] Docker daemon is not responding. Start Docker Desktop or another compatible daemon and retry." >&2
+  return 1
 }
 
 sandbox_need_build() {

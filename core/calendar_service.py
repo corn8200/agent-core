@@ -251,6 +251,7 @@ async def get_events(start: datetime, end: datetime) -> list[CalendarEvent]:
     set FS to (ASCII character 31)
     set RS to (ASCII character 30)
     set skipCals to {{"Siri Suggestions", "US Holidays"}}
+    launch application "Calendar"
     tell application "Calendar"
         set startDate to date "{start_str}"
         set time of startDate to {start.hour * 3600 + start.minute * 60}
@@ -293,6 +294,7 @@ async def get_events(start: datetime, end: datetime) -> list[CalendarEvent]:
     set FS to (ASCII character 31)
     set RS to (ASCII character 30)
     set skipCals to {{"Siri Suggestions", "US Holidays"}}
+    launch application "Calendar"
     tell application "Calendar"
         set endDate to date "{end_str}"
         set time of endDate to {end.hour * 3600 + end.minute * 60 + 86399}
@@ -484,6 +486,7 @@ async def create_event(
     notes = notes.replace('"', '\\"')
 
     script = f'''
+    launch application "Calendar"
     tell application "Calendar"
         set targetCal to first calendar whose name is "{calendar}"
         set startDate to date "{start_str}"

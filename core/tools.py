@@ -352,6 +352,7 @@ async def contacts_lookup(name: str, fields: list[str] | None = None) -> dict:
     inner = "".join(field_scripts[f] for f in requested if f in field_scripts)
     safe = s.replace('\\', '\\\\').replace('"', '\\"')
     script = (
+        'launch application "Contacts"\n'
         'tell application "Contacts"\n'
         '  if not running then launch\n'
         '  set out to ""\n'
@@ -462,6 +463,7 @@ async def resolve_imessage_buddy(name: str) -> dict:
 async def _fuzzy_contact_suggestions(query: str, cutoff: float = 0.55, n: int = 5) -> list[str]:
     """Pull all contact names and difflib-rank closest matches to `query`."""
     script = (
+        'launch application "Contacts"\n'
         'tell application "Contacts"\n'
         '  if not running then launch\n'
         '  set out to ""\n'
@@ -572,6 +574,7 @@ async def _send_via_osascript_service(buddy: str, escaped_msg: str, service_type
     """Send via the named osascript service type ('iMessage' or 'SMS')."""
     if service_type == "iMessage":
         script = (
+            f'launch application "Messages"\n'
             f'tell application "Messages"\n'
             f'  if not running then launch\n'
             f'  set targetService to first service whose service type is iMessage\n'
@@ -582,6 +585,7 @@ async def _send_via_osascript_service(buddy: str, escaped_msg: str, service_type
         )
     else:
         script = (
+            f'launch application "Messages"\n'
             f'tell application "Messages"\n'
             f'  if not running then launch\n'
             f'  set targetService to first service whose service type is SMS\n'
@@ -1073,6 +1077,7 @@ async def add_reminder(args: dict[str, Any]) -> dict:
             props += f', body:"{_esc(body)}"'
 
         script = (
+            f'launch application "Reminders"\n'
             f'tell application "Reminders"\n'
             f'  tell list "{_esc(list_name)}"\n'
             f'    make new reminder with properties {{{props}}}\n'

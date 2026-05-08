@@ -61,7 +61,7 @@ Run these commands with Bash:
    [ -d /Users/johncornelius/Desktop/Sentry-AI-Thermal ] && cd /Users/johncornelius/Desktop/Sentry-AI-Thermal && git log --oneline --since='last monday' --until='now' 2>/dev/null | head -20
 
 5. Read significant business emails from Apple Mail via osascript (NOT Gmail MCP):
-   osascript -e 'tell application "Mail"
+   osascript -e 'launch application "Mail"' -e 'tell application "Mail"
      set output to ""
      try
        set msgs to (messages of inbox whose date received > (current date) - 7 * days)

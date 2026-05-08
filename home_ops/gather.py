@@ -227,7 +227,10 @@ async def gather_reminders_full() -> dict:
 
 async def gather_mail_unread() -> int:
     """Count unread messages in Mail.app."""
-    script = 'tell application "Mail" to return unread count of inbox'
+    script = (
+        'launch application "Mail"\n'
+        'tell application "Mail" to return unread count of inbox'
+    )
     try:
         result, _ = await _osascript(script, timeout=15)
         return int(result) if result.isdigit() else 0
@@ -315,6 +318,7 @@ async def gather_contacts() -> list[dict]:
     script = r'''
     set FS to (ASCII character 31)
     set RS to (ASCII character 30)
+    launch application "Contacts"
     tell application "Contacts"
         set output to ""
         repeat with p in people

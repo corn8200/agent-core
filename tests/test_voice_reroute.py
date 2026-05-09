@@ -6,7 +6,7 @@ from core import voice_reroute
 
 
 def test_voice_target_pane_tracks_current_voice_pane():
-    assert voice_reroute.VOICE_TARGET_PANE == "claude:9"
+    assert voice_reroute.VOICE_TARGET_PANE == "claude:5"
 
 
 def test_voice_reroute_send_dispatches_to_current_voice_pane(tmp_path, monkeypatch):

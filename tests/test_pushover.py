@@ -48,7 +48,7 @@ def test_send_pushover_reports_current_voice_reroute_target(monkeypatch):
     result = asyncio.run(send_pushover(title="Alarm", message="Wake up"))
 
     assert result.ok is True
-    assert result.detail == "rerouted to voice (claude:9)"
+    assert result.detail == "rerouted to voice (claude:5)"
 
 
 def test_overseer_voice_bypass_titles_can_skip_gateway():

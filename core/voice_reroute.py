@@ -28,7 +28,7 @@ VOICE_REROUTE_FLAGS = (
     Path.home() / ".config" / "pushover-to-voice.flag",
 )
 VOICE_QUEUE_LOG = Path("/tmp/pushover-voice-queue.log")
-VOICE_TARGET_PANE = "claude:9"
+VOICE_TARGET_PANE = "claude:5"
 
 
 def voice_reroute_active() -> bool:

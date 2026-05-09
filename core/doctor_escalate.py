@@ -62,7 +62,7 @@ logger = logging.getLogger(__name__)
 
 _SOURCE_HOST = "mac" if sys.platform == "darwin" else "vps"
 
-OVERSEER_VOICE_PANE = "claude:9"
+OVERSEER_VOICE_PANE = "claude:5"
 OVERSEER_VOICE_HOST = "mac"
 DOCTOR_PANES = {
     "mac": OVERSEER_VOICE_PANE,

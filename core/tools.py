@@ -600,7 +600,7 @@ async def _send_via_osascript_service(buddy: str, escaped_msg: str, service_type
 _IMESSAGE_ERROR_CODES = {1, 22, 102, 1032}
 
 
-async def send_imessage_reliable(buddy: str, message: str, _approved: bool = False) -> tuple[bool, str]:
+async def send_imessage_reliable(buddy: str, message: str, _approved: bool = False, _require_approval: bool = False) -> tuple[bool, str]:
     """Send iMessage or SMS via tmux relay, with chat.db delivery verification.
 
     Structurally incapable of returning (True, ...) unless chat.db confirms
@@ -639,7 +639,7 @@ async def send_imessage_reliable(buddy: str, message: str, _approved: bool = Fal
             buddy = resolved["handle"]
             display = resolved.get("display", buddy)
 
-    if not _approved:
+    if _require_approval and not _approved:
         from core.outbox import _is_self, queue_or_send
         if not _is_self(buddy):
             result = await queue_or_send(
@@ -655,7 +655,9 @@ async def send_imessage_reliable(buddy: str, message: str, _approved: bool = Fal
             )
             status = result.get("status")
             if status == "queued":
-                return True, f"outbox queued {result['uuid']}"
+                return False, f"NOT SENT — outbox queued {result['uuid']} awaiting John's APPROVE/DENY"
+            if status == "preview_undeliverable":
+                return False, f"NOT SENT — preview channel dead ({result.get('hint','')}). imsg_err={result.get('imsg_err')} push_err={result.get('push_err')}"
             if status == "sent_direct":
                 inner = result.get("result") or (True, "sent")
                 return inner if isinstance(inner, tuple) else (True, str(inner))
@@ -739,7 +741,7 @@ async def send_business_email(args: dict[str, Any]) -> dict:
         to_addr = args["to"]
         subject = args["subject"]
         body = args["body"]
-        if not args.get("_approved"):
+        if args.get("_require_approval") and not args.get("_approved"):
             from core.outbox import _is_self, queue_or_send
             if not _is_self(to_addr):
                 outbox_kwargs = {k: v for k, v in args.items() if k != "_approved"}
@@ -756,7 +758,9 @@ async def send_business_email(args: dict[str, Any]) -> dict:
                 )
                 status = result.get("status")
                 if status == "queued":
-                    return {"content": [{"type": "text", "text": f"outbox queued {result['uuid']}"}]}
+                    return {"content": [{"type": "text", "text": f"NOT SENT — outbox queued {result['uuid']} awaiting John's APPROVE/DENY"}]}
+                if status == "preview_undeliverable":
+                    return {"content": [{"type": "text", "text": f"NOT SENT — preview channel dead. imsg_err={result.get('imsg_err')} push_err={result.get('push_err')}. {result.get('hint','')}"}]}
                 if status == "sent_direct":
                     return result.get("result") or {"content": [{"type": "text", "text": "sent"}]}
         queue_cmd = (
@@ -791,7 +795,7 @@ async def send_personal_email(args: dict[str, Any]) -> dict:
     to = args["to"]
     subject = args["subject"]
     body = args["body"]
-    if not args.get("_approved"):
+    if args.get("_require_approval") and not args.get("_approved"):
         from core.outbox import _is_self, queue_or_send
         if not _is_self(to):
             outbox_kwargs = {k: v for k, v in args.items() if k != "_approved"}
@@ -808,7 +812,9 @@ async def send_personal_email(args: dict[str, Any]) -> dict:
             )
             status = result.get("status")
             if status == "queued":
-                return {"content": [{"type": "text", "text": f"outbox queued {result['uuid']}"}]}
+                return {"content": [{"type": "text", "text": f"NOT SENT — outbox queued {result['uuid']} awaiting John's APPROVE/DENY"}]}
+            if status == "preview_undeliverable":
+                return {"content": [{"type": "text", "text": f"NOT SENT — preview channel dead. imsg_err={result.get('imsg_err')} push_err={result.get('push_err')}. {result.get('hint','')}"}]}
             if status == "sent_direct":
                 return result.get("result") or {"content": [{"type": "text", "text": "sent"}]}
     html_flag = "--html" if args.get("html") else ""

@@ -47,7 +47,7 @@ ALLOWED_SELF = {
 }
 
 # Preview target — where the approval prompt gets sent.
-PREVIEW_RECIPIENT = "corn82@icloud.com"
+PREVIEW_RECIPIENT = "+13042684985"  # John's iPhone — sends to iCloud email get swallowed
 
 _NORMALIZE_RE = re.compile(r"[\s\-\+\(\)\.]")
 
@@ -203,16 +203,31 @@ async def queue_or_send(
     }
     _write_pending(record)
     preview = _preview_text(channel, recipient, subject, body, source, uid)
+    imsg_ok = False
+    push_ok = False
+    imsg_err = push_err = None
     try:
         await _send_preview_imessage(preview)
+        imsg_ok = True
     except Exception as e:
-        # Keep the pending record even if preview delivery failed — John can
-        # still find it on disk. Log and return queued status.
-        print(f"[outbox] preview delivery failed for {uid}: {e}", flush=True)
+        imsg_err = str(e)
+        print(f"[outbox] preview iMessage failed for {uid}: {e}", flush=True)
     try:
         await _send_preview_pushover(record)
+        push_ok = True
     except Exception as e:
-        print(f"[outbox] pushover preview failed for {uid}: {e}", flush=True)
+        push_err = str(e)
+        print(f"[outbox] preview Pushover failed for {uid}: {e}", flush=True)
+    if not (imsg_ok or push_ok):
+        # Preview channels are both dead — John cannot approve. Mark loudly.
+        _move_pending(uid, DENIED_DIR, f"preview_undeliverable: imsg={imsg_err} push={push_err}")
+        return {
+            "status": "preview_undeliverable",
+            "uuid": uid,
+            "imsg_err": imsg_err,
+            "push_err": push_err,
+            "hint": "Approval gate cannot reach John. Either fix Pushover/iMessage previews or call with _require_approval=False to bypass.",
+        }
     return {"status": "queued", "uuid": uid}
 
 

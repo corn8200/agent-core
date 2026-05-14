@@ -210,6 +210,9 @@ def dispatched_sdk_agent(
     scope = dedup_scope or f"sdk-{watcher_name}"
 
     try:
+        # OPJUNE_PENDING_MIGRATION_2026_06_15: migrate this active Mac-local
+        # wrapper to the OpJune broker-backed `claude_call()` path after SDK
+        # credit cutover.
         from core.mac_sdk import ClaudeAgentOptions, query
         from core.thinking import STANDARD
         from core.hooks import AGENT_HOOKS

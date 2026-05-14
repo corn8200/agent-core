@@ -42,12 +42,22 @@ WRAPPER_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
     "core.mac_sdk": {
         "allowlist": (
             "core/mac_sdk.py",
+            # OPJUNE_PENDING_MIGRATION_2026_06_15: active Mac-local callers
+            # remain on the pre-OpJune wrapper until the post-Jun-15 broker
+            # path is available for agent-core.
+            "core/imessage_triage/classify.py",
+            "core/swarm_dispatch.py",
             "tests/test_opjune_raw_call_scanner.py",
         ),
     },
     "core.mac_sdk.query": {
         "allowlist": (
             "core/mac_sdk.py",
+            # OPJUNE_PENDING_MIGRATION_2026_06_15: active Mac-local callers
+            # remain on the pre-OpJune wrapper until the post-Jun-15 broker
+            # path is available for agent-core.
+            "core/imessage_triage/classify.py",
+            "core/swarm_dispatch.py",
             "tests/test_opjune_raw_call_scanner.py",
         ),
     },

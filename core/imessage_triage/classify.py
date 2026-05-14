@@ -1,8 +1,8 @@
 """Haiku 4.5 classifier for iMessage threads.
 
 Categorizes a thread snippet into one of 8 categories and assigns an urgency
-score 1-10. Uses core.mac_sdk (Max subscription OAuth) — free under flat-monthly
-billing, no per-call cost.
+score 1-10. Uses core.mac_sdk (Max subscription OAuth) pending the post-Jun-15
+OpJune broker migration.
 
 Categories:
   action_me       -- John needs to do something
@@ -27,6 +27,8 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
+# OPJUNE_PENDING_MIGRATION_2026_06_15: migrate this active Mac-local classifier
+# to the OpJune broker-backed `claude_call()` path after SDK credit cutover.
 from core.mac_sdk import (  # noqa: E402
     AssistantMessage,
     ClaudeAgentOptions,

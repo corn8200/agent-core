@@ -7,3 +7,9 @@ repos:
         language: script
         types_or: [python, shell]
         pass_filenames: true
+      - id: opjune-raw-call-scanner
+        name: OpJune raw Anthropic/Claude call scanner
+        entry: python .opjune/raw-call-scanner.py .
+        language: system
+        pass_filenames: false
+        always_run: true

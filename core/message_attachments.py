@@ -29,6 +29,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,7 @@ from core.tools import tmux_relay_shell
 # File extensions grouped by handler.
 _IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".heic", ".gif", ".webp", ".bmp", ".tif", ".tiff"}
 _AUDIO_EXTS = {".m4a", ".caf", ".amr", ".mp3", ".wav", ".aac", ".aiff", ".ogg"}
+_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 
 # MIME prefix → bucket, used when extension is missing/ambiguous.
 _MIME_IMAGE_PREFIX = "image/"
@@ -206,59 +208,9 @@ def cleanup_staged(info: AttachmentInfo) -> None:
 
 
 async def describe_image(path: Path) -> str:
-    """Ask the Anthropic SDK (Sonnet 4.6) to describe an image in one line.
-
-    Returns a short English description, or an error-marker string starting
-    with "[error:" that callers can still emit so the user isn't left blind.
-    """
-    try:
-        import anthropic  # optional dep; installed with the SDK
-    except ImportError:
-        return "[error: anthropic SDK not installed]"
-
-    try:
-        b64 = base64.standard_b64encode(path.read_bytes()).decode("ascii")
-    except Exception as e:
-        return f"[error: could not read image: {e}]"
-
+    """Return a deterministic image marker until OpJune-gated vision is wired."""
     media_type = _guess_media_type(path)
-
-    def _call() -> str:
-        # Explicit client — uses ANTHROPIC_API_KEY if present, or the CLI
-        # OAuth token (Max subscription) via the SDK's default resolver.
-        client = anthropic.Anthropic()
-        resp = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=150,
-            messages=[{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image",
-                        "source": {"type": "base64", "media_type": media_type, "data": b64},
-                    },
-                    {
-                        "type": "text",
-                        "text": (
-                            "Describe this image in one concise sentence (max 25 words). "
-                            "Focus on content that helps classify an iMessage: people, "
-                            "objects, text visible, any indication of emergency or "
-                            "task. No flowery language."
-                        ),
-                    },
-                ],
-            }],
-        )
-        text_parts = []
-        for block in resp.content:
-            if getattr(block, "type", "") == "text":
-                text_parts.append(getattr(block, "text", ""))
-        return " ".join(p.strip() for p in text_parts).strip() or "[image]"
-
-    try:
-        return await asyncio.to_thread(_call)
-    except Exception as e:
-        return f"[error: vision call failed: {type(e).__name__}: {e}]"
+    return f"[image: {path.name} ({media_type}); vision deferred by OpJune PR2]"
 
 
 def _guess_media_type(path: Path) -> str:

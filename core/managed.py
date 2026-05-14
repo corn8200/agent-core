@@ -21,8 +21,6 @@ import asyncio
 import os
 from typing import Optional
 
-import anthropic
-
 BETAS = ["managed-agents-2026-04-01"]
 
 _AGENT_CACHE: dict[tuple[str, str, str], str] = {}  # (name, model, system) -> agent_id
@@ -36,17 +34,10 @@ _MODEL_ALIASES = {
 
 
 def _client() -> anthropic.Anthropic:
-    # Managed Agents path is intentionally API-billed. ANTHROPIC_API_KEY is no
-    # longer exported by secrets.env (renamed to ANTHROPIC_CONSOLE_KEY on
-    # 2026-04-12 to stop silent CLI/SDK billing leaks). Read the renamed var
-    # and pass it explicitly so the anthropic client doesn't need env leakage.
-    key = (os.environ.get("ANTHROPIC_API_KEY")
-           or os.environ.get("ANTHROPIC_CONSOLE_KEY"))
-    if not key:
-        raise RuntimeError(
-            "Managed Agents requires ANTHROPIC_CONSOLE_KEY in ~/.config/secrets.env"
-        )
-    return anthropic.Anthropic(api_key=key)
+    raise RuntimeError(
+        "OpJune PR2 disabled the raw API-billed Managed Agents path before "
+        "2026-06-15; route through the gated broker after SDK credit cutover."
+    )
 
 
 def _ensure_environment(client: anthropic.Anthropic, name: str = "agent-core-default") -> str:

@@ -38,6 +38,40 @@ PYTHON_COMMAND_RE = re.compile(
     re.I,
 )
 
+WRAPPER_IMPORTS: dict[str, dict[str, tuple[str, ...]]] = {
+    "core.mac_sdk": {
+        "allowlist": (
+            "core/mac_sdk.py",
+            "tests/test_opjune_raw_call_scanner.py",
+        ),
+    },
+    "core.mac_sdk.query": {
+        "allowlist": (
+            "core/mac_sdk.py",
+            "tests/test_opjune_raw_call_scanner.py",
+        ),
+    },
+    "vps_sdk": {
+        "allowlist": ("tests/test_opjune_raw_call_scanner.py",),
+    },
+    "anthropic_update_watcher._sdk_worker": {
+        "allowlist": (
+            "_sdk_worker.py",
+            "tests/test_opjune_raw_call_scanner.py",
+        ),
+    },
+    "_sdk_worker": {
+        "allowlist": (
+            "_sdk_worker.py",
+            "tests/test_opjune_raw_call_scanner.py",
+        ),
+    },
+    "routines_guard": {
+        "allowlist": ("tests/test_opjune_raw_call_scanner.py",),
+    },
+}
+WRAPPER_IMPORT_PREFIXES = ("vps_sdk.",)
+
 
 @dataclass(frozen=True)
 class Finding:
@@ -61,6 +95,16 @@ class RawCallVisitor(ast.NodeVisitor):
         for alias in node.names:
             if alias.name == "anthropic":
                 self.imported_modules.add(alias.asname or alias.name)
+            wrapper = wrapper_module_match(alias.name)
+            if wrapper:
+                self.findings.append(
+                    (
+                        node.lineno,
+                        node.col_offset,
+                        "wrapper-import",
+                        f"import {alias.name} reaches {wrapper}",
+                    )
+                )
         self.generic_visit(node)
 
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
@@ -68,6 +112,25 @@ class RawCallVisitor(ast.NodeVisitor):
             for alias in node.names:
                 if alias.name in {"Anthropic", "AsyncAnthropic"}:
                     self.imported_callables.add(alias.asname or alias.name)
+        module = node.module or ""
+        candidates = [module]
+        candidates.extend(f"{module}.{alias.name}" for alias in node.names if module)
+        if module == "core":
+            candidates.extend(f"core.{alias.name}" for alias in node.names)
+        if module == "anthropic_update_watcher":
+            candidates.extend(f"anthropic_update_watcher.{alias.name}" for alias in node.names)
+        for candidate in candidates:
+            wrapper = wrapper_module_match(candidate)
+            if wrapper:
+                self.findings.append(
+                    (
+                        node.lineno,
+                        node.col_offset,
+                        "wrapper-import",
+                        f"from {module} import ... reaches {wrapper}",
+                    )
+                )
+                break
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -94,6 +157,9 @@ class RawCallVisitor(ast.NodeVisitor):
 
         if is_importlib_anthropic(node):
             return ("dynamic-anthropic-import", "dynamic import of anthropic")
+        wrapper = importlib_wrapper_module(node)
+        if wrapper:
+            return ("wrapper-import", f"dynamic import reaches {wrapper}")
         if is_getattr_anthropic_client(node):
             return ("dynamic-anthropic-getattr", "getattr(..., Anthropic/AsyncAnthropic/create)")
         if call_has_anthropic_url(node):
@@ -123,6 +189,18 @@ def is_importlib_anthropic(node: ast.Call) -> bool:
     if func_name in {"importlib.import_module", "__import__"}:
         return bool(node.args and string_value(node.args[0]) == "anthropic")
     return False
+
+
+def importlib_wrapper_module(node: ast.Call) -> str | None:
+    func_name = dotted_name(node.func)
+    if func_name not in {"importlib.import_module", "__import__"}:
+        return None
+    if not node.args:
+        return None
+    value = string_value(node.args[0])
+    if not value:
+        return None
+    return wrapper_module_match(value)
 
 
 def is_getattr_anthropic_client(node: ast.Call) -> bool:
@@ -312,10 +390,46 @@ def allowed_reason(finding: Finding, source: str) -> str | None:
         return "OpJune deny shim"
     if path == "bin/run_brain.sh" and "opjune_legacy_brai" in source.lower():
         return "legacy brain raw Claude path disabled by OpJune deny shim"
-    if path == "bin/opjune-raw-call-scanner":
+    if (
+        path == "bin/opjune-raw-call-scanner"
+        or path == ".opjune/raw-call-scanner.py"
+        or path.endswith("/.opjune/raw-call-scanner.py")
+    ):
         return "scanner signature definition"
+    if finding.pattern == "wrapper-import":
+        registry_reason = wrapper_allowed_reason(path, finding.detail)
+        if registry_reason:
+            return registry_reason
     if "raw claude/anthropic invocation refused" in lowered:
         return "OpJune deny shim"
+    return None
+
+
+def wrapper_module_match(module: str) -> str | None:
+    if module in WRAPPER_IMPORTS:
+        return module
+    for prefix in WRAPPER_IMPORT_PREFIXES:
+        if module.startswith(prefix):
+            return prefix.rstrip(".")
+    return None
+
+
+def wrapper_allowed_reason(path: str, detail: str) -> str | None:
+    wrapper = None
+    for module in WRAPPER_IMPORTS:
+        if module in detail:
+            wrapper = module
+            break
+    if wrapper is None:
+        for prefix in WRAPPER_IMPORT_PREFIXES:
+            if prefix.rstrip(".") in detail:
+                wrapper = prefix.rstrip(".")
+                break
+    if wrapper is None:
+        return None
+    allowlist = WRAPPER_IMPORTS.get(wrapper, {}).get("allowlist", ())
+    if any(path == allowed or path.endswith(f"/{allowed}") for allowed in allowlist):
+        return f"wrapper registry allowlist for {wrapper}"
     return None
 
 
@@ -398,8 +512,13 @@ def render_human(violations: list[Finding], allowed: list[Finding], scanned: int
             f"{scanned} file(s) scanned"
         )
         for finding in violations:
+            label = (
+                "VIOLATION_WRAPPER_IMPORT"
+                if finding.pattern == "wrapper-import"
+                else "VIOLATION_RAW_CALL"
+            )
             lines.append(
-                f"VIOLATION {finding.path}:{finding.line}:{finding.column} "
+                f"{label} {finding.path}:{finding.line}:{finding.column} "
                 f"{finding.pattern} - {finding.detail}"
             )
     else:

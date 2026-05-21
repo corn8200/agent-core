@@ -1,0 +1,447 @@
+"""Unified inbound iMessage reader — polls chat.db via tmux relay.
+
+One reader, multiple subscribers. Sole listener process for inbound iMessages.
+Uses tmux_relay_shell for FDA-protected chat.db access.
+"""
+
+import asyncio
+import base64
+import os
+import re
+import sys
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Awaitable, Callable
+
+from core.message_db import log_inbound
+from core.tools import tmux_relay_shell
+
+HEARTBEAT_PATH = Path.home() / "logs" / "imessage-bus.heartbeat"
+CONSECUTIVE_FAIL_THRESHOLD = 2
+
+# Deferred import to avoid circular: message_vector imports get_recent_messages
+# from this module. Only needed in poll_loop, not at module import time.
+_maybe_enqueue_thread = None
+
+
+# Task A attachment enrichment — resolved lazily so tests can monkeypatch
+# the module-level binding without touching core.message_attachments.
+async def _enrich_with_attachments(rowid: int, text: str) -> str:
+    from core.message_attachments import enrich_message_text
+    return await enrich_message_text(rowid, text)
+
+
+# Leading-garbage-tolerant match for bus attribution.
+# The attributedBody hex extractor occasionally pastes 1-2 stray characters
+# (any ASCII — letters "k", "P", "L", punctuation "!", etc.) before the real
+# text, so we allow up to 2 leading chars before the bracket. Two forms count
+# as attribution:
+#   1. "[N]" sequence number (outbox/turbo prefix)
+#   2. "[AgentName]" bus attribution tag
+# 2026-04-19: widened junk class from [^A-Za-z0-9\[] to . — letter prefixes
+# like "k[37] ..." were leaking through and causing self-chat storms (#storm2).
+_BOT_ATTRIBUTION_RE = re.compile(
+    r"^.{0,2}\[(?:\d{1,5}|[A-Za-z][^\]]{0,50})\]"
+)
+
+
+def _looks_like_bot_attribution(text: str) -> bool:
+    if not text:
+        return False
+    return bool(_BOT_ATTRIBUTION_RE.match(text.lstrip()))
+
+
+def _recent_outbound_match(text: str, window_sec: int = 600) -> bool:
+    """True if this body was sent by our bus within `window_sec`.
+
+    Belt+suspenders for the attribution regex: catches echoes where turbo
+    sends bare "[N] text" with no agent tag. Reads from ~/logs/message_bus.db.
+
+    The typedstream extractor occasionally pastes 1-2 stray characters before
+    the real text ("k[37] ...", "P[38] ..."), so we try exact match first,
+    then strip up to 2 leading characters and retry. Silent-fail on any DB
+    error — better to occasionally miss an echo than to crash the reader.
+    """
+    try:
+        import sqlite3
+        from pathlib import Path as _P
+        db = _P.home() / "logs" / "message_bus.db"
+        if not db.exists():
+            return False
+        con = sqlite3.connect(str(db), timeout=2.0)
+        try:
+            since = f"-{window_sec} seconds"
+            candidates = [text]
+            # Also test with 1-2 leading chars stripped (extractor junk).
+            # Only strip if the shorter form still contains an opening bracket
+            # — avoids matching unrelated short outbound messages.
+            for n in (1, 2):
+                if len(text) > n and "[" in text[n:]:
+                    candidates.append(text[n:])
+            for candidate in candidates:
+                cur = con.execute(
+                    "SELECT 1 FROM outbound "
+                    "WHERE message = ? "
+                    "AND datetime(sent_at) > datetime('now', 'localtime', ?) "
+                    "LIMIT 1",
+                    (candidate, since),
+                )
+                if cur.fetchone() is not None:
+                    return True
+            return False
+        finally:
+            con.close()
+    except Exception:
+        return False
+
+
+# Control-character delimiters that cannot appear in iMessage text bodies.
+# 0x1f = ASCII Unit Separator (between fields)
+# 0x1e = ASCII Record Separator (between rows)
+# Using these instead of "|||"/newline makes parsing immune to message
+# bodies containing pipes, parens, or embedded newlines (e.g. forwarded
+# multi-line content like "(shared from GROUNDTRUTH)\nsome text").
+_FIELD_SEP = "\x1f"
+_RECORD_SEP = "\x1e"
+
+
+def _sqlite_via_relay_cmd(sql: str, db_path: str = "~/Library/Messages/chat.db") -> str:
+    """Build a shell command that pipes base64-encoded SQL into sqlite3.
+
+    Avoids shell quoting pitfalls — SQL can contain arbitrary single/double
+    quotes without escaping. The relay runs the result under bash.
+    """
+    encoded = base64.b64encode(sql.encode("utf-8")).decode("ascii")
+    return (
+        f"echo {encoded} | base64 -d | "
+        f"sqlite3 -separator $'\\x1f' -newline $'\\x1e' {db_path}"
+    )
+
+
+STATE_FILE = Path.home() / ".imessage_bus_state"
+LEGACY_STATE = Path.home() / ".research_chain_state"
+# Self-chats moved to the dedicated Overseer rail 2026-05-07
+# (~/bin/imessage-overseer-watcher.py + LaunchAgent
+# com.john.imessage-overseer-watcher). The old bus daemon was double-replying
+# with [Router]/[NN] noise on John's watch dictations. Keep this empty so the
+# bus daemon only handles non-self threads (VPS-tag replies, mailtriage, etc).
+SELF_CHATS: tuple[str, ...] = ()
+DB_PATH = "~/Library/Messages/chat.db"
+
+
+@dataclass
+class InboundMessage:
+    rowid: int
+    chat_identifier: str
+    text: str
+    timestamp: str
+    is_from_me: bool
+
+
+def extract_text_from_attributed_body(hex_str: str) -> str | None:
+    """Extract plain text from hex-encoded attributedBody (typedstream format)."""
+    if not hex_str:
+        return None
+    try:
+        blob = bytes.fromhex(hex_str)
+        runs = []
+        current = bytearray()
+        for b in blob:
+            if (0x20 <= b <= 0x7E) or b in (0x0A, 0x0D, 0x09):
+                current.append(b)
+            else:
+                if len(current) > 1:
+                    runs.append(bytes(current).decode("ascii"))
+                current = bytearray()
+        if len(current) > 1:
+            runs.append(bytes(current).decode("ascii"))
+
+        skip = {
+            "streamtyped", "NSAttributedString", "NSMutableAttributedString",
+            "NSObject", "NSString", "NSMutableString", "NSDictionary",
+            "NSMutableDictionary", "NSParagraphStyle", "NSMutableParagraphStyle",
+            "NSFont", "NSColor", "NSNumber", "NSValue", "NSUUID",
+        }
+        for run in runs:
+            cleaned = run.strip("+").strip()
+            if (cleaned and len(cleaned) > 3
+                    and cleaned not in skip
+                    and not cleaned.startswith("__kIM")
+                    and not cleaned.startswith("$")):
+                return cleaned
+        return None
+    except Exception:
+        return None
+
+
+class MessageReader:
+    """Polls chat.db via tmux_relay_shell, publishes new messages to subscribers."""
+
+    def __init__(self, poll_interval: int = 5):
+        self._subscribers: list[Callable[[InboundMessage], Awaitable[None]]] = []
+        self._poll_interval = poll_interval
+        self._monitored_chats = set(SELF_CHATS)
+
+    def subscribe(self, callback: Callable[[InboundMessage], Awaitable[None]]):
+        """Register a handler for inbound messages."""
+        self._subscribers.append(callback)
+
+    def _get_last_rowid(self) -> int:
+        # Migration: if our state file doesn't exist but legacy does, copy it
+        if not STATE_FILE.exists() and LEGACY_STATE.exists():
+            try:
+                val = LEGACY_STATE.read_text().strip()
+                STATE_FILE.write_text(val)
+                print(f"[reader] Migrated state from {LEGACY_STATE}: rowid={val}")
+            except Exception:
+                pass
+        try:
+            return int(STATE_FILE.read_text().strip())
+        except (FileNotFoundError, ValueError):
+            return 0
+
+    def _save_rowid(self, rowid: int):
+        STATE_FILE.write_text(str(rowid))
+
+    async def _poll_once(self) -> list[InboundMessage]:
+        """Query chat.db for new messages via tmux relay."""
+        last = self._get_last_rowid()
+        chat_list = ", ".join(f"'{c}'" for c in self._monitored_chats)
+
+        # Self-chats: accept BOTH directions. When you text yourself from
+        # another device (iPhone/Watch), on this Mac the message arrives as
+        # is_from_me=0 — filtering on is_from_me=1 would lose those commands.
+        query = (
+            f"SELECT m.ROWID, m.text, hex(m.attributedBody), m.is_from_me, "
+            f"c.chat_identifier, "
+            f"datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') "
+            f"FROM message m "
+            f"JOIN chat_message_join cmj ON m.ROWID = cmj.message_id "
+            f"JOIN chat c ON cmj.chat_id = c.ROWID "
+            f"WHERE m.ROWID > {last} "
+            f"AND c.chat_identifier IN ({chat_list}) "
+            f"ORDER BY m.ROWID ASC;"
+        )
+
+        ok, output = await tmux_relay_shell(
+            _sqlite_via_relay_cmd(query),
+            timeout=10.0,
+        )
+
+        if not ok:
+            print(f"[reader] relay failed: {output[:200]}")
+            return []
+
+        # sqlite3 writes parse errors to stdout with exit 0 — catch them.
+        if output.startswith("Error:") or "\nError:" in output:
+            print(f"[reader] sqlite error: {output[:200]}")
+            return []
+
+        messages = []
+        # Strip a trailing record separator (sqlite3 emits one after the last row).
+        raw = output.rstrip(_RECORD_SEP).rstrip("\n")
+        if not raw:
+            return []
+        for record in raw.split(_RECORD_SEP):
+            record = record.strip("\n")
+            if not record or _FIELD_SEP not in record:
+                continue
+            parts = record.split(_FIELD_SEP)
+            if len(parts) < 4:
+                continue
+
+            try:
+                rowid = int(parts[0])
+            except (ValueError, TypeError):
+                # Defensive: if the first field isn't an int, the row is
+                # malformed (should be impossible with control-char delimiters,
+                # but skip + log rather than crash the whole poll loop).
+                print(f"[reader] Skipping malformed row (bad ROWID): {parts[0][:60]!r}")
+                continue
+            text = parts[1] if len(parts) > 1 else ""
+            hex_body = parts[2] if len(parts) > 2 else ""
+            is_from_me = parts[3] == "1" if len(parts) > 3 else True
+            chat_id = parts[4] if len(parts) > 4 else ""
+            timestamp = parts[5] if len(parts) > 5 else datetime.now().isoformat()
+
+            # Extract text from attributedBody if needed
+            if not text and hex_body:
+                text = extract_text_from_attributed_body(hex_body) or ""
+
+            # Drop the bot's own outbound messages. Two detectors:
+            # 1. Attribution regex — matches "[AgentName]" / "[N] [AgentName]".
+            # 2. Cross-check against outbound table — if we sent this body
+            #    within the last 10 min, it's an echo. Belt+suspenders: the
+            #    regex misses messages that start with "[N] bare text..." (no
+            #    agent tag), e.g. "[7] Acknowledged.", which caused the
+            #    2026-04-18 echo storm.
+            if is_from_me and text:
+                if _looks_like_bot_attribution(text) or _recent_outbound_match(text):
+                    self._save_rowid(rowid)
+                    continue
+
+            # Task A: enrich with attachment descriptions. Pure-attachment
+            # messages (no text body) are still valid — don't drop them here.
+            try:
+                enriched = await _enrich_with_attachments(rowid, text)
+            except Exception as e:
+                print(f"[reader] attachment enrich error rowid={rowid}: {e}")
+                enriched = text
+
+            if not enriched:
+                # Truly empty (no text, no attachment) — skip and advance.
+                self._save_rowid(rowid)
+                continue
+
+            messages.append(InboundMessage(
+                rowid=rowid,
+                chat_identifier=chat_id,
+                text=enriched,
+                timestamp=timestamp,
+                is_from_me=is_from_me,
+            ))
+
+        return messages
+
+    def _touch_heartbeat(self) -> None:
+        """Bump the heartbeat file each outer loop iteration.
+
+        External watchdog (~/bin/imessage-bus-watchdog.sh) reads mtime;
+        if >5 min stale it kickstarts the LaunchAgent. Silent on error —
+        never let heartbeat failure break the loop.
+        """
+        try:
+            HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+            HEARTBEAT_PATH.touch()
+        except OSError:
+            pass
+
+    async def poll_loop(self):
+        """Main loop. Reads chat.db via tmux relay, fans out to subscribers."""
+        print(f"[reader] Started — polling every {self._poll_interval}s")
+        print(f"[reader] Monitoring: {', '.join(self._monitored_chats)}")
+        print(f"[reader] State file: {STATE_FILE}")
+
+        poll_count = 0
+        consecutive_failures = 0
+        while True:
+            self._touch_heartbeat()
+            try:
+                messages = await asyncio.wait_for(
+                    self._poll_once(),
+                    timeout=60.0,
+                )
+                consecutive_failures = 0
+                poll_count += 1
+
+                if poll_count <= 3 or messages:
+                    print(f"[reader] Poll #{poll_count}: {len(messages)} messages")
+
+                for msg in messages:
+                    print(f"[reader] ROWID {msg.rowid}: {msg.text[:80]}")
+
+                    # Log to bus DB
+                    log_inbound(
+                        chat_db_rowid=msg.rowid,
+                        chat_identifier=msg.chat_identifier,
+                        text=msg.text,
+                        received_at=msg.timestamp,
+                    )
+
+                    # Fan out to subscribers
+                    for callback in self._subscribers:
+                        try:
+                            await callback(msg)
+                        except Exception as e:
+                            print(f"[reader] Subscriber error: {e}")
+
+                    # Enqueue thread for semantic indexing (debounced, per-thread).
+                    # Additive — never affect routing if the enqueue fails.
+                    try:
+                        global _maybe_enqueue_thread
+                        if _maybe_enqueue_thread is None:
+                            from core.message_vector import maybe_enqueue_thread as _m
+                            _maybe_enqueue_thread = _m
+                        status = await _maybe_enqueue_thread(msg.chat_identifier)
+                        if status == "enqueued":
+                            print(f"[reader] vector: enqueued thread {msg.chat_identifier}")
+                    except Exception as e:
+                        print(f"[reader] vector enqueue error: {e}")
+
+                    # Save after processing each message
+                    self._save_rowid(msg.rowid)
+
+            except asyncio.TimeoutError:
+                consecutive_failures += 1
+                print(
+                    f"[reader] Poll timeout (consecutive={consecutive_failures}/"
+                    f"{CONSECUTIVE_FAIL_THRESHOLD})",
+                    flush=True,
+                )
+                if consecutive_failures >= CONSECUTIVE_FAIL_THRESHOLD:
+                    print(
+                        "[reader] Consecutive poll timeouts hit threshold — "
+                        "exiting so launchd restarts us",
+                        flush=True,
+                    )
+                    sys.exit(1)
+            except Exception as e:
+                consecutive_failures += 1
+                print(
+                    f"[reader] Error (consecutive={consecutive_failures}/"
+                    f"{CONSECUTIVE_FAIL_THRESHOLD}): {e}",
+                    flush=True,
+                )
+                if consecutive_failures >= CONSECUTIVE_FAIL_THRESHOLD:
+                    print(
+                        "[reader] Consecutive poll failures hit threshold — "
+                        "exiting so launchd restarts us",
+                        flush=True,
+                    )
+                    sys.exit(1)
+
+            await asyncio.sleep(self._poll_interval)
+
+
+async def get_recent_messages(chat_identifier: str, limit: int = 5) -> list[dict]:
+    """Get recent messages from a chat for context injection into the router."""
+    safe_chat = chat_identifier.replace("'", "''")
+    query = (
+        f"SELECT m.ROWID, m.text, m.is_from_me, "
+        f"datetime(m.date/1000000000 + 978307200, 'unixepoch', 'localtime') as ts "
+        f"FROM message m "
+        f"JOIN chat_message_join cmj ON m.ROWID = cmj.message_id "
+        f"JOIN chat c ON cmj.chat_id = c.ROWID "
+        f"WHERE c.chat_identifier = '{safe_chat}' "
+        f"ORDER BY m.ROWID DESC LIMIT {limit};"
+    )
+    ok, output = await tmux_relay_shell(
+        _sqlite_via_relay_cmd(query),
+        timeout=10.0,
+    )
+    if not ok:
+        return []
+
+    messages = []
+    raw = output.rstrip(_RECORD_SEP).rstrip("\n")
+    if not raw:
+        return []
+    for record in raw.split(_RECORD_SEP):
+        record = record.strip("\n")
+        if not record or _FIELD_SEP not in record:
+            continue
+        parts = record.split(_FIELD_SEP)
+        if len(parts) < 3:
+            continue
+        try:
+            int(parts[0])
+        except (ValueError, TypeError):
+            continue
+        messages.append({
+            "text": parts[1],
+            "from_me": parts[2] == "1",
+            "timestamp": parts[3] if len(parts) > 3 else "",
+        })
+    messages.reverse()  # chronological order
+    return messages

@@ -1,0 +1,32 @@
+[project]
+name = "agent-core"
+version = "0.1.0"
+description = "Personal Claude Agent SDK automation hub: named agent personas, MCP tools, iMessage/email/calendar integration on macOS."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "John Cornelius" }]
+requires-python = ">=3.12"
+keywords = ["claude", "claude-agent-sdk", "anthropic", "mcp", "automation", "macos"]
+dependencies = [
+    "claude-agent-sdk==0.2.82",
+    "anyio>=4.0",
+    "fastapi>=0.100",
+    "httpx>=0.28",
+    "uvicorn>=0.20",
+    "jinja2>=3.1",
+    "playwright>=1.58.0",
+    "anthropic>=0.101.0",
+    "openai>=2.0",
+    "psycopg2-binary>=2.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/corn8200/agent-core"
+Repository = "https://github.com/corn8200/agent-core"
+
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["core*"]

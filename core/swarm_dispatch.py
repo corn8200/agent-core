@@ -224,9 +224,9 @@ def dispatched_sdk_agent(
         }
 
     model_map = {
-        "sonnet": "claude-sonnet-4-6",
-        "opus": "claude-opus-4-8",
-        "haiku": "claude-haiku-4-5",
+        "sonnet": "sonnet",
+        "opus": "opus",
+        "haiku": "haiku",
     }
     resolved_model = model_map.get(model, model)
 

@@ -27,9 +27,9 @@ _AGENT_CACHE: dict[tuple[str, str, str], str] = {}  # (name, model, system) -> a
 _ENV_CACHE: dict[str, str] = {}  # name -> environment_id
 
 _MODEL_ALIASES = {
-    "opus": "claude-opus-4-8",
-    "sonnet": "claude-sonnet-4-6",
-    "haiku": "claude-haiku-4-5-20251001",
+    "opus": "opus",
+    "sonnet": "sonnet",
+    "haiku": "haiku",
 }
 
 

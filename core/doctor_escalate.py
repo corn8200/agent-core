@@ -29,6 +29,10 @@ Routing semantics:
 Fallback: 3 retries with backoff (5s/15s/45s) via pane-ask-v2; if all fail,
 last-ditch direct Pushover with [OVERSEER-VOICE-BYPASS-<host>] prefix so a
 real Overseer/transport failure still lands.
+
+Set DOCTOR_ESCALATE_LOCAL_ONLY=1 only from synthetic probes that must prove a
+producer logs a durable doctor event without touching Redis, pane-ask, or
+Pushover.
 """
 from __future__ import annotations
 
@@ -99,10 +103,34 @@ _DEFAULT_QUOTA = {"max_per_hour": 10, "burst": 3}
 _RL_STATE_PATH = Path("/tmp/doctor_rl_state.json")  # Redis-less fallback
 
 _SECRET_KEY_RE = re.compile(r"(?i)(token|key|secret|password|auth|credential|bearer)")
+_REDIS_URL_ENV_KEYS = (
+    "DOCTOR_REDIS_URL",
+    "REDIS_URL",
+    "OVERSEER_GATEWAY_REDIS_URL",
+    "CP_API_REDIS_URL",
+    "RQ_REDIS_URL",
+)
+_REDIS_PASSWORD_ENV_KEYS = (
+    "DOCTOR_REDIS_PASSWORD",
+    "REDIS_PASSWORD",
+    "RQ_REDIS_PASSWORD",
+)
+_REDIS_ENV_FILE_PATHS = (
+    Path(os.environ.get("DOCTOR_REDIS_ENV_FILE", "")).expanduser()
+    if os.environ.get("DOCTOR_REDIS_ENV_FILE")
+    else None,
+    Path.home() / ".config" / "secrets.env",
+    Path.home() / ".config" / "unified-task-engine" / "api.env",
+    Path("/etc/overseer-gateway.env"),
+)
 
 
 def _on_mac() -> bool:
     return sys.platform == "darwin"
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _doctor_log_path() -> Path:
@@ -216,17 +244,87 @@ def _pane_ask_binary() -> Optional[str]:
     return None
 
 
+def _parse_env_line(line: str) -> tuple[str, str] | None:
+    line = line.strip()
+    if not line or line.startswith("#") or "=" not in line:
+        return None
+    if line.startswith("export "):
+        line = line[len("export "):].lstrip()
+    key, value = line.split("=", 1)
+    key = key.strip()
+    value = value.strip()
+    if not key:
+        return None
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+        value = value[1:-1]
+    return key, value
+
+
+def _load_redis_env_file_values() -> dict[str, str]:
+    values: dict[str, str] = {}
+    interesting = {
+        *_REDIS_URL_ENV_KEYS,
+        *_REDIS_PASSWORD_ENV_KEYS,
+        "REDIS_HOST",
+        "REDIS_PORT",
+        "REDIS_DB",
+    }
+    for path in _REDIS_ENV_FILE_PATHS:
+        if path is None:
+            continue
+        try:
+            with path.open() as f:
+                for line in f:
+                    parsed = _parse_env_line(line)
+                    if parsed is None:
+                        continue
+                    key, value = parsed
+                    if key in interesting and key not in values:
+                        values[key] = value
+        except FileNotFoundError:
+            continue
+        except OSError as e:
+            logger.warning("doctor_escalate: redis env file unreadable (%s): %s", path, e)
+    return values
+
+
+def _redis_config_value(keys: tuple[str, ...], file_values: dict[str, str]) -> str | None:
+    for key in keys:
+        value = os.environ.get(key)
+        if value:
+            return value
+    for key in keys:
+        value = file_values.get(key)
+        if value:
+            return value
+    return None
+
+
 def _get_redis():
     """Lazy Redis import — works from both VPS (localhost:6379) and Mac (tailscale)."""
     try:
         from redis import Redis
     except ImportError:
         return None
-    host = os.environ.get("REDIS_HOST") or "100.118.21.64"
-    port = int(os.environ.get("REDIS_PORT", 6379))
-    db = int(os.environ.get("REDIS_DB", 0))
+    file_values = _load_redis_env_file_values()
+    redis_url = _redis_config_value(_REDIS_URL_ENV_KEYS, file_values)
     try:
-        r = Redis(host=host, port=port, db=db, socket_timeout=3)
+        if redis_url:
+            r = Redis.from_url(redis_url, socket_timeout=3)
+        else:
+            host = os.environ.get("REDIS_HOST") or file_values.get("REDIS_HOST") or "100.118.21.64"
+            port = int(os.environ.get("REDIS_PORT") or file_values.get("REDIS_PORT") or 6379)
+            db = int(os.environ.get("REDIS_DB") or file_values.get("REDIS_DB") or 0)
+            kwargs: dict[str, Any] = {
+                "host": host,
+                "port": port,
+                "db": db,
+                "socket_timeout": 3,
+            }
+            password = _redis_config_value(_REDIS_PASSWORD_ENV_KEYS, file_values)
+            if password:
+                kwargs["password"] = password
+            r = Redis(**kwargs)
         r.ping()
         return r
     except Exception as e:
@@ -511,11 +609,24 @@ def doctor_escalate(
         "dedup_hit": False,
         "bypassed": False,
         "rate_limited": False,
+        "local_only": False,
         "clustered": False,
         "cluster_suppressed": False,
         "fingerprint": fp,
         "target_host": resolved_host,
     }
+
+    if _env_flag("DOCTOR_ESCALATE_LOCAL_ONLY"):
+        result["local_only"] = True
+        _log_event({
+            "ts": canonical_ts(),
+            "watcher": watcher, "severity": severity, "summary": summary,
+            "fingerprint": fp, "event": "local_only",
+            "reason": "DOCTOR_ESCALATE_LOCAL_ONLY=1",
+            "source_host": _SOURCE_HOST, "target_host": resolved_host,
+            **({"context": context} if context else {}),
+        })
+        return result
 
     r = _get_redis()
 

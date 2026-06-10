@@ -11,6 +11,7 @@ Event types (event field):
     dedup_hit    — suppressed; same fingerprint still live in Redis within TTL
     bypass       — Voice route failed; routed direct to Pushover as [OVERSEER-VOICE-BYPASS]
     rate_limited — dropped by producer-side token-bucket (#648)
+    local_only   — synthetic/test escalation logged locally; no Redis/pane/Pushover route
 
   Doctor-side — written by doctor pane after handling an escalation:
     response     — doctor's assessment + action for a received escalation
@@ -20,9 +21,9 @@ Required fields (all events):
     watcher       str   producer identity  (aliases: escalation, source)
     severity      str   ok|notice|warn|error|critical
     summary       str   one-liner for subject lines / search
-    event         str   dispatched|dedup_hit|bypass|rate_limited|response
+    event         str   dispatched|dedup_hit|bypass|rate_limited|local_only|response
 
-Optional — producer events (dispatched|dedup_hit|bypass|rate_limited):
+Optional — producer events (dispatched|dedup_hit|bypass|rate_limited|local_only):
     fingerprint   str   hex SHA-1 dedup key  (alias: dedup_key)
     context_json  str   JSON-serialized producer context dict (auto-derived from context if absent)
     source_host   str   mac|vps
@@ -65,11 +66,11 @@ except ImportError:
     from typing_extensions import TypedDict  # type: ignore[no-redef]
 
 Severity = Literal["ok", "notice", "warn", "error", "critical"]
-EventType = Literal["dispatched", "dedup_hit", "bypass", "rate_limited", "response"]
+EventType = Literal["dispatched", "dedup_hit", "bypass", "rate_limited", "local_only", "response"]
 
 REQUIRED_FIELDS: frozenset = frozenset({"ts", "watcher", "severity", "summary", "event"})
 VALID_SEVERITIES: frozenset = frozenset({"ok", "notice", "warn", "error", "critical"})
-VALID_EVENTS: frozenset = frozenset({"dispatched", "dedup_hit", "bypass", "rate_limited", "response"})
+VALID_EVENTS: frozenset = frozenset({"dispatched", "dedup_hit", "bypass", "rate_limited", "local_only", "response"})
 
 
 class DoctorEvent(TypedDict, total=False):

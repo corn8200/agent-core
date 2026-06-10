@@ -81,6 +81,10 @@ PANE_ASK_PATHS = (
     "/Users/johncornelius/bin/pane-ask-v2",   # Mac
 )
 DEDUP_TTL_SECONDS = 6 * 3600
+# On bypass delivery the dedup latch is re-armed to this shorter TTL instead
+# of deleted: deleting it made a held/busy pane route re-fire direct Pushover
+# for the SAME fingerprint every watcher cycle (18 fires in 4.5h, 2026-06-04).
+BYPASS_REARM_TTL_SECONDS = 30 * 60
 BYPASS_WINDOW_SECONDS = 15 * 60
 BYPASS_THRESHOLD = 3          # N bypasses in window -> wake John about Voice transport failure
 # Doctor bypass alerts are still infra alerts. Per rules/messaging.md, P2 is
@@ -757,7 +761,9 @@ def doctor_escalate(
 
     if r is not None:
         try:
-            r.delete(f"doctor:escalation:{fp}")
+            r.setex(f"doctor:escalation:{fp}", BYPASS_REARM_TTL_SECONDS, json.dumps({
+                "watcher": watcher, "severity": severity, "summary": summary,
+            }))
         except Exception:
             pass
     result["bypassed"] = True

@@ -36,6 +36,34 @@ class FakeLatchRedis:
 
 
 class DoctorEscalateBypassLatchTest(unittest.TestCase):
+    def test_successful_dispatch_requires_receiver_ack(self) -> None:
+        successful_run = types.SimpleNamespace(returncode=0, stderr="", stdout="")
+
+        with mock.patch.dict("os.environ", {"TMUX_PANE": ""}, clear=False):
+            with mock.patch.object(doctor_escalate, "_get_redis", return_value=None):
+                with mock.patch.object(doctor_escalate, "_token_bucket_check", return_value=True):
+                    with mock.patch.object(
+                        doctor_escalate, "_check_cluster", return_value=("individual", [])
+                    ):
+                        with mock.patch.object(
+                            doctor_escalate, "_pane_ask_binary", return_value="/fake/pane-ask-v2"
+                        ):
+                            with mock.patch.object(
+                                doctor_escalate.subprocess, "run", return_value=successful_run
+                            ) as run:
+                                with mock.patch.object(doctor_escalate, "_log_event"):
+                                    result = doctor_escalate.doctor_escalate(
+                                        watcher="ack-contract",
+                                        severity="critical",
+                                        summary="must not mark unverified banners dispatched",
+                                        dedup_scope="ack-contract",
+                                    )
+
+        self.assertTrue(result["dispatched"])
+        argv = run.call_args.args[0]
+        self.assertIn("--require-ack", argv)
+        self.assertLess(argv.index("--require-ack"), argv.index("--auto-recover-wedge"))
+
     def test_bypass_rearms_dedup_latch_with_short_ttl_instead_of_deleting(self) -> None:
         fake_r = FakeLatchRedis()
         failed_run = types.SimpleNamespace(returncode=1, stderr="pane busy", stdout="")

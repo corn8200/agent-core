@@ -732,7 +732,7 @@ def doctor_escalate(
             time.sleep(delay)
         try:
             proc = subprocess.run(
-                [binary, "--auto-recover-wedge", *label_args, *target_args, briefing],
+                [binary, "--require-ack", "--auto-recover-wedge", *label_args, *target_args, briefing],
                 capture_output=True, text=True, timeout=30,
             )
             if proc.returncode == 0:

@@ -90,6 +90,12 @@ BYPASS_THRESHOLD = 3          # N bypasses in window -> wake John about Voice tr
 # Doctor bypass alerts are still infra alerts. Per rules/messaging.md, P2 is
 # family/home safety only; P1 is reserved for rare true infra emergencies.
 SEVERITIES = {"ok": 0, "notice": 0, "warn": 0, "error": 0, "critical": 1}
+_SOFT_PANE_HOLD_MARKERS = (
+    "held: automated pane send",
+    "fail-closed after ambiguous prior delivery",
+    "is in tmux copy-mode; refusing pane paste",
+    "busy: pane",
+)
 
 # #683 cluster-dedup: when N+ distinct fingerprints fire for the same watcher
 # within CLUSTER_WINDOW_SECONDS, the Nth fire is rewritten as one "cluster"
@@ -519,6 +525,12 @@ def _record_bypass(redis_conn, target_host: str) -> int:
     return count + 1   # +1 for the bypass we're about to log
 
 
+def _is_soft_pane_hold(reason: str) -> bool:
+    """True when pane-ask protected the target instead of proving alert loss."""
+    reason_l = (reason or "").lower()
+    return any(marker in reason_l for marker in _SOFT_PANE_HOLD_MARKERS)
+
+
 def _format_briefing(
     watcher: str,
     severity: str,
@@ -787,10 +799,15 @@ def _deliver_bypass(
 ) -> None:
     bypass_count = _record_bypass(redis_conn, target_host)
     prio = bypass_priority if bypass_priority is not None else SEVERITIES.get(severity, 0)
+    soft_pane_hold = _is_soft_pane_hold(reason)
+    send_pushover = not soft_pane_hold or bypass_count >= BYPASS_THRESHOLD
     # [CRITIC-FIX SEV-2#1] Distinct subtype for rate-limited bypasses.
     if "rate_limited" in reason or "rc=7" in reason:
         title_prefix = f"[OVERSEER-VOICE-RATE-LIMITED-{target_host}]"
         transport_status = f"Overseer Voice route rate-limited - {reason}"
+    elif soft_pane_hold:
+        title_prefix = f"[OVERSEER-VOICE-HOLD-{target_host}]"
+        transport_status = f"Overseer Voice route held by pane safety gate - {reason}"
     else:
         title_prefix = f"[OVERSEER-VOICE-BYPASS-{target_host}]"
         transport_status = f"Overseer Voice route failed - {reason}"
@@ -804,31 +821,35 @@ def _deliver_bypass(
     if bypass_count >= BYPASS_THRESHOLD and "rate_limited" not in reason:
         prio = max(prio, 1)
         body_parts.insert(0, f"WARN: Overseer Voice route for {target_host} failed {bypass_count} times in window")
+    elif soft_pane_hold:
+        body_parts.insert(0, "SUPPRESSED: pane delivery hold logged without Pushover until transport threshold")
     body = "\n".join(body_parts)
     url = None
-    try:
-        from interactive_links import alert_action_url
+    if send_pushover:
+        try:
+            from interactive_links import alert_action_url
 
-        url = alert_action_url(
-            source=f"overseer-voice-bypass-{target_host}",
-            title=title,
-            message=body,
-            severity=severity,
+            url = alert_action_url(
+                source=f"overseer-voice-bypass-{target_host}",
+                title=title,
+                message=body,
+                severity=severity,
+            )
+        except Exception:
+            url = None
+        _pushover_direct(
+            title,
+            body,
+            priority=prio,
+            url=url,
+            url_title="Send to Overseer Voice" if url else None,
         )
-    except Exception:
-        url = None
-    _pushover_direct(
-        title,
-        body,
-        priority=prio,
-        url=url,
-        url_title="Send to Overseer Voice" if url else None,
-    )
     _log_event({
         "ts": canonical_ts(),
         "watcher": watcher, "severity": severity, "summary": summary,
         "event": "bypass", "reason": reason, "bypass_count": bypass_count,
-        "pushover_priority": prio,
+        "pushover_priority": prio, "pushover_sent": send_pushover,
+        "soft_pane_hold": soft_pane_hold,
         "source_host": _SOURCE_HOST, "target_host": target_host,
         **({"fingerprint": fingerprint} if fingerprint else {}),
     })

@@ -33,6 +33,8 @@ Optional — producer events (dispatched|dedup_hit|bypass|rate_limited|local_onl
     reason        str   why bypassed or deduped            (bypass|dedup_hit)
     bypass_count  int   cumulative bypasses in window       (bypass only)
     pushover_priority int  0/1/2                            (bypass only)
+    pushover_sent bool True when direct Pushover actually fired
+    soft_pane_hold bool True when pane-ask safety hold suppressed Pushover
     quota         dict  rate-limit quota applied            (rate_limited only)
 
 Optional — doctor response events (event=response):
@@ -94,6 +96,8 @@ class DoctorEvent(TypedDict, total=False):
     reason: str
     bypass_count: int
     pushover_priority: int
+    pushover_sent: bool
+    soft_pane_hold: bool
     # --- rate_limited ---
     quota: dict
     # --- doctor response ---

@@ -108,6 +108,82 @@ class DoctorEscalateBypassLatchTest(unittest.TestCase):
             },
         )
 
+    def test_soft_pane_hold_logs_without_pushover_below_transport_threshold(self) -> None:
+        events: list[dict] = []
+
+        with mock.patch.object(doctor_escalate, "_record_bypass", return_value=1):
+            with mock.patch.object(doctor_escalate, "_pushover_direct") as pushover:
+                with mock.patch.object(doctor_escalate, "_log_event", side_effect=events.append):
+                    doctor_escalate._deliver_bypass(
+                        watcher="pane-model-drift",
+                        severity="critical",
+                        summary="manual-fable pane lost fable",
+                        briefing="briefing",
+                        reason=(
+                            "rc=11 stderr=held: automated pane send to claude:5 "
+                            "is fail-closed after ambiguous prior delivery"
+                        ),
+                        redis_conn=None,
+                        bypass_priority=None,
+                        fingerprint="fp1",
+                        target_host="mac",
+                    )
+
+        pushover.assert_not_called()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["event"], "bypass")
+        self.assertFalse(events[0]["pushover_sent"])
+        self.assertTrue(events[0]["soft_pane_hold"])
+
+    def test_soft_pane_hold_pages_after_transport_threshold(self) -> None:
+        events: list[dict] = []
+
+        with mock.patch.object(
+            doctor_escalate,
+            "_record_bypass",
+            return_value=doctor_escalate.BYPASS_THRESHOLD,
+        ):
+            with mock.patch.object(doctor_escalate, "_pushover_direct") as pushover:
+                with mock.patch.object(doctor_escalate, "_log_event", side_effect=events.append):
+                    doctor_escalate._deliver_bypass(
+                        watcher="pane-launch-cmd-drift",
+                        severity="critical",
+                        summary="launch cmd drift",
+                        briefing="briefing",
+                        reason="rc=1 stderr=busy: pane claude:5 is in tmux copy-mode; refusing pane paste",
+                        redis_conn=None,
+                        bypass_priority=None,
+                        fingerprint="fp2",
+                        target_host="mac",
+                    )
+
+        pushover.assert_called_once()
+        self.assertEqual(events[0]["event"], "bypass")
+        self.assertTrue(events[0]["pushover_sent"])
+        self.assertTrue(events[0]["soft_pane_hold"])
+
+    def test_hard_transport_failure_still_sends_pushover_immediately(self) -> None:
+        events: list[dict] = []
+
+        with mock.patch.object(doctor_escalate, "_record_bypass", return_value=1):
+            with mock.patch.object(doctor_escalate, "_pushover_direct") as pushover:
+                with mock.patch.object(doctor_escalate, "_log_event", side_effect=events.append):
+                    doctor_escalate._deliver_bypass(
+                        watcher="nightly-infra-check",
+                        severity="critical",
+                        summary="redis unavailable",
+                        briefing="briefing",
+                        reason="timeout",
+                        redis_conn=None,
+                        bypass_priority=None,
+                        fingerprint="fp3",
+                        target_host="vps",
+                    )
+
+        pushover.assert_called_once()
+        self.assertTrue(events[0]["pushover_sent"])
+        self.assertFalse(events[0]["soft_pane_hold"])
+
 
 if __name__ == "__main__":
     unittest.main()

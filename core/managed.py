@@ -18,10 +18,15 @@ Beta header: managed-agents-2026-04-01.
 from __future__ import annotations
 
 import asyncio
+import importlib.metadata
+import inspect
 import os
 from typing import Optional
 
+import anthropic
+
 BETAS = ["managed-agents-2026-04-01"]
+ENABLE_ENV = "AGENT_CORE_MANAGED_AGENTS_ENABLED"
 
 _AGENT_CACHE: dict[tuple[str, str, str], str] = {}  # (name, model, system) -> agent_id
 _ENV_CACHE: dict[str, str] = {}  # name -> environment_id
@@ -33,11 +38,53 @@ _MODEL_ALIASES = {
 }
 
 
+def _enabled() -> bool:
+    """Return whether the raw API-billed pilot was explicitly opted in."""
+    return os.environ.get(ENABLE_ENV, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _client() -> anthropic.Anthropic:
-    raise RuntimeError(
-        "OpJune PR2 disabled the raw API-billed Managed Agents path before "
-        "2026-06-15; route through the gated broker after SDK credit cutover."
-    )
+    """Build a Managed Agents client after an explicit, fail-closed opt-in.
+
+    Merely importing this module or calling the local capability probe never
+    enables billing and never makes a network request.
+    """
+    if not _enabled():
+        raise RuntimeError(
+            f"Managed Agents is disabled by default; set {ENABLE_ENV}=1 only "
+            "inside an approved, bounded pilot."
+        )
+    api_key = os.environ.get("ANTHROPIC_CONSOLE_KEY") or os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "ANTHROPIC_CONSOLE_KEY or ANTHROPIC_API_KEY is required after "
+            "the Managed Agents pilot is explicitly enabled."
+        )
+    return anthropic.Anthropic(api_key=api_key)
+
+
+def managed_agents_capability_probe() -> dict[str, object]:
+    """Verify the installed SDK surface without credentials, billing, or I/O."""
+    client = anthropic.Anthropic(api_key="local-structure-probe-not-a-credential")
+    methods = {
+        "agents.create": client.beta.agents.create,
+        "environments.list": client.beta.environments.list,
+        "environments.create": client.beta.environments.create,
+        "sessions.create": client.beta.sessions.create,
+        "sessions.events.send": client.beta.sessions.events.send,
+        "sessions.events.stream": client.beta.sessions.events.stream,
+        "sessions.archive": client.beta.sessions.archive,
+    }
+    return {
+        "available": all(callable(method) for method in methods.values()),
+        "anthropic_version": importlib.metadata.version("anthropic"),
+        "beta": BETAS[0],
+        "default_enabled": _enabled(),
+        "network_calls": 0,
+        "methods": {
+            name: str(inspect.signature(method)) for name, method in methods.items()
+        },
+    }
 
 
 def _ensure_environment(client: anthropic.Anthropic, name: str = "agent-core-default") -> str:
@@ -156,9 +203,6 @@ async def managed_query(
 
     Returns the assistant's text response. Raises on API errors.
     """
-    assert (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_CONSOLE_KEY")), \
-        "ANTHROPIC_CONSOLE_KEY not set (Managed Agents requires raw API billing)"
-
     def _work() -> str:
         client = _client()
         env_id = _ensure_environment(client, environment)
@@ -179,9 +223,6 @@ async def managed_query_verbose(
     title: Optional[str] = None,
 ) -> tuple[str, dict]:
     """Same as managed_query but also returns stats dict (events, session_id)."""
-    assert (os.environ.get("ANTHROPIC_API_KEY") or os.environ.get("ANTHROPIC_CONSOLE_KEY")), \
-        "ANTHROPIC_CONSOLE_KEY not set (Managed Agents requires raw API billing)"
-
     def _work() -> tuple[str, dict]:
         client = _client()
         env_id = _ensure_environment(client, environment)

@@ -46,6 +46,7 @@ import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 # Self-bootstrap sys.path: callers can `from doctor_escalate import …`
 # without pre-loading sys.path, as long as Python can locate this file
@@ -90,6 +91,13 @@ BYPASS_THRESHOLD = 3          # N bypasses in window -> wake John about Voice tr
 # Doctor bypass alerts are still infra alerts. Per rules/messaging.md, P2 is
 # family/home safety only; P1 is reserved for rare true infra emergencies.
 SEVERITIES = {"ok": 0, "notice": 0, "warn": 0, "error": 0, "critical": 1}
+# Phone quiet hours are evaluated in John's local timezone. Ordinary doctor
+# "critical" events are P1 and are held; only an explicit P2 emergency (the
+# system's critical-hard boundary) may wake the phone overnight.
+PHONE_QUIET_TZ = ZoneInfo("America/New_York")
+PHONE_QUIET_START_MINUTE = 21 * 60 + 30
+PHONE_QUIET_END_MINUTE = 7 * 60
+CRITICAL_HARD_PRIORITY = 2
 _SOFT_PANE_HOLD_MARKERS = (
     "held: automated pane send",
     "fail-closed after ambiguous prior delivery",
@@ -422,6 +430,20 @@ def _log_event(event: dict) -> None:
         logger.warning("doctor_escalate: log write failed (%s)", e)
 
 
+def _in_phone_quiet_hours(now: datetime | None = None) -> bool:
+    """Return whether ``now`` falls in the DST-safe 21:30-07:00 ET window."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    elif now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    local_now = now.astimezone(PHONE_QUIET_TZ)
+    local_minute = local_now.hour * 60 + local_now.minute
+    return (
+        local_minute >= PHONE_QUIET_START_MINUTE
+        or local_minute < PHONE_QUIET_END_MINUTE
+    )
+
+
 def _pushover_direct(
     title: str,
     message: str,
@@ -429,7 +451,15 @@ def _pushover_direct(
     *,
     url: str | None = None,
     url_title: str | None = None,
+    now: datetime | None = None,
 ) -> bool:
+    if priority < CRITICAL_HARD_PRIORITY and _in_phone_quiet_hours(now):
+        logger.warning(
+            "doctor_escalate: direct Pushover held during phone quiet hours "
+            "(priority=%s, window=21:30-07:00 America/New_York)",
+            priority,
+        )
+        return False
     try:
         from core.voice_reroute import voice_reroute_send
         if voice_reroute_send(title, message, priority, url, url_title):
@@ -825,6 +855,13 @@ def _deliver_bypass(
         body_parts.insert(0, "SUPPRESSED: pane delivery hold logged without Pushover until transport threshold")
     body = "\n".join(body_parts)
     url = None
+    delivery_now = datetime.now(timezone.utc)
+    quiet_hours_held = (
+        send_pushover
+        and prio < CRITICAL_HARD_PRIORITY
+        and _in_phone_quiet_hours(delivery_now)
+    )
+    pushover_sent = False
     if send_pushover:
         try:
             from interactive_links import alert_action_url
@@ -837,18 +874,20 @@ def _deliver_bypass(
             )
         except Exception:
             url = None
-        _pushover_direct(
+        pushover_sent = bool(_pushover_direct(
             title,
             body,
             priority=prio,
             url=url,
             url_title="Send to Overseer Voice" if url else None,
-        )
+            now=delivery_now,
+        ))
     _log_event({
         "ts": canonical_ts(),
         "watcher": watcher, "severity": severity, "summary": summary,
         "event": "bypass", "reason": reason, "bypass_count": bypass_count,
-        "pushover_priority": prio, "pushover_sent": send_pushover,
+        "pushover_priority": prio, "pushover_sent": pushover_sent,
+        "quiet_hours_held": quiet_hours_held,
         "soft_pane_hold": soft_pane_hold,
         "source_host": _SOURCE_HOST, "target_host": target_host,
         **({"fingerprint": fingerprint} if fingerprint else {}),

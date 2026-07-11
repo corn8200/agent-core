@@ -34,6 +34,7 @@ Optional — producer events (dispatched|dedup_hit|bypass|rate_limited|local_onl
     bypass_count  int   cumulative bypasses in window       (bypass only)
     pushover_priority int  0/1/2                            (bypass only)
     pushover_sent bool True when direct Pushover actually fired
+    quiet_hours_held bool True when a non-P2 page was held overnight
     soft_pane_hold bool True when pane-ask safety hold suppressed Pushover
     quota         dict  rate-limit quota applied            (rate_limited only)
 
@@ -97,6 +98,7 @@ class DoctorEvent(TypedDict, total=False):
     bypass_count: int
     pushover_priority: int
     pushover_sent: bool
+    quiet_hours_held: bool
     soft_pane_hold: bool
     # --- rate_limited ---
     quota: dict

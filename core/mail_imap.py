@@ -98,15 +98,34 @@ def _format_imap_date(d: datetime) -> str:
     return d.strftime("%d-%b-%Y")
 
 
-def _extract_snippet(raw_text: bytes | str) -> str:
-    """First N chars of plaintext body, collapsed whitespace, MIME-stripped."""
+def _extract_snippet(
+    raw_text: bytes | str,
+    mime_headers: bytes | str = b"",
+) -> str:
+    """First N decoded chars of a MIME part, collapsed for semantic preview."""
     if isinstance(raw_text, bytes):
-        try:
-            text = raw_text.decode("utf-8", errors="replace")
-        except Exception:
-            text = raw_text.decode("latin-1", errors="replace")
+        raw_bytes = raw_text
     else:
-        text = raw_text or ""
+        raw_bytes = (raw_text or "").encode("utf-8", errors="replace")
+    if isinstance(mime_headers, str):
+        header_bytes = mime_headers.encode("utf-8", errors="replace")
+    else:
+        header_bytes = mime_headers or b""
+
+    try:
+        part = email.message_from_bytes(header_bytes + b"\r\n" + raw_bytes)
+        decoded = part.get_payload(decode=True)
+        if isinstance(decoded, bytes):
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                text = decoded.decode(charset, errors="replace")
+            except (LookupError, UnicodeError):
+                text = decoded.decode("utf-8", errors="replace")
+        else:
+            payload = part.get_payload()
+            text = payload if isinstance(payload, str) else ""
+    except Exception:
+        text = raw_bytes.decode("utf-8", errors="replace")
     # Strip soft line breaks + collapse whitespace
     text = re.sub(r"=\r?\n", "", text)  # quoted-printable soft breaks
     text = re.sub(r"\s+", " ", text).strip()
@@ -226,7 +245,11 @@ class MailIMAP:
         # Fetch envelope + first part of body in one round-trip
         fetch_set = b",".join(ids)
         # BODY.PEEK avoids marking as read
-        typ, fetched = conn.fetch(fetch_set, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)] BODY.PEEK[1]<0.500>)")
+        typ, fetched = conn.fetch(
+            fetch_set,
+            "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE MESSAGE-ID)] "
+            "BODY.PEEK[1.MIME] BODY.PEEK[1]<0.2000>)",
+        )
         if typ != "OK":
             return []
         results = self._parse_fetch(fetched)
@@ -247,14 +270,16 @@ class MailIMAP:
         for item in raw:
             if isinstance(item, tuple):
                 prelude, payload = item
-                m = re.match(rb"(\d+)", prelude)
-                if not m:
+                m = re.match(rb"\s*(\d+)", prelude)
+                if m:
+                    current_id = m.group(1)
+                if current_id is None:
                     continue
-                msg_id = m.group(1)
-                current_id = msg_id
-                bucket = msg_chunks.setdefault(msg_id, {})
+                bucket = msg_chunks.setdefault(current_id, {})
                 if b"HEADER" in prelude:
                     bucket["headers"] = payload or b""
+                elif b"BODY[1.MIME]" in prelude:
+                    bucket["body_mime"] = payload or b""
                 elif b"BODY[1]" in prelude:
                     bucket["body"] = payload or b""
         for msg_id, bucket in msg_chunks.items():
@@ -277,7 +302,10 @@ class MailIMAP:
                 "from_addr": from_addr,
                 "date": date_iso,
                 "rfc_message_id": message_id,
-                "snippet": _extract_snippet(bucket.get("body") or b""),
+                "snippet": _extract_snippet(
+                    bucket.get("body") or b"",
+                    bucket.get("body_mime") or b"",
+                ),
                 "account": self.account,
                 "_date_sortkey": sortkey,
             })

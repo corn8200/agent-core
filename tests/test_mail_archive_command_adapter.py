@@ -15,6 +15,8 @@ from core.mail_archive_command_adapter import (
     MailArchiveRequest,
     MailArchiveVerificationError,
     RECEIPT_SCHEMA,
+    _display_snippet,
+    _parse_fetch_message,
 )
 
 
@@ -564,6 +566,35 @@ def test_probe_is_read_only_and_returns_capabilities(tmp_path: Path) -> None:
 def test_closed_request_validation_rejects_shape_errors() -> None:
     with pytest.raises(MailArchiveError, match="mail archive request"):
         MailArchiveRequest.from_mapping({"account": "gmail"})
+
+
+def test_fetch_parser_uses_uid_and_canonical_gmail_labels() -> None:
+    parsed = _parse_fetch_message(
+        [
+            (
+                b'7 (UID 202 X-GM-MSGID 555000111222333444 '
+                b'X-GM-LABELS (\\Inbox \\All "Travel Plans") '
+                b'BODY[HEADER.FIELDS (MESSAGE-ID)] {41}',
+                b"Message-ID: <gmail-202@example.com>\r\n\r\n",
+            ),
+            b")",
+        ]
+    )
+    assert parsed == {
+        "uid": 202,
+        "message_id": "<gmail-202@example.com>",
+        "gmail_msgid": "555000111222333444",
+        "labels": ["INBOX", "ALL", "Travel Plans"],
+    }
+
+
+def test_display_snippet_strips_html_before_bounding() -> None:
+    snippet = _display_snippet(
+        b"<html><body><p>Show up 15 minutes early.</p>"
+        b"<script>discard me</script><p>123 Main Street</p></body></html>",
+        b"Content-Type: text/html; charset=utf-8\r\n",
+    )
+    assert snippet == "Show up 15 minutes early. 123 Main Street"
 
 
 if __name__ == "__main__":

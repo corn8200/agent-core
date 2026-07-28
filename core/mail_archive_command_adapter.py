@@ -7,6 +7,7 @@ import datetime as dt
 import email
 import email.utils
 import hashlib
+import html
 import imaplib
 import json
 import os
@@ -874,7 +875,7 @@ class IMAPArchiveBackend:
             "from": (from_name or from_addr)[:160],
             "from_addr": from_addr[:160],
             "date": date_value,
-            "snippet": _extract_snippet(body, mime_headers),
+            "snippet": _display_snippet(body, mime_headers),
         }
 
     def execute(self, request: MailArchiveRequest, *, operation_id: str) -> dict[str, Any]:
@@ -1590,6 +1591,34 @@ def _default_account_configs() -> dict[str, dict[str, str]]:
         "gmail": dict(gmail_cfg),
         "gmail-burner": dict(gmail_cfg),
     }
+
+
+def _display_snippet(raw_body: bytes, mime_headers: bytes) -> str:
+    fallback = _extract_snippet(raw_body, mime_headers)
+    try:
+        part = email.message_from_bytes(mime_headers + b"\r\n" + raw_body)
+        decoded = part.get_payload(decode=True)
+        if isinstance(decoded, bytes):
+            charset = part.get_content_charset() or "utf-8"
+            try:
+                text = decoded.decode(charset, errors="replace")
+            except (LookupError, UnicodeError):
+                text = decoded.decode("utf-8", errors="replace")
+        else:
+            payload = part.get_payload()
+            text = payload if isinstance(payload, str) else fallback
+    except Exception:
+        text = fallback
+    text = re.sub(
+        r"<(?:script|style)\b[^>]*>.*?</(?:script|style)>",
+        " ",
+        text,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = html.unescape(text)
+    text = re.sub(r"=\r?\n", "", text)
+    return re.sub(r"\s+", " ", text).strip()[:240]
 
 
 def _parse_fetch_message(data: list[Any]) -> dict[str, Any] | None:

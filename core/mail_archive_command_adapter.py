@@ -1480,6 +1480,12 @@ class IMAPArchiveBackend:
             raise MailArchiveError(f"copy to {mailbox!r} failed: {typ}")
         uidvalidity, dest_uid = _parse_copyuid(data)
         if uidvalidity is None or dest_uid is None:
+            response = conn.response("COPYUID")
+            if response and len(response) > 1 and response[1]:
+                uidvalidity, dest_uid = _parse_copyuid(
+                    [response[0], *list(response[1])]
+                )
+        if uidvalidity is None or dest_uid is None:
             raise MailArchiveVerificationError("UIDPLUS COPYUID response is required")
         return {"dest_uidvalidity": uidvalidity, "dest_uid": dest_uid}
 

@@ -16,6 +16,7 @@ from core.mail_archive_command_adapter import (
     MailArchiveVerificationError,
     RECEIPT_SCHEMA,
     _display_snippet,
+    _parse_copyuid,
     _parse_fetch_message,
 )
 
@@ -595,6 +596,10 @@ def test_display_snippet_strips_html_before_bounding() -> None:
         b"Content-Type: text/html; charset=utf-8\r\n",
     )
     assert snippet == "Show up 15 minutes early. 123 Main Street"
+
+
+def test_copyuid_parser_accepts_tagged_response_cache_shape() -> None:
+    assert _parse_copyuid(["COPYUID", b"1 45397 9001"]) == (1, 9001)
 
 
 if __name__ == "__main__":

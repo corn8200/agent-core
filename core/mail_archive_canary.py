@@ -38,6 +38,9 @@ DEFAULT_STATE_ROOT = (
     / "Duffields"
     / "mail-archive-canary"
 )
+CANARY_MESSAGE_ID_RE = re.compile(
+    r"^<duffields-warboard-canary-[0-9a-f]{16}@localhost\.invalid>$"
+)
 
 
 def _synthetic_message(message_id: str) -> bytes:
@@ -180,6 +183,68 @@ def _delete_exact(
         )
 
 
+def _cleanup_stale_synthetic(
+    backend: IMAPArchiveBackend,
+    *,
+    account: str,
+) -> int:
+    deleted = 0
+    for mailbox in ("INBOX", "Archive"):
+        with backend._open(account) as conn:
+            backend._select(conn, mailbox)
+            typ, data = conn.uid(
+                "SEARCH",
+                None,
+                "HEADER",
+                "Message-ID",
+                "duffields-warboard-canary-",
+            )
+            if typ != "OK" or not data or not data[0]:
+                continue
+            uids = [int(raw) for raw in data[0].split()[:20]]
+            for uid in uids:
+                fetched = backend._fetch_uid_message(
+                    conn,
+                    uid,
+                    fields="(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+                )
+                message_id = str((fetched or {}).get("message_id") or "")
+                if not CANARY_MESSAGE_ID_RE.fullmatch(message_id):
+                    continue
+                backend._delete_uid(conn, mailbox, uid)
+                deleted += 1
+    return deleted
+
+
+def _cleanup_message_id(
+    backend: IMAPArchiveBackend,
+    *,
+    account: str,
+    message_id: str,
+) -> int:
+    if not CANARY_MESSAGE_ID_RE.fullmatch(message_id):
+        raise MailArchiveError("canary cleanup refused a non-canary Message-ID")
+    deleted = 0
+    for mailbox in ("INBOX", "Archive"):
+        with backend._open(account) as conn:
+            backend._select(conn, mailbox)
+            typ, data = conn.uid("SEARCH", None, "HEADER", "Message-ID", message_id)
+            if typ != "OK" or not data or not data[0]:
+                continue
+            for raw in data[0].split()[:4]:
+                uid = int(raw)
+                fetched = backend._fetch_uid_message(
+                    conn,
+                    uid,
+                    fields="(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+                )
+                if str((fetched or {}).get("message_id") or "") != message_id:
+                    continue
+                backend._delete_uid(conn, mailbox, uid)
+                deleted += 1
+    return deleted
+
+
 def run_canary(
     *,
     account: str = "icloud",
@@ -192,6 +257,7 @@ def run_canary(
     run_id = uuid.uuid4().hex[:16]
     message_id = f"<duffields-warboard-canary-{run_id}@localhost.invalid>"
     backend = IMAPArchiveBackend()
+    stale_cleaned = _cleanup_stale_synthetic(backend, account=account)
     row: dict[str, Any] | None = None
     cleanup_targets: list[dict[str, Any]] = []
     cleanup_ok = False
@@ -253,6 +319,7 @@ def run_canary(
             "ok": True,
             "schema": "mail-archive-canary/v1",
             "account": account,
+            "stale_synthetic_cleaned": stale_cleaned,
             "mail_readback": (
                 readback.get("ok") is True
                 and readback.get("observed", {}).get("origin_absent") is True
@@ -282,6 +349,14 @@ def run_canary(
                         )
                 except Exception:
                     pass
+            try:
+                _cleanup_message_id(
+                    backend,
+                    account=account,
+                    message_id=message_id,
+                )
+            except Exception:
+                pass
 
 
 def build_parser() -> argparse.ArgumentParser:

@@ -949,7 +949,45 @@ class IMAPArchiveBackend:
                 "uid": copyuid["dest_uid"],
             }
         )
-        self._delete_uid(conn, request.origin_mailbox, request.uid)
+        try:
+            self._delete_uid(conn, request.origin_mailbox, request.uid)
+        except (OSError, MailArchiveError, imaplib.IMAP4.error) as exc:
+            self._select(conn, request.archive_mailbox, readonly=True)
+            copied = self._fetch_uid_message(
+                conn,
+                copyuid["dest_uid"],
+                fields="(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+            )
+            if copied is None or copied.get("message_id") != request.message_id:
+                raise MailArchiveVerificationError(
+                    "archive copy could not be reconciled after origin removal failed"
+                ) from exc
+            return {
+                "ok": False,
+                "schema": RECEIPT_SCHEMA,
+                "provider": request.provider,
+                "account": request.account,
+                "operation_id": operation_id,
+                "status": "uncertain",
+                "effect_verified": False,
+                "before": before,
+                "after": {
+                    "origin": before,
+                    "archive": {
+                        "account": request.account,
+                        "provider": request.provider,
+                        **archive_identity,
+                    },
+                },
+                "undo": {
+                    "operation": "reconcile_copy_and_origin",
+                    "origin_mailbox": request.origin_mailbox,
+                    "archive_mailbox": request.archive_mailbox,
+                    "archive_uidvalidity": copyuid["dest_uidvalidity"],
+                    "archive_uid": copyuid["dest_uid"],
+                    "message_id": request.message_id,
+                },
+            }
         after = self._icloud_readback_identity(conn, request, archive_identity=archive_identity)
         return {
             "ok": True,

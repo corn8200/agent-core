@@ -1616,6 +1616,7 @@ def _display_snippet(raw_body: bytes, mime_headers: bytes) -> str:
         flags=re.IGNORECASE | re.DOTALL,
     )
     text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"<[^>]*$", " ", text)
     text = html.unescape(text)
     text = re.sub(r"=\r?\n", "", text)
     return re.sub(r"\s+", " ", text).strip()[:240]

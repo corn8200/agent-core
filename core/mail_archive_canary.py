@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import email.policy
 import email.utils
@@ -20,6 +21,7 @@ from .mail_archive_command_adapter import (
     LIVE_ENV,
     IMAPArchiveBackend,
     MailArchiveCommandBridge,
+    MailArchiveConflictError,
     MailArchiveError,
     MailArchiveVerificationError,
     _canonical_json,
@@ -183,6 +185,30 @@ def _delete_exact(
         )
 
 
+def _exact_present(
+    backend: IMAPArchiveBackend,
+    *,
+    account: str,
+    mailbox: str,
+    uidvalidity: int,
+    uid: int,
+    message_id: str,
+) -> bool:
+    with backend._open(account) as conn:
+        backend._select(conn, mailbox, readonly=True)
+        if _current_uidvalidity(conn) != uidvalidity:
+            return False
+        fetched = backend._fetch_uid_message(
+            conn,
+            uid,
+            fields="(UID BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])",
+        )
+        return (
+            fetched is not None
+            and fetched.get("message_id") == message_id
+        )
+
+
 def _cleanup_stale_synthetic(
     backend: IMAPArchiveBackend,
     *,
@@ -273,6 +299,30 @@ def run_canary(
         proposal = _proposal(row, run_id)
         root = state_root / run_id
         bridge = MailArchiveCommandBridge(backend, state_root=root)
+        conflict_proposal = copy.deepcopy(proposal)
+        conflict_proposal["action"]["payload"]["uidvalidity"] = (
+            "0" if str(row["uidvalidity"]) != "0" else "1"
+        )
+        try:
+            bridge.execute(
+                conflict_proposal,
+                operation_id=f"warboard:mail:conflict:{run_id}",
+            )
+        except MailArchiveConflictError:
+            source_conflict_refused = True
+        else:
+            source_conflict_refused = False
+        if not source_conflict_refused or not _exact_present(
+            backend,
+            account=account,
+            mailbox="INBOX",
+            uidvalidity=int(row["uidvalidity"]),
+            uid=int(row["uid"]),
+            message_id=message_id,
+        ):
+            raise MailArchiveError(
+                "canary source-version conflict was not refused cleanly"
+            )
         executed = bridge.execute(
             proposal,
             operation_id=f"warboard:mail:execute:{run_id}",
@@ -326,6 +376,7 @@ def run_canary(
                 and readback.get("observed", {}).get("destination_present") is True
             ),
             "mail_replay": replayed.get("details", {}).get("replayed") is True,
+            "mail_conflict_refused": source_conflict_refused,
             "mail_undo_readback": (
                 undo_readback.get("ok") is True
                 and undo_readback.get("observed", {}).get("origin_present") is True
@@ -380,6 +431,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             for field in (
                 "mail_readback",
                 "mail_replay",
+                "mail_conflict_refused",
                 "mail_undo_readback",
                 "all_restored",
             )
@@ -391,6 +443,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "error": {"code": type(exc).__name__, "message": str(exc)[:1000]},
             "mail_readback": False,
             "mail_replay": False,
+            "mail_conflict_refused": False,
             "mail_undo_readback": False,
             "all_restored": False,
         }

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import datetime as dt
 import json
 import tempfile
@@ -15,7 +16,7 @@ from .reminder_complete_command_adapter import (
     ReminderSnapshot,
     SwiftEventKitCompleteBackend,
 )
-from .reminder_upsert import ReminderUpsertError, _digest
+from .reminder_upsert import ConflictError, ReminderUpsertError, _digest
 
 
 LIVE_CONFIRMATION = "I_UNDERSTAND_THIS_CREATES_AND_DELETES_CANARY_REMINDERS"
@@ -121,6 +122,28 @@ def run_one(
                 "+00:00", "Z"
             ),
         )
+        conflict_proposal = copy.deepcopy(proposal)
+        conflict_proposal["action"]["payload"]["lastModifiedDate"] = (
+            "1970-01-01T00:00:00Z"
+        )
+        try:
+            bridge.execute(
+                conflict_proposal,
+                operation_id=f"canary:conflict:{token}",
+            )
+        except ConflictError:
+            source_conflict_refused = True
+        else:
+            source_conflict_refused = False
+        if not source_conflict_refused:
+            raise RuntimeError("canary source-version conflict was not refused")
+        after_conflict = backend.get(before.identifier)
+        if (
+            after_conflict is None
+            or after_conflict.completed
+            or after_conflict.last_modified_date != before.last_modified_date
+        ):
+            raise RuntimeError("canary conflict probe changed the source reminder")
         executed = bridge.execute(
             proposal,
             operation_id=f"canary:execute:{token}",
@@ -189,6 +212,7 @@ def run_one(
             "recurring": recurring,
             "execute_status": executed["details"]["status"],
             "execute_replay": replay["details"]["replayed"],
+            "source_conflict_refused": source_conflict_refused,
             "readback_status": readback["observed"]["status"],
             "undo_status": undone["details"]["status"],
             "undo_readback_status": undo_readback["observed"]["status"],
@@ -241,7 +265,12 @@ def run_canary() -> dict[str, Any]:
             ),
         ]
     return {
-        "ok": all(result["ok"] for result in results),
+        "ok": all(
+            result["ok"]
+            and result["execute_replay"] is True
+            and result["source_conflict_refused"] is True
+            for result in results
+        ),
         "status": "REMINDER_COMPLETE_CANARY_PASS",
         "results": results,
         "stale_synthetic_cleaned": int(stale_cleanup.get("deleted") or 0),

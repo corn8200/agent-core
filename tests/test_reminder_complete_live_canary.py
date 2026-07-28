@@ -21,6 +21,7 @@ def test_live_reminder_completion_and_cleanup() -> None:
     for entry in result["results"]:
         assert entry["execute_status"] == "completed"
         assert entry["execute_replay"] is True
+        assert entry["source_conflict_refused"] is True
         assert entry["readback_status"] == "completed"
         assert entry["undo_status"] == "restored_incomplete"
         assert entry["undo_readback_status"] == "restored_incomplete"

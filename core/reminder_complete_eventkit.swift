@@ -108,6 +108,10 @@ private struct CanaryInput: Decodable {
     let recurring: Bool?
 }
 
+private struct CanaryCleanupInput: Decodable {
+    let before: String
+}
+
 private struct RecordResponse: Encodable {
     let ok = true
     let record: ReminderRecord?
@@ -217,13 +221,18 @@ private func requireMutationGate() throws {
 }
 
 private func validateCanaryMarker(_ marker: String) throws {
-    guard marker.hasPrefix(canaryMarkerPrefix), marker.hasSuffix("]"),
-          marker.range(
-              of: #"^\[warboard-reminder-complete-canary:[a-f0-9]{32}\]$"#,
-              options: .regularExpression
-          ) != nil else {
+    guard isCanaryMarker(marker) else {
         throw HelperError.rejected("invalid_canary_marker", "canary marker is invalid")
     }
+}
+
+private func isCanaryMarker(_ marker: String) -> Bool {
+    marker.hasPrefix(canaryMarkerPrefix) &&
+        marker.hasSuffix("]") &&
+        marker.range(
+            of: #"^\[warboard-reminder-complete-canary:[a-f0-9]{32}\]$"#,
+            options: .regularExpression
+        ) != nil
 }
 
 private func canonicalDue(_ components: DateComponents?) -> String? {
@@ -630,6 +639,58 @@ private func runCanaryDelete(_ store: EKEventStore) throws {
     emit(CanaryDeleteResponse(deleted: matches.count))
 }
 
+private func runCanaryCleanStale(_ store: EKEventStore) throws {
+    try requireMutationGate()
+    let input = try decode(CanaryCleanupInput.self)
+    guard let cutoff = isoFormatter.date(from: input.before) else {
+        throw HelperError.rejected(
+            "invalid_canary_cutoff",
+            "canary cleanup cutoff must be an ISO date-time"
+        )
+    }
+    let matches = try fetchAll(store).filter { reminder in
+        guard reminder.calendar.title == canaryList,
+              reminder.title == canaryTitle,
+              let modified = reminder.lastModifiedDate,
+              modified < cutoff else {
+            return false
+        }
+        return (reminder.notes ?? "")
+            .components(separatedBy: .newlines)
+            .contains(where: isCanaryMarker)
+    }
+    guard matches.count <= 20 else {
+        throw HelperError.rejected(
+            "stale_canary_cleanup_refused",
+            "stale canary cleanup exceeded the bounded synthetic set"
+        )
+    }
+    let identifiers = Set(matches.map(\.calendarItemIdentifier))
+    do {
+        for item in matches {
+            try store.remove(item, commit: false)
+        }
+        if !matches.isEmpty {
+            try store.commit()
+        }
+    } catch {
+        throw HelperError.rejected(
+            "stale_canary_cleanup_failed",
+            "could not delete stale synthetic canaries"
+        )
+    }
+    let remaining = try fetchAll(store).filter {
+        identifiers.contains($0.calendarItemIdentifier)
+    }
+    guard remaining.isEmpty else {
+        throw HelperError.rejected(
+            "stale_canary_cleanup_readback_failed",
+            "stale synthetic canary remains after cleanup"
+        )
+    }
+    emit(CanaryDeleteResponse(deleted: matches.count))
+}
+
 private func runSetCompletion(_ store: EKEventStore) throws {
     try requireMutationGate()
     let input = try decode(SetCompletionInput.self)
@@ -843,6 +904,8 @@ private func main() {
             try runCanaryCreate(store)
         case "canary-delete":
             try runCanaryDelete(store)
+        case "canary-clean-stale":
+            try runCanaryCleanStale(store)
         case "get":
             try runGet(store)
         case "set-completed":

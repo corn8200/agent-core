@@ -215,6 +215,13 @@ def run_one(
 def run_canary() -> dict[str, Any]:
     now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
     backend = SwiftEventKitCompleteBackend(allow_mutation=True, timeout=60)
+    stale_cutoff = (now - dt.timedelta(minutes=10)).isoformat().replace(
+        "+00:00", "Z"
+    )
+    stale_cleanup = backend._call(
+        "canary-clean-stale",
+        {"before": stale_cutoff},
+    )
     with tempfile.TemporaryDirectory(
         prefix="warboard-reminder-complete-canary-"
     ) as temporary:
@@ -237,6 +244,7 @@ def run_canary() -> dict[str, Any]:
         "ok": all(result["ok"] for result in results),
         "status": "REMINDER_COMPLETE_CANARY_PASS",
         "results": results,
+        "stale_synthetic_cleaned": int(stale_cleanup.get("deleted") or 0),
         "production_items_remaining": 0,
     }
 

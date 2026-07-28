@@ -45,6 +45,13 @@ CANARY_MESSAGE_ID_RE = re.compile(
 )
 
 
+def _conflicting_uidvalidity(value: Any) -> str:
+    current = int(str(value))
+    if current <= 0:
+        raise MailArchiveError("canary source UIDVALIDITY must be positive")
+    return "2" if current == 1 else "1"
+
+
 def _synthetic_message(message_id: str) -> bytes:
     message = EmailMessage(policy=email.policy.SMTP)
     message["Message-ID"] = message_id
@@ -301,7 +308,7 @@ def run_canary(
         bridge = MailArchiveCommandBridge(backend, state_root=root)
         conflict_proposal = copy.deepcopy(proposal)
         conflict_proposal["action"]["payload"]["uidvalidity"] = (
-            "0" if str(row["uidvalidity"]) != "0" else "1"
+            _conflicting_uidvalidity(row["uidvalidity"])
         )
         try:
             bridge.execute(

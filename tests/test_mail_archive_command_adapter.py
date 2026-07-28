@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from core.mail_archive_canary import _conflicting_uidvalidity
 from core.mail_archive_command_adapter import (
     DEFAULT_STATE_ROOT,
     MailArchiveConflictError,
@@ -24,6 +25,18 @@ from core.mail_archive_command_adapter import (
 FIXED_TIME = "2026-07-28T12:00:00Z"
 EXECUTE_ID = "decision:execute:00000001"
 UNDO_ID = "decision:undo:00000001"
+
+
+@pytest.mark.parametrize("current", ("1", "1111", "9999999999999999999"))
+def test_canary_conflict_uidvalidity_is_valid_and_different(
+    current: str,
+) -> None:
+    conflicting = _conflicting_uidvalidity(current)
+    request = MailArchiveRequest.from_mapping(
+        icloud_proposal(uidvalidity=conflicting)["action"]["payload"]
+    )
+    assert request.uidvalidity > 0
+    assert request.uidvalidity != int(current)
 
 
 def icloud_proposal(**payload_overrides: object) -> dict[str, object]:

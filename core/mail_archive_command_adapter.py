@@ -1330,6 +1330,8 @@ class IMAPArchiveBackend:
         if typ != "OK":
             raise MailArchiveError(f"select {mailbox!r} failed: {typ}")
         uidvalidity = _extract_uidvalidity(conn, data)
+        setattr(conn, "_duffields_uidvalidity", uidvalidity)
+        setattr(conn, "_duffields_selected_mailbox", mailbox)
         return {"mailbox": mailbox, "uidvalidity": uidvalidity}
 
     def _fetch_standard_identity(
@@ -1679,7 +1681,8 @@ def _current_uidvalidity(conn: imaplib.IMAP4_SSL) -> int:
         match = re.search(r"([0-9]+)", raw)
         if match:
             return int(match.group(1))
-    return 0
+    cached = getattr(conn, "_duffields_uidvalidity", 0)
+    return int(cached) if isinstance(cached, int) else 0
 
 
 def _extract_uidvalidity(conn: imaplib.IMAP4_SSL, data: list[Any]) -> int:

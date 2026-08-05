@@ -129,7 +129,7 @@ async def _tmux_relay_osascript(script: str, timeout: float = 30.0) -> tuple[boo
     proc = await asyncio.create_subprocess_exec(
         _TMUX, "new-session", "-d", "-s", relay_session, "-n", "relay",
         "-c", str(Path.home()),
-        f"bash -c {shlex.quote(bash_cmd)}",
+        f"/bin/bash -c {shlex.quote(bash_cmd)}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -211,7 +211,7 @@ async def tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool,
     proc = await asyncio.create_subprocess_exec(
         _TMUX, "new-session", "-d", "-s", relay_session, "-n", "relay",
         "-c", str(Path.home()),
-        f"bash -c {shlex.quote(bash_cmd)}",
+        f"/bin/bash -c {shlex.quote(bash_cmd)}",
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )

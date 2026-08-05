@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Final
 
 _TOKEN_FILE: Final = Path.home() / ".config" / "op-service-account-token"
+_OP_RUNNER: Final = Path.home() / ".config" / "op-service-account-run.sh"
 _LEGACY_FILE: Final = Path.home() / ".config" / "secrets.env.legacy"
 _FALLBACK_FILE: Final = Path.home() / ".config" / "secrets.env"
 
@@ -161,14 +162,20 @@ def _op_read(key: str, vault: str = "MachineAutoBiz") -> str | None:
     token = _service_account_token()
     if not token:
         return None
+    if not _OP_RUNNER.is_file():
+        return None
     # API_CREDENTIAL category items store the secret under `credential`, not
     # `password`. Try both so new-style items (e.g. AGENT_CP_TOKEN, created
     # 2026-04-23) resolve without needing a second write.
     for field in ("password", "credential"):
         try:
             out = subprocess.run(
-                ["op", "read", f"op://{vault}/{key}/{field}"],
-                env={"OP_SERVICE_ACCOUNT_TOKEN": token, "PATH": os.environ.get("PATH", "")},
+                [str(_OP_RUNNER), "read", f"op://{vault}/{key}/{field}"],
+                env={
+                    "OP_SERVICE_ACCOUNT_TOKEN": token,
+                    "PATH": os.environ.get("PATH", ""),
+                    "HOME": str(Path.home()),
+                },
                 capture_output=True, text=True, timeout=10,
             )
             if out.returncode == 0:
@@ -223,7 +230,7 @@ def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAutoBiz")
     # In launchd context, NEVER invoke op — it will hang on a TCC prompt.
     # Fall through to machine cache + legacy file, which together cover every
     # key any LaunchAgent needs.
-    if not token or not keys or launchd:
+    if not token or not keys or launchd or not _OP_RUNNER.is_file():
         machine_cache = _load_machine_cache()
         legacy = _load_legacy()
         for k in keys:
@@ -242,9 +249,13 @@ def hydrate_env(keys: list[str] | None = None, *, vault: str = "MachineAutoBiz")
     template = "\n".join(f"{k}={{{{ op://{vault}/{k}/password }}}}" for k in keys) + "\n"
     try:
         out = subprocess.run(
-            ["op", "inject"],
+            [str(_OP_RUNNER), "inject"],
             input=template,
-            env={"OP_SERVICE_ACCOUNT_TOKEN": token, "PATH": os.environ.get("PATH", "")},
+            env={
+                "OP_SERVICE_ACCOUNT_TOKEN": token,
+                "PATH": os.environ.get("PATH", ""),
+                "HOME": str(Path.home()),
+            },
             capture_output=True, text=True, timeout=30,
         )
         if out.returncode == 0:

@@ -98,24 +98,12 @@ def _read_token_from_env_file(path: Path) -> str | None:
 def _read_token_from_1password() -> str | None:
     """Read MAILHUB_TOKEN via the 1Password CLI as a last resort."""
 
-    env = dict(os.environ)
-    if "OP_SERVICE_ACCOUNT_TOKEN" not in env:
-        for tok_path in (
-            Path.home() / ".config/op-service-account-token",
-            Path("/etc/op-service-account-token"),
-        ):
-            try:
-                if tok_path.exists():
-                    env["OP_SERVICE_ACCOUNT_TOKEN"] = tok_path.read_text().strip()
-                    break
-            except OSError:
-                continue
-    if "OP_SERVICE_ACCOUNT_TOKEN" not in env:
+    runner = Path.home() / ".config" / "op-service-account-run.sh"
+    if not runner.exists():
         return None
     try:
         result = subprocess.run(
-            ["op", "read", _OP_REF],
-            env=env,
+            [str(runner), "read", _OP_REF],
             capture_output=True,
             text=True,
             timeout=_OP_TIMEOUT_S,

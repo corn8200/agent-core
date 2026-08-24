@@ -30,7 +30,7 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-from core.retired_services import retired_message
+from core.retired_services import is_retired_route, retired_message
 
 CP_URL = os.environ.get("AGENT_CP_URL", "").strip()
 LOCAL_DB = (
@@ -113,7 +113,7 @@ def _insert_local(host, agent, kind, payload, cost, duration_ms, trace_id, error
 
 
 def _post_remote(host, agent, kind, payload, cost, duration_ms, trace_id, error_text) -> int | None:
-    if not CP_URL:
+    if not CP_URL or is_retired_route(CP_URL):
         _log_stderr(retired_message("agent-cp-remote"))
         return None
     try:
@@ -190,7 +190,7 @@ def is_killed(agent: str) -> bool:
     if cached and (now - cached[0]) < _KILL_TTL:
         return cached[1]
     killed = False
-    if not CP_URL:
+    if not CP_URL or is_retired_route(CP_URL):
         _KILL_CACHE[agent] = (now, False)
         return False
     try:

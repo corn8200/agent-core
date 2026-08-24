@@ -12,7 +12,7 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from core.retired_services import retired_message  # noqa: E402
+from core.retired_services import is_retired_route, retired_message  # noqa: E402
 
 def _publish_url() -> str:
     return os.environ.get("IMESSAGE_TRIAGE_PUBLISH_URL", "").strip()
@@ -59,7 +59,7 @@ def publish_imessage_triage(
         )
         return True
     publish_url = _publish_url()
-    if not publish_url:
+    if not publish_url or is_retired_route(publish_url):
         print(f"[publish] {retired_message('imessage-triage-publish')}", flush=True)
         return False
     payload: dict[str, Any] = {

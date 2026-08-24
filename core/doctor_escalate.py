@@ -1,10 +1,9 @@
-"""doctor_escalate — canonical entry point for routing infra alerts.
+"""Compatibility entry point for retired doctor alerts.
 
-Replaces direct-to-Pushover / direct-email alerting from watchers, daemons, and
-schedulers. Doctor panes were retired in the 2026-05-08 pane reduction; alerts
-now land in the Mac Overseer Voice pane, which coordinates fixes, writes
-backlog rows for sticky issues, and wakes John only if human hands are needed.
-See ~/.claude/rules/infra-alerts.md.
+The doctor and Overseer Voice lanes were retired in the 2026-07-11 minimal
+stack cutover. Calls now write a durable local event and return before Redis,
+pane transport, or Pushover. The older transport implementation remains below
+the public fail-closed gate only for receipt compatibility and focused tests.
 
 Usage (from any watcher on Mac or Pi):
 
@@ -21,18 +20,14 @@ Usage (from any watcher on Mac or Pi):
     )
 
 Routing semantics:
-    target_host  — where the FIX may need to run.
+    target_host  - historical host label. The VPS label is retired.
                    Default: mac.
-    source_host  — where the watcher detected the symptom from (the calling
+    source_host  - where the watcher detected the symptom from (the calling
                    host). Stamped in the briefing for human context only.
-
-Fallback: 3 retries with backoff (5s/15s/45s) via pane-ask-v2; if all fail,
-last-ditch direct Pushover with [OVERSEER-VOICE-BYPASS-<host>] prefix so a
-real Overseer/transport failure still lands.
 
 Set DOCTOR_ESCALATE_LOCAL_ONLY=1 only from synthetic probes that must prove a
 producer logs a durable doctor event without touching Redis, pane-ask, or
-Pushover. The retired VPS target logs and returns before transport.
+Pushover. Normal calls also remain local because the lane is retired.
 """
 from __future__ import annotations
 
@@ -64,9 +59,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
-    from core.retired_services import retired_message
+    from core.retired_services import is_retired_route, retired_message
 except ImportError:
-    from retired_services import retired_message  # type: ignore[no-redef]
+    from retired_services import is_retired_route, retired_message  # type: ignore[no-redef]
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +85,7 @@ _SOURCE_HOST = _detect_source_host()
 
 OVERSEER_VOICE_PANE = "claude:5"
 OVERSEER_VOICE_HOST = "mac"
+DOCTOR_TRANSPORT_RETIRED = True
 DOCTOR_PANES = {
     "mac": OVERSEER_VOICE_PANE,
     "vps": OVERSEER_VOICE_PANE,
@@ -350,11 +346,13 @@ def _get_redis():
     file_values = _load_redis_env_file_values()
     redis_url = _redis_config_value(_REDIS_URL_ENV_KEYS, file_values)
     try:
+        if redis_url and is_retired_route(redis_url):
+            return None
         if redis_url:
             r = Redis.from_url(redis_url, socket_timeout=3)
         else:
             host = os.environ.get("REDIS_HOST") or file_values.get("REDIS_HOST")
-            if not host:
+            if not host or is_retired_route(host):
                 return None
             port = int(os.environ.get("REDIS_PORT") or file_values.get("REDIS_PORT") or 6379)
             db = int(os.environ.get("REDIS_DB") or file_values.get("REDIS_DB") or 0)
@@ -707,6 +705,19 @@ def doctor_escalate(
             "watcher": watcher, "severity": severity, "summary": summary,
             "fingerprint": fp, "event": "local_only",
             "reason": "DOCTOR_ESCALATE_LOCAL_ONLY=1",
+            "source_host": _SOURCE_HOST, "target_host": resolved_host,
+            **({"context": context} if context else {}),
+        })
+        return result
+
+    if DOCTOR_TRANSPORT_RETIRED:
+        result["local_only"] = True
+        result["retired"] = True
+        _log_event({
+            "ts": canonical_ts(),
+            "watcher": watcher, "severity": severity, "summary": summary,
+            "fingerprint": fp, "event": "retired_route",
+            "reason": retired_message("doctor-pane-dispatch"),
             "source_host": _SOURCE_HOST, "target_host": resolved_host,
             **({"context": context} if context else {}),
         })

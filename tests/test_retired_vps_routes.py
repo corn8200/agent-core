@@ -5,11 +5,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from core import agent_cp_client, doctor_escalate, message_router, swarm_dispatch, vector, vps
-from core.retired_services import RetiredServiceError
+from core import (
+    agent_cp_client,
+    doctor_escalate,
+    message_router,
+    message_vector,
+    swarm_dispatch,
+    vector,
+    vps,
+)
+from core.retired_services import RetiredServiceError, is_retired_route
 
 
 ROOT = Path(__file__).resolve().parents[1]
+DELETED_VPS_HOST = ".".join(("100", "118", "21", "64"))
+DELETED_VPS_URL = f"http://{DELETED_VPS_HOST}:8768"
 
 
 class RetiredVpsStaticTest(unittest.TestCase):
@@ -54,6 +64,14 @@ class RetiredVpsRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result["retired"])
         self.assertEqual(result["status_code"], 410)
 
+    async def test_explicit_deleted_vps_url_is_retired_before_http(self) -> None:
+        with mock.patch.object(vps, "BASE_URL", DELETED_VPS_URL):
+            with mock.patch.object(vps.httpx, "AsyncClient") as client:
+                result = await vps.sandbox_run(["true"])
+
+        client.assert_not_called()
+        self.assertTrue(result["retired"])
+
     async def test_message_router_email_context_does_not_ssh(self) -> None:
         with mock.patch.object(message_router.asyncio, "create_subprocess_exec") as create_proc:
             result = await message_router._get_email_context()
@@ -72,6 +90,15 @@ class RetiredVpsRuntimeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(event_id)
         self.assertFalse(killed)
 
+    def test_agent_cp_client_rejects_explicit_deleted_vps_url(self) -> None:
+        with mock.patch.object(agent_cp_client, "CP_URL", DELETED_VPS_URL):
+            with mock.patch.object(agent_cp_client, "LOCAL_DB", None):
+                with mock.patch.object(agent_cp_client.urllib.request, "urlopen") as urlopen:
+                    event_id = agent_cp_client.event("test-agent", "start")
+
+        urlopen.assert_not_called()
+        self.assertIsNone(event_id)
+
     def test_vector_db_fails_before_connect_without_replacement_dsn(self) -> None:
         with mock.patch.object(vector, "PG_DSN", ""):
             with mock.patch.object(vector.psycopg2, "connect") as connect:
@@ -79,6 +106,33 @@ class RetiredVpsRuntimeTest(unittest.IsolatedAsyncioTestCase):
                     vector.get_stats()
 
         connect.assert_not_called()
+
+    def test_vector_and_message_queue_reject_explicit_deleted_vps_urls(self) -> None:
+        dsn = f"postgresql://user:password@{DELETED_VPS_HOST}:5432/appdb"
+        redis_url = f"redis://{DELETED_VPS_HOST}:6379/0"
+        with mock.patch.object(vector, "PG_DSN", dsn):
+            with mock.patch.object(vector.psycopg2, "connect") as connect:
+                with self.assertRaises(RetiredServiceError):
+                    vector.get_stats()
+        with mock.patch.object(message_vector, "REDIS_URL", redis_url):
+            with mock.patch.object(message_vector, "QUEUE_NAME", "vector"):
+                with mock.patch.object(message_vector, "_queue", None):
+                    queue = message_vector._get_queue()
+
+        connect.assert_not_called()
+        self.assertIsNone(queue)
+
+    def test_retired_route_classifier_covers_aliases_and_old_control_plane(self) -> None:
+        for value in (
+            "vps",
+            "claude-vps:3",
+            f"ubuntu@{DELETED_VPS_HOST}:22",
+            DELETED_VPS_URL,
+            "https://cp.jcornelius.net/api",
+        ):
+            self.assertTrue(is_retired_route(value), value)
+        for value in ("mac", "air", "home-pi", "http://127.0.0.1:8770"):
+            self.assertFalse(is_retired_route(value), value)
 
     def test_doctor_vps_target_logs_retired_before_transport(self) -> None:
         events: list[dict] = []
@@ -107,6 +161,37 @@ class RetiredVpsRuntimeTest(unittest.IsolatedAsyncioTestCase):
                         )
 
         self.assertTrue(result["retired"])
+        self.assertFalse(result["dispatched"])
+        self.assertEqual(events[0]["event"], "retired_route")
+
+    def test_doctor_mac_target_is_local_only_after_voice_lane_retirement(self) -> None:
+        events: list[dict] = []
+
+        with mock.patch.object(
+            doctor_escalate,
+            "_get_redis",
+            side_effect=AssertionError("retired doctor route must not touch Redis"),
+        ):
+            with mock.patch.object(
+                doctor_escalate,
+                "_pane_ask_binary",
+                side_effect=AssertionError("retired doctor route must not inspect pane-ask"),
+            ):
+                with mock.patch.object(
+                    doctor_escalate,
+                    "_deliver_bypass",
+                    side_effect=AssertionError("retired doctor route must not bypass"),
+                ):
+                    with mock.patch.object(doctor_escalate, "_log_event", side_effect=events.append):
+                        result = doctor_escalate.doctor_escalate(
+                            watcher="retired-doctor-route",
+                            severity="warn",
+                            summary="local doctor lane retired",
+                            target_host="mac",
+                        )
+
+        self.assertTrue(result["retired"])
+        self.assertTrue(result["local_only"])
         self.assertFalse(result["dispatched"])
         self.assertEqual(events[0]["event"], "retired_route")
 

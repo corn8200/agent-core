@@ -9,7 +9,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from core.retired_services import retired_message
+from core.retired_services import is_retired_route, retired_message
 from core.vault import get_secret
 
 
@@ -158,7 +158,7 @@ def _send_gateway_sync(
         payload["payload"]["html"] = 1
     data = json.dumps(payload).encode()
     base_url = _cp_api_base().rstrip("/")
-    if not base_url:
+    if not base_url or is_retired_route(base_url):
         return PushoverResult(False, retired_message("overseer-gateway"))
     req = urllib.request.Request(
         f"{base_url}/api/overseer/gateway/enqueue",

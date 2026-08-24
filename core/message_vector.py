@@ -23,6 +23,7 @@ from core.message_reader import (
     _sqlite_via_relay_cmd,
     extract_text_from_attributed_body,
 )
+from core.retired_services import is_retired_route
 from core.tools import tmux_relay_shell
 
 logger = logging.getLogger(__name__)
@@ -47,7 +48,7 @@ _queue: Any | None = None
 
 def _get_queue() -> Any | None:
     global _queue
-    if not REDIS_URL or not QUEUE_NAME:
+    if not REDIS_URL or not QUEUE_NAME or is_retired_route(REDIS_URL):
         return None
     if _queue is None:
         from redis import Redis

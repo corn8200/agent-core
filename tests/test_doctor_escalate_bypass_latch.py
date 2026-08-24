@@ -36,6 +36,7 @@ class FakeLatchRedis:
 
 
 class DoctorEscalateBypassLatchTest(unittest.TestCase):
+    @mock.patch.object(doctor_escalate, "DOCTOR_TRANSPORT_RETIRED", False)
     def test_successful_dispatch_requires_receiver_ack(self) -> None:
         successful_run = types.SimpleNamespace(returncode=0, stderr="", stdout="")
 
@@ -64,6 +65,7 @@ class DoctorEscalateBypassLatchTest(unittest.TestCase):
         self.assertIn("--require-ack", argv)
         self.assertLess(argv.index("--require-ack"), argv.index("--auto-recover-wedge"))
 
+    @mock.patch.object(doctor_escalate, "DOCTOR_TRANSPORT_RETIRED", False)
     def test_bypass_rearms_dedup_latch_with_short_ttl_instead_of_deleting(self) -> None:
         fake_r = FakeLatchRedis()
         failed_run = types.SimpleNamespace(returncode=1, stderr="pane busy", stdout="")

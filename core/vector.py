@@ -18,7 +18,7 @@ import psycopg2
 import psycopg2.extras
 from openai import OpenAI
 
-from core.retired_services import RetiredServiceError, raise_retired
+from core.retired_services import RetiredServiceError, is_retired_route, raise_retired
 from core.vault import get_secret
 
 PG_DSN = os.environ.get("VEC_PG_DSN", "").strip()
@@ -26,7 +26,7 @@ EMBED_MODEL = "text-embedding-3-small"
 
 
 def _pg():
-    if not PG_DSN:
+    if not PG_DSN or is_retired_route(PG_DSN):
         raise_retired("vector-postgres")
     return psycopg2.connect(PG_DSN)
 
@@ -131,7 +131,7 @@ def enqueue_index(
 
     redis_url = os.environ.get("VECTOR_RQ_REDIS_URL", "").strip()
     queue_name = queue or os.environ.get("VECTOR_RQ_QUEUE", "").strip()
-    if not redis_url or not queue_name:
+    if not redis_url or not queue_name or is_retired_route(redis_url):
         raise RetiredServiceError("vector-rq")
     q = Queue(queue_name, connection=Redis.from_url(redis_url))
     job = q.enqueue(

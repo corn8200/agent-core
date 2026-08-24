@@ -46,10 +46,10 @@ from typing import Optional
 
 try:
     from core.doctor_escalate import doctor_escalate
-    from core.retired_services import retired_result
+    from core.retired_services import is_retired_route, retired_result
 except ImportError:
     from doctor_escalate import doctor_escalate  # type: ignore[no-redef]
-    from retired_services import retired_result  # type: ignore[no-redef]
+    from retired_services import is_retired_route, retired_result  # type: ignore[no-redef]
 
 PANE_ASK_BIN = "/Users/johncornelius/bin/pane-ask-v2"
 
@@ -74,9 +74,9 @@ def dispatched_pane_ask(
     """Subprocess wrapper around pane-ask-v2 with doctor escalation on failure.
 
     Args:
-        target: tmux target pane, e.g. "claude:2" or "claude-vps:3".
+        target: local tmux target pane, for example "claude:2".
         prompt: text to send. Delivered via stdin (pane-ask-v2 reads "-").
-        ssh: if set, passes --ssh <ssh> to pane-ask-v2 for cross-host dispatch.
+        ssh: if set, passes --ssh <ssh> for a live companion Mac.
         wait: if True, passes --wait (blocks until target stop_reason=end_turn).
         timeout: subprocess timeout in seconds per attempt.
         retries: max additional attempts after first failure (transient codes only).
@@ -90,7 +90,7 @@ def dispatched_pane_ask(
     watcher = watcher_name or f"swarm-pane-ask-{target}"
     scope = dedup_scope or f"pane-ask-{target}"
 
-    if target.startswith("claude-vps:") or ssh in {"vps", "claude-vps"}:
+    if is_retired_route(target) or is_retired_route(ssh):
         return retired_result(
             "swarm-vps-pane-dispatch",
             rc=410,

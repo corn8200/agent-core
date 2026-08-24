@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 
-from core.retired_services import retired_result
+from core.retired_services import is_retired_route, retired_result
 
 BASE_URL = os.environ.get("AGENT_CORE_VPS_BASE_URL", "").strip()
 
@@ -34,7 +34,7 @@ def _auth(token_name: str) -> dict[str, str]:
 
 async def _request(method: str, path: str, token_name: str,
                    timeout: float = 30, **kwargs) -> dict:
-    if not BASE_URL:
+    if not BASE_URL or is_retired_route(BASE_URL):
         return retired_result("vps-service-client", status_code=410)
     try:
         async with httpx.AsyncClient(base_url=BASE_URL, timeout=timeout) as client:
@@ -103,7 +103,7 @@ async def notify_send(title: str, message: str, priority: str = "normal",
 
 async def fileconv_convert(file_path: str, operation: str,
                            params: dict | None = None) -> dict:
-    if not BASE_URL:
+    if not BASE_URL or is_retired_route(BASE_URL):
         return retired_result("vps-fileconv", status_code=410)
     p = Path(file_path)
     if not p.exists():

@@ -40,7 +40,7 @@ from core.message_db import (
     get_recent_sessions_summary,
     set_session_tmux_name,
 )
-from core.retired_services import retired_message
+from core.retired_services import is_retired_route, retired_message
 
 
 # --- Constants ---
@@ -123,7 +123,7 @@ def _load_apple_bridge_token() -> Optional[str]:
 def _post_vps_reply(service: str, ref: str, reply: str, chat_identifier: str,
                     timestamp: str) -> tuple[bool, int, str]:
     """POST a VPS reply. Returns (ok, status_code, body_preview)."""
-    if not VPS_REPLY_BASE_URL:
+    if not VPS_REPLY_BASE_URL or is_retired_route(VPS_REPLY_BASE_URL):
         msg = retired_message("vps-reply-tag")
         print(f"[router] {msg}")
         return False, 410, msg
@@ -248,7 +248,7 @@ async def _handle_outbox_token(msg: InboundMessage) -> Optional[str]:
 # --- Layer 1: Short-codes ---------------------------------------------------
 
 def _post_approval(code: str, action: str, payload: dict | None = None) -> bool:
-    if not APPROVAL_QUEUE_URL:
+    if not APPROVAL_QUEUE_URL or is_retired_route(APPROVAL_QUEUE_URL):
         print(f"[router] {retired_message('approval-queue')}")
         return False
     token = _load_apple_bridge_token()

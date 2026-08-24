@@ -17,10 +17,19 @@ from typing import Any
 
 from claude_agent_sdk import tool, create_sdk_mcp_server  # allow-direct-sdk
 
-from core.retired_services import retired_message
-
-
 # --- Shared Swarm Context (in-process key-value store) ---
+
+
+def _retired_message(service: str) -> str:
+    try:
+        from core.retired_services import retired_message
+
+        return retired_message(service)
+    except ImportError:
+        return (
+            f"{service} is retired: deleted VPS and retired control-plane "
+            "services on 2026-08-17"
+        )
 
 class SwarmContext:
     """Thread-safe shared state for agents within a swarm run.
@@ -768,7 +777,7 @@ async def send_business_email(args: dict[str, Any]) -> dict:
         return {
             "content": [{
                 "type": "text",
-                "text": f"NOT SENT - {retired_message('sentry-mailqueue')}",
+                "text": f"NOT SENT - {_retired_message('sentry-mailqueue')}",
             }]
         }
     except Exception as e:
@@ -812,7 +821,7 @@ async def send_personal_email(args: dict[str, Any]) -> dict:
     return {
         "content": [{
             "type": "text",
-            "text": f"NOT SENT - {retired_message('vps-send-email')}",
+            "text": f"NOT SENT - {_retired_message('vps-send-email')}",
         }]
     }
 

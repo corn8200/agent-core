@@ -8,11 +8,9 @@ from pathlib import Path
 from typing import Any
 
 
-DEFAULT_VPS_ACTIVE_ACCOUNT_PATH = Path("/home/ubuntu/.claude/.active-account")
-DEFAULT_MAC_ACTIVE_ACCOUNT_PATH = Path("/home/ubuntu/.claude/.mac-active-account")
-DEFAULT_VPS_STAMP_DIR = Path("/home/ubuntu/.claude/per-pane-account")
-DEFAULT_MAC_STAMP_DIR = Path("/Users/johncornelius/.claude/per-pane-account")
-DEFAULT_PROTECTED_PANES_PATH = Path("/home/ubuntu/.claude/stale-creds-protected-panes")
+DEFAULT_MAC_ACTIVE_ACCOUNT_PATH = Path.home() / ".claude" / ".mac-active-account"
+DEFAULT_MAC_STAMP_DIR = Path.home() / ".claude" / "per-pane-account"
+DEFAULT_PROTECTED_PANES_PATH = Path.home() / ".claude" / "stale-creds-protected-panes"
 DEFAULT_CREDENTIALS_PATH = Path.home() / ".credentials.json"
 
 
@@ -69,7 +67,7 @@ def _stamp_path(stamp_dir: Path, pane: str) -> Path:
 
 def pane_host(pane: str) -> str | None:
     if pane.startswith("claude-vps:"):
-        return "vps"
+        return "retired_vps"
     if pane.startswith("claude:"):
         return "mac"
     return None
@@ -77,8 +75,6 @@ def pane_host(pane: str) -> str | None:
 
 def default_stamp_dir_for_pane(pane: str) -> Path | None:
     host = pane_host(pane)
-    if host == "vps":
-        return DEFAULT_VPS_STAMP_DIR
     if host == "mac":
         return DEFAULT_MAC_STAMP_DIR
     return None
@@ -86,8 +82,6 @@ def default_stamp_dir_for_pane(pane: str) -> Path | None:
 
 def default_active_account_path_for_pane(pane: str) -> Path | None:
     host = pane_host(pane)
-    if host == "vps":
-        return DEFAULT_VPS_ACTIVE_ACCOUNT_PATH
     if host == "mac":
         return DEFAULT_MAC_ACTIVE_ACCOUNT_PATH
     return None
@@ -192,8 +186,6 @@ def is_protected_pane(pane: str, protected_panes: set[str] | None = None) -> boo
     if pane in protected:
         return True
     if pane.startswith("claude:") and pane.endswith(":1"):
-        return True
-    if pane.startswith("claude-vps:") and pane.endswith(":1"):
         return True
     return False
 

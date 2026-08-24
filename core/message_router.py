@@ -40,6 +40,7 @@ from core.message_db import (
     get_recent_sessions_summary,
     set_session_tmux_name,
 )
+from core.retired_services import retired_message
 
 
 # --- Constants ---
@@ -47,9 +48,8 @@ from core.message_db import (
 PREFIXES = ("research:", "quick:", "compare:", "local:")
 SELF_CHATS = ("corn82@icloud.com", "+13042684985")
 try:
-    from core.endpoints import get as _ep_get
-    APPROVAL_QUEUE_URL = _ep_get("approval_queue.respond")
-    VPS_REPLY_BASE_URL = _ep_get("agent_cp.base_url") + "/api"
+    APPROVAL_QUEUE_URL = os.environ.get("APPROVAL_QUEUE_URL", "").strip()
+    VPS_REPLY_BASE_URL = os.environ.get("VPS_REPLY_BASE_URL", "").strip()
 except Exception:
     APPROVAL_QUEUE_URL = ""
     VPS_REPLY_BASE_URL = ""
@@ -123,6 +123,10 @@ def _load_apple_bridge_token() -> Optional[str]:
 def _post_vps_reply(service: str, ref: str, reply: str, chat_identifier: str,
                     timestamp: str) -> tuple[bool, int, str]:
     """POST a VPS reply. Returns (ok, status_code, body_preview)."""
+    if not VPS_REPLY_BASE_URL:
+        msg = retired_message("vps-reply-tag")
+        print(f"[router] {msg}")
+        return False, 410, msg
     token = _load_apple_bridge_token()
     if not token:
         print("[router] APPLE_BRIDGE_TOKEN missing; cannot POST VPS reply")
@@ -244,6 +248,9 @@ async def _handle_outbox_token(msg: InboundMessage) -> Optional[str]:
 # --- Layer 1: Short-codes ---------------------------------------------------
 
 def _post_approval(code: str, action: str, payload: dict | None = None) -> bool:
+    if not APPROVAL_QUEUE_URL:
+        print(f"[router] {retired_message('approval-queue')}")
+        return False
     token = _load_apple_bridge_token()
     if not token:
         print(f"[router] APPLE_BRIDGE_TOKEN missing; cannot POST {code}")
@@ -578,34 +585,12 @@ async def _build_context(msg: InboundMessage) -> dict:
 
 
 async def _get_email_context() -> dict:
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            "ssh", "vps",
-            "sqlite3 /srv/data/mailtriage.db \""
-            "SELECT 'urgent:' || count(*) FROM messages WHERE category LIKE 'urgent%' AND status='new' "
-            "UNION ALL "
-            "SELECT 'drafts:' || count(*) FROM messages WHERE status='draft_pending' "
-            "UNION ALL "
-            "SELECT 'recent:' || sender || '|' || subject FROM messages "
-            "WHERE received_at > datetime('now','-4 hours') ORDER BY received_at DESC LIMIT 5"
-            "\"",
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=5)
-        output = stdout.decode().strip()
-        result = {"unread_urgent": 0, "pending_drafts": 0, "recent": []}
-        for line in output.split("\n"):
-            if line.startswith("urgent:"):
-                result["unread_urgent"] = int(line.split(":")[1])
-            elif line.startswith("drafts:"):
-                result["pending_drafts"] = int(line.split(":")[1])
-            elif line.startswith("recent:"):
-                parts = line[7:].split("|", 1)
-                result["recent"].append({"sender": parts[0], "subject": parts[1] if len(parts) > 1 else ""})
-        return result
-    except Exception:
-        return {"unread_urgent": 0, "pending_drafts": 0, "recent": [], "error": "unavailable"}
+    return {
+        "unread_urgent": 0,
+        "pending_drafts": 0,
+        "recent": [],
+        "error": retired_message("mailtriage-context"),
+    }
 
 
 async def _get_calendar_context() -> dict:

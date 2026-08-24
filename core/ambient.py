@@ -102,11 +102,9 @@ def load_ambient_text() -> str:
     elif due_today:
         parts.append(f"{due_today} reminder{'s' if due_today != 1 else ''} due today.")
 
-    vps = data.get("vps", {}) or {}
     pi = data.get("pi", {}) or {}
-    vps_ok = isinstance(vps, dict) and "error" not in vps and bool(vps.get("raw"))
     pi_ok = isinstance(pi, dict) and "error" not in pi and bool(pi.get("uptime"))
-    parts.append(f"VPS {'OK' if vps_ok else 'DOWN'}, Pi {'OK' if pi_ok else 'DOWN'}.")
+    parts.append(f"VPS retired, Pi {'OK' if pi_ok else 'DOWN'}.")
 
     wx = (data.get("weather", {}) or {}).get("pirate", {}) or {}
     temp = wx.get("temp")

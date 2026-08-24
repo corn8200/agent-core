@@ -1,22 +1,21 @@
-"""Enqueue iMessage threads for vector embedding on the VPS RQ worker.
+"""Enqueue iMessage threads for vector embedding when a replacement queue exists.
 
 One chunk per thread (last 10 messages of the last 24h), not per message.
 Debounced to at most one emit per minute per chat_identifier. Skips
 transactional short-code senders, bot-attribution-only threads, and
 tiny combined transcripts.
 
-Mac syncer pattern — mirrors tasks/mac_vector.py reminders/notes/calendar.
+The old remote RQ worker was removed with the VPS. Without explicit queue
+configuration this module returns ``"retired"`` before opening Redis.
 """
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Awaitable
-
-from redis import Redis
-from rq import Queue
+from typing import Any
 
 from core.message_reader import (
     _FIELD_SEP,
@@ -28,9 +27,8 @@ from core.tools import tmux_relay_shell
 
 logger = logging.getLogger(__name__)
 
-REDIS_HOST = "100.118.21.64"
-REDIS_PORT = 6379
-REDIS_DB = 0
+REDIS_URL = os.environ.get("MESSAGE_VECTOR_REDIS_URL", "").strip()
+QUEUE_NAME = os.environ.get("MESSAGE_VECTOR_QUEUE", "").strip()
 
 THREAD_MSG_WINDOW = 10
 THREAD_HOURS_WINDOW = 24
@@ -44,15 +42,20 @@ _BOT_ATTRIBUTION_RE = re.compile(r"^[^A-Za-z0-9]?\[[A-Z][A-Za-z0-9 _-]{1,30}\]")
 
 
 _last_emit: dict[str, float] = {}
-_queue: Queue | None = None
+_queue: Any | None = None
 
 
-def _get_queue() -> Queue:
+def _get_queue() -> Any | None:
     global _queue
+    if not REDIS_URL or not QUEUE_NAME:
+        return None
     if _queue is None:
+        from redis import Redis
+        from rq import Queue
+
         _queue = Queue(
-            "vps",
-            connection=Redis(host=REDIS_HOST, port=REDIS_PORT, db=REDIS_DB),
+            QUEUE_NAME,
+            connection=Redis.from_url(REDIS_URL),
         )
     return _queue
 
@@ -131,7 +134,7 @@ async def maybe_enqueue_thread(chat_identifier: str) -> str:
     """Enqueue embed_and_index for this thread's last 10 msgs / 24h.
 
     Returns a status string for logging: "enqueued", "debounced",
-    "short_code", "too_short", "bot_only", "no_messages", "error".
+    "short_code", "too_short", "bot_only", "no_messages", "retired", "error".
     """
     if not chat_identifier:
         return "no_messages"
@@ -206,6 +209,8 @@ async def maybe_enqueue_thread(chat_identifier: str) -> str:
 
     try:
         q = _get_queue()
+        if q is None:
+            return "retired"
         q.enqueue(
             "tasks.vector.embed_and_index",
             "imessage_thread",

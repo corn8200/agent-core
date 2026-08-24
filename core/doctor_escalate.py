@@ -1,4 +1,4 @@
-"""doctor_escalate — canonical entry point for routing infra alerts to Overseer.
+"""doctor_escalate — canonical entry point for routing infra alerts.
 
 Replaces direct-to-Pushover / direct-email alerting from watchers, daemons, and
 schedulers. Doctor panes were retired in the 2026-05-08 pane reduction; alerts
@@ -6,7 +6,7 @@ now land in the Mac Overseer Voice pane, which coordinates fixes, writes
 backlog rows for sticky issues, and wakes John only if human hands are needed.
 See ~/.claude/rules/infra-alerts.md.
 
-Usage (from any watcher on VPS or Mac):
+Usage (from any watcher on Mac or Pi):
 
     from doctor_escalate import doctor_escalate
     doctor_escalate(
@@ -17,12 +17,12 @@ Usage (from any watcher on VPS or Mac):
         fix_hints=["systemctl restart foo"],   # optional
         dedup_scope="foo:/srv",                # optional, 6h TTL
         quota={"max_per_hour": 5, "burst": 2}, # optional, overrides 10/h burst-3 default
-        target_host="mac",                     # optional: "mac" | "vps" | None (= calling host)
+        target_host="mac",                     # optional: "mac" | "vps" | None (= mac)
     )
 
 Routing semantics:
     target_host  — where the FIX may need to run.
-                   Default: the host the call was made from.
+                   Default: mac.
     source_host  — where the watcher detected the symptom from (the calling
                    host). Stamped in the briefing for human context only.
 
@@ -32,7 +32,7 @@ real Overseer/transport failure still lands.
 
 Set DOCTOR_ESCALATE_LOCAL_ONLY=1 only from synthetic probes that must prove a
 producer logs a durable doctor event without touching Redis, pane-ask, or
-Pushover.
+Pushover. The retired VPS target logs and returns before transport.
 """
 from __future__ import annotations
 
@@ -63,9 +63,30 @@ from hashlib import sha1
 from pathlib import Path
 from typing import Any, Optional
 
+try:
+    from core.retired_services import retired_message
+except ImportError:
+    from retired_services import retired_message  # type: ignore[no-redef]
+
 logger = logging.getLogger(__name__)
 
-_SOURCE_HOST = "mac" if sys.platform == "darwin" else "vps"
+def _detect_source_host() -> str:
+    if os.environ.get("DOCTOR_SOURCE_HOST"):
+        return os.environ["DOCTOR_SOURCE_HOST"].strip()
+    if sys.platform == "darwin":
+        return "mac"
+    try:
+        import socket
+
+        hostname = socket.gethostname().lower()
+    except Exception:
+        hostname = ""
+    if "raspberry" in hostname or hostname.startswith("pi"):
+        return "pi"
+    return hostname or "unknown"
+
+
+_SOURCE_HOST = _detect_source_host()
 
 OVERSEER_VOICE_PANE = "claude:5"
 OVERSEER_VOICE_HOST = "mac"
@@ -75,10 +96,9 @@ DOCTOR_PANES = {
 }
 DOCTOR_LOG_PATHS = {
     "mac": Path.home() / "Library/Logs/doctor.jsonl",
-    "vps": Path("/srv/apps/taskqueue/logs/doctor.jsonl"),
+    "other": Path("/tmp/doctor.jsonl"),
 }
 PANE_ASK_PATHS = (
-    "/home/ubuntu/bin/pane-ask-v2",           # VPS
     "/Users/johncornelius/bin/pane-ask-v2",   # Mac
 )
 DEDUP_TTL_SECONDS = 6 * 3600
@@ -152,7 +172,10 @@ def _env_flag(name: str) -> bool:
 
 
 def _doctor_log_path() -> Path:
-    return DOCTOR_LOG_PATHS["mac" if _on_mac() else "vps"]
+    override = os.environ.get("DOCTOR_LOG_PATH", "").strip()
+    if override:
+        return Path(override)
+    return DOCTOR_LOG_PATHS["mac" if _on_mac() else "other"]
 
 
 def _resolve_target(target_host: Optional[str]) -> tuple[str, str, list[str]]:
@@ -162,7 +185,7 @@ def _resolve_target(target_host: Optional[str]) -> tuple[str, str, list[str]]:
     pane is always Mac Overseer Voice after the doctor-pane retirement.
     """
     if target_host is None:
-        target_host = _SOURCE_HOST
+        target_host = "mac"
     if target_host not in DOCTOR_PANES:
         raise ValueError(
             f"target_host must be 'mac' or 'vps', got {target_host!r}"
@@ -319,7 +342,7 @@ def _redis_config_value(keys: tuple[str, ...], file_values: dict[str, str]) -> s
 
 
 def _get_redis():
-    """Lazy Redis import — works from both VPS (localhost:6379) and Mac (tailscale)."""
+    """Lazy Redis import. Without explicit config, use the local JSON fallback."""
     try:
         from redis import Redis
     except ImportError:
@@ -330,7 +353,9 @@ def _get_redis():
         if redis_url:
             r = Redis.from_url(redis_url, socket_timeout=3)
         else:
-            host = os.environ.get("REDIS_HOST") or file_values.get("REDIS_HOST") or "100.118.21.64"
+            host = os.environ.get("REDIS_HOST") or file_values.get("REDIS_HOST")
+            if not host:
+                return None
             port = int(os.environ.get("REDIS_PORT") or file_values.get("REDIS_PORT") or 6379)
             db = int(os.environ.get("REDIS_DB") or file_values.get("REDIS_DB") or 0)
             kwargs: dict[str, Any] = {
@@ -603,7 +628,7 @@ def _format_briefing(
         "3. iMessage John only if human hands are required.",
         "Do NOT escalate to Pushover/email directly from an agent pane; use the Overseer/gateway path.",
         "",
-        "Standing briefing: ~/claude-config/doctor/COMMON.md + ~/claude-config/doctor/{MAC,VPS}.md",
+        "Standing briefing: ~/claude-config/doctor/COMMON.md + ~/claude-config/doctor/MAC.md",
         f"Log this escalation: {log_path}",
     ]
     return "\n".join(lines)
@@ -656,11 +681,24 @@ def doctor_escalate(
         "bypassed": False,
         "rate_limited": False,
         "local_only": False,
+        "retired": False,
         "clustered": False,
         "cluster_suppressed": False,
         "fingerprint": fp,
         "target_host": resolved_host,
     }
+
+    if resolved_host == "vps":
+        result["retired"] = True
+        _log_event({
+            "ts": canonical_ts(),
+            "watcher": watcher, "severity": severity, "summary": summary,
+            "fingerprint": fp, "event": "retired_route",
+            "reason": retired_message("doctor-vps-target"),
+            "source_host": _SOURCE_HOST, "target_host": resolved_host,
+            **({"context": context} if context else {}),
+        })
+        return result
 
     if _env_flag("DOCTOR_ESCALATE_LOCAL_ONLY"):
         result["local_only"] = True
@@ -827,6 +865,16 @@ def _deliver_bypass(
     fingerprint: Optional[str],
     target_host: str,
 ) -> None:
+    if target_host == "vps":
+        _log_event({
+            "ts": canonical_ts(),
+            "watcher": watcher, "severity": severity, "summary": summary,
+            "event": "retired_route",
+            "reason": retired_message("doctor-vps-bypass"),
+            "source_host": _SOURCE_HOST, "target_host": target_host,
+            **({"fingerprint": fingerprint} if fingerprint else {}),
+        })
+        return
     bypass_count = _record_bypass(redis_conn, target_host)
     prio = bypass_priority if bypass_priority is not None else SEVERITIES.get(severity, 0)
     soft_pane_hold = _is_soft_pane_hold(reason)

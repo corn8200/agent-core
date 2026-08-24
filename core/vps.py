@@ -1,4 +1,4 @@
-"""VPS service client library — async wrappers for sandbox, gateway, notify, fileconv, executor."""
+"""Retired VPS service client compatibility wrappers."""
 
 import os
 from functools import lru_cache
@@ -6,7 +6,9 @@ from pathlib import Path
 
 import httpx
 
-BASE_URL = "http://100.118.21.64:8080"
+from core.retired_services import retired_result
+
+BASE_URL = os.environ.get("AGENT_CORE_VPS_BASE_URL", "").strip()
 
 TOKEN_KEYS = [
     "SANDBOX_AUTH_TOKEN",
@@ -32,6 +34,8 @@ def _auth(token_name: str) -> dict[str, str]:
 
 async def _request(method: str, path: str, token_name: str,
                    timeout: float = 30, **kwargs) -> dict:
+    if not BASE_URL:
+        return retired_result("vps-service-client", status_code=410)
     try:
         async with httpx.AsyncClient(base_url=BASE_URL, timeout=timeout) as client:
             resp = await client.request(method, path, headers=_auth(token_name), **kwargs)
@@ -99,6 +103,8 @@ async def notify_send(title: str, message: str, priority: str = "normal",
 
 async def fileconv_convert(file_path: str, operation: str,
                            params: dict | None = None) -> dict:
+    if not BASE_URL:
+        return retired_result("vps-fileconv", status_code=410)
     p = Path(file_path)
     if not p.exists():
         return {"error": f"File not found: {file_path}", "status_code": None}

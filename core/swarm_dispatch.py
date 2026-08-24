@@ -46,8 +46,10 @@ from typing import Optional
 
 try:
     from core.doctor_escalate import doctor_escalate
+    from core.retired_services import retired_result
 except ImportError:
     from doctor_escalate import doctor_escalate  # type: ignore[no-redef]
+    from retired_services import retired_result  # type: ignore[no-redef]
 
 PANE_ASK_BIN = "/Users/johncornelius/bin/pane-ask-v2"
 
@@ -87,6 +89,15 @@ def dispatched_pane_ask(
     """
     watcher = watcher_name or f"swarm-pane-ask-{target}"
     scope = dedup_scope or f"pane-ask-{target}"
+
+    if target.startswith("claude-vps:") or ssh in {"vps", "claude-vps"}:
+        return retired_result(
+            "swarm-vps-pane-dispatch",
+            rc=410,
+            stderr="retired VPS pane dispatch",
+            attempts=0,
+            escalated=False,
+        )
 
     cmd = [PANE_ASK_BIN]
     if ssh:

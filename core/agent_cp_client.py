@@ -1,4 +1,4 @@
-"""agent-cp client — shared between Mac and VPS.
+"""agent-cp compatibility client.
 
 Usage:
     import agent_cp_client as cp
@@ -10,7 +10,9 @@ Usage:
     @cp.track("my-agent")
     def main(): ...
 
-Silent fail by design — never crash the caller.
+The old control plane was removed with the VPS. Calls fail closed unless a
+replacement URL or local DB path is explicitly configured. Silent fail by
+design — never crash the caller.
 """
 from __future__ import annotations
 
@@ -28,14 +30,19 @@ import urllib.request
 import uuid
 from pathlib import Path
 
-try:
-    from core.endpoints import get as _ep_get
-    _DEFAULT_VPS_URL = _ep_get("agent_cp.base_url")
-except Exception:
-    _DEFAULT_VPS_URL = ""
-VPS_URL = os.environ.get("AGENT_CP_URL", _DEFAULT_VPS_URL)
-LOCAL_DB = Path("/srv/apps/agent-cp/events.db")
-LOCAL_FLAGS = Path("/srv/apps/agent-cp/flags")
+from core.retired_services import retired_message
+
+CP_URL = os.environ.get("AGENT_CP_URL", "").strip()
+LOCAL_DB = (
+    Path(os.environ["AGENT_CP_LOCAL_DB"])
+    if os.environ.get("AGENT_CP_LOCAL_DB")
+    else None
+)
+LOCAL_FLAGS = (
+    Path(os.environ["AGENT_CP_LOCAL_FLAGS"])
+    if os.environ.get("AGENT_CP_LOCAL_FLAGS")
+    else None
+)
 
 _TOKEN_CACHE: str | None = None
 _KILL_CACHE: dict[str, tuple[float, bool]] = {}
@@ -61,7 +68,7 @@ def _token() -> str:
 
 
 def _on_vps() -> bool:
-    return LOCAL_DB.parent.exists()
+    return LOCAL_DB is not None and LOCAL_DB.parent.exists()
 
 
 def _detect_host() -> str:
@@ -86,6 +93,9 @@ def _log_stderr(msg: str) -> None:
 
 
 def _insert_local(host, agent, kind, payload, cost, duration_ms, trace_id, error_text) -> int | None:
+    if LOCAL_DB is None:
+        _log_stderr(retired_message("agent-cp-local-db"))
+        return None
     try:
         import sqlite3
         with contextlib.closing(sqlite3.connect(str(LOCAL_DB))) as conn:
@@ -103,6 +113,9 @@ def _insert_local(host, agent, kind, payload, cost, duration_ms, trace_id, error
 
 
 def _post_remote(host, agent, kind, payload, cost, duration_ms, trace_id, error_text) -> int | None:
+    if not CP_URL:
+        _log_stderr(retired_message("agent-cp-remote"))
+        return None
     try:
         body = json.dumps({
             "host": host, "agent": agent, "kind": kind,
@@ -110,7 +123,7 @@ def _post_remote(host, agent, kind, payload, cost, duration_ms, trace_id, error_
             "duration_ms": duration_ms, "trace_id": trace_id, "error_text": error_text,
         }).encode()
         req = urllib.request.Request(
-            f"{VPS_URL}/api/ingest",
+            f"{CP_URL}/api/ingest",
             data=body,
             headers={
                 "Content-Type": "application/json",
@@ -172,14 +185,17 @@ def event_async(
 def is_killed(agent: str) -> bool:
     now = time.time()
     if _on_vps():
-        return (LOCAL_FLAGS / f"kill:{agent}").exists()
+        return LOCAL_FLAGS is not None and (LOCAL_FLAGS / f"kill:{agent}").exists()
     cached = _KILL_CACHE.get(agent)
     if cached and (now - cached[0]) < _KILL_TTL:
         return cached[1]
     killed = False
+    if not CP_URL:
+        _KILL_CACHE[agent] = (now, False)
+        return False
     try:
         req = urllib.request.Request(
-            f"{VPS_URL}/api/agents/{agent}/is-killed",
+            f"{CP_URL}/api/agents/{agent}/is-killed",
             headers={"Authorization": f"Bearer {_token()}"},
         )
         with urllib.request.urlopen(req, timeout=3) as resp:

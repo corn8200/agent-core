@@ -1,6 +1,6 @@
 """mac_sdk — max-authenticated claude_agent_sdk wrapper for Mac-side agents.
 
-Mirrors the VPS /srv/apps/lib/vps_sdk/ pattern. Import from here instead of
+Mirrors the old shared SDK helper pattern. Import from here instead of
 claude_agent_sdk directly:
 
     from core.mac_sdk import query, ClaudeAgentOptions

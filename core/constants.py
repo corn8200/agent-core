@@ -12,8 +12,10 @@ HANDOFF_DIR = Path("/tmp/handoff")
 GATHER_CACHE = Path("/tmp/claude-gather.json")
 
 # --- Network ---
-VPS_SSH = "vps"
-VPS_IP = "100.118.21.64"
+VPS_RETIRED = True
+VPS_RETIRED_AT = "2026-08-17"
+VPS_SSH = ""
+VPS_IP = ""
 PI_SSH_USER = "john"
 PI_IP = "100.92.165.20"
 MAC_IP = "100.122.35.56"

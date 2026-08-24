@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -11,10 +12,10 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from core.endpoints import get as _ep_get  # noqa: E402
+from core.retired_services import retired_message  # noqa: E402
 
 def _publish_url() -> str:
-    return f"{_ep_get('agent_cp.base_url')}/api/cockpit/publish/imessage_triage"
+    return os.environ.get("IMESSAGE_TRIAGE_PUBLISH_URL", "").strip()
 
 # Only these categories warrant a cockpit item (per spec)
 _PUBLISH_CATEGORIES = frozenset({"action_me", "scheduling"})
@@ -57,6 +58,10 @@ def publish_imessage_triage(
             flush=True,
         )
         return True
+    publish_url = _publish_url()
+    if not publish_url:
+        print(f"[publish] {retired_message('imessage-triage-publish')}", flush=True)
+        return False
     payload: dict[str, Any] = {
         "chat_db_msg_id": chat_db_msg_id,
         "category": category,
@@ -67,7 +72,7 @@ def publish_imessage_triage(
     if received_at:
         payload["received_at"] = received_at
     try:
-        r = httpx.post(_publish_url(), json=payload, timeout=10)
+        r = httpx.post(publish_url, json=payload, timeout=10)
         return r.status_code in (200, 201)
     except Exception as exc:
         print(f"[publish] post failed: {exc}", flush=True)

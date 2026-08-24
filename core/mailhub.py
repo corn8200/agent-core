@@ -1,9 +1,4 @@
-"""Mailhub send helpers for Mac-local agent callers.
-
-This mirrors the canonical VPS helper at ``/srv/apps/lib/mailhub.py`` so
-Mac-side callers can use the same auth resolution chain and send/reply API
-without shelling out over SSH.
-"""
+"""Mailhub send helpers for Mac-local agent callers."""
 
 from __future__ import annotations
 
@@ -28,7 +23,6 @@ log = logging.getLogger("mailhub")
 _TOKEN_ENV_FILES: tuple[Path, ...] = (
     Path.home() / ".config/secrets.env",
     Path("/etc/cp-api.env"),
-    Path("/srv/apps/mailhub/config/mailhub.env"),
 )
 _OP_REF = "op://MachineAutoBiz/MAILHUB_TOKEN/password"
 _OP_TIMEOUT_S = 5.0
@@ -56,8 +50,7 @@ class MailhubAuthError(MailhubError):
             (
                 "no mailhub token resolved; tried (in order): "
                 f"{chain}. Set MAILHUB_TOKEN env, write to "
-                "~/.config/secrets.env, /etc/cp-api.env, or "
-                "/srv/apps/mailhub/config/mailhub.env, or store as "
+                "~/.config/secrets.env or /etc/cp-api.env, or store as "
                 f"{_OP_REF}."
             ),
             body=None,

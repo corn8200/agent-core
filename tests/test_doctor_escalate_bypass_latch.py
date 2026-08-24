@@ -177,12 +177,34 @@ class DoctorEscalateBypassLatchTest(unittest.TestCase):
                         redis_conn=None,
                         bypass_priority=None,
                         fingerprint="fp3",
-                        target_host="vps",
+                        target_host="mac",
                     )
 
         pushover.assert_called_once()
         self.assertTrue(events[0]["pushover_sent"])
         self.assertFalse(events[0]["soft_pane_hold"])
+
+    def test_vps_bypass_is_retired_before_pushover(self) -> None:
+        events: list[dict] = []
+
+        with mock.patch.object(doctor_escalate, "_record_bypass") as record_bypass:
+            with mock.patch.object(doctor_escalate, "_pushover_direct") as pushover:
+                with mock.patch.object(doctor_escalate, "_log_event", side_effect=events.append):
+                    doctor_escalate._deliver_bypass(
+                        watcher="old-vps-watcher",
+                        severity="critical",
+                        summary="deleted server route",
+                        briefing="briefing",
+                        reason="timeout",
+                        redis_conn=None,
+                        bypass_priority=None,
+                        fingerprint="fp-vps",
+                        target_host="vps",
+                    )
+
+        record_bypass.assert_not_called()
+        pushover.assert_not_called()
+        self.assertEqual(events[0]["event"], "retired_route")
 
 
 if __name__ == "__main__":

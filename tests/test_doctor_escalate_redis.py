@@ -130,6 +130,18 @@ class DoctorEscalateRedisConfigTest(unittest.TestCase):
             ],
         )
 
+    def test_get_redis_without_config_uses_local_fallback(self) -> None:
+        with mock.patch.object(
+            doctor_escalate,
+            "_REDIS_ENV_FILE_PATHS",
+            (),
+            create=True,
+        ):
+            redis_conn = doctor_escalate._get_redis()
+
+        self.assertIsNone(redis_conn)
+        self.assertEqual(FakeRedis.calls, [])
+
 
 if __name__ == "__main__":
     unittest.main()

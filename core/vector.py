@@ -1,16 +1,13 @@
-"""Mac-side convenience wrapper around the VPS pgvector store.
+"""Compatibility wrapper for the retired remote pgvector store.
 
-Thin client: psycopg2 straight to the VPS Postgres over tailnet, OpenAI
-embedding call from Mac. Shares a codepath with the canonical VPS module at
-`/srv/apps/taskqueue/tasks/vector.py` — keep behaviour in sync if that changes.
+The old remote Postgres and RQ worker were removed with the VPS. Read and write
+helpers now fail closed unless a replacement DSN is explicitly supplied.
 
 Usage:
     from core.vector import search, get_stats, enqueue_index
     hits = search("Eaton interview", source_types=["calendar_event"], limit=5)
     enqueue_index("memory", "user_contact_details", body, {"path": "..."})
 
-Writes go through the RQ `vps` queue so the OpenAI key stays narrow to one
-host; `enqueue_index()` is a thin wrapper over that.
 """
 from __future__ import annotations
 
@@ -21,16 +18,16 @@ import psycopg2
 import psycopg2.extras
 from openai import OpenAI
 
+from core.retired_services import RetiredServiceError, raise_retired
 from core.vault import get_secret
 
-PG_DSN = os.environ.get(
-    "VEC_PG_DSN",
-    "postgresql://appuser:Axh3nce42muAkSGl7GGXsMtn2kUPqk6Mgob5ucRIERk@100.118.21.64:5432/appdb",
-)
+PG_DSN = os.environ.get("VEC_PG_DSN", "").strip()
 EMBED_MODEL = "text-embedding-3-small"
 
 
 def _pg():
+    if not PG_DSN:
+        raise_retired("vector-postgres")
     return psycopg2.connect(PG_DSN)
 
 
@@ -122,18 +119,21 @@ def enqueue_index(
     source_id: str,
     content: str,
     metadata: Optional[dict] = None,
-    queue: str = "vps",
+    queue: str = "",
 ) -> str:
-    """Enqueue an embed_and_index job on the VPS RQ queue.
+    """Enqueue an embed_and_index job on a configured replacement RQ queue.
 
-    Returns job id. Worker on VPS resolves `tasks.vector.embed_and_index` by
-    name and embeds there (keeps OpenAI key on VPS only). Content-hash dedup
-    in the worker means re-enqueuing unchanged content is a cheap no-op.
+    Returns job id. Without ``VECTOR_RQ_REDIS_URL`` or an explicit queue name,
+    this fails closed before opening Redis.
     """
     from rq import Queue
     from redis import Redis
 
-    q = Queue(queue, connection=Redis(host="100.118.21.64", port=6379))
+    redis_url = os.environ.get("VECTOR_RQ_REDIS_URL", "").strip()
+    queue_name = queue or os.environ.get("VECTOR_RQ_QUEUE", "").strip()
+    if not redis_url or not queue_name:
+        raise RetiredServiceError("vector-rq")
+    q = Queue(queue_name, connection=Redis.from_url(redis_url))
     job = q.enqueue(
         "tasks.vector.embed_and_index",
         source_type,
@@ -146,7 +146,7 @@ def enqueue_index(
 
 
 def get_stats() -> dict:
-    """Per-source counts + total + sync state (delegates to VPS Postgres)."""
+    """Per-source counts + total + sync state from a configured replacement DB."""
     with _pg() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(
             """

@@ -9,7 +9,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from core.endpoints import get as get_endpoint
+from core.retired_services import retired_message
 from core.vault import get_secret
 
 
@@ -118,7 +118,7 @@ def _gateway_token() -> str:
 
 
 def _cp_api_base() -> str:
-    return os.environ.get("CP_API_BASE") or get_endpoint("agent_cp.base_url")
+    return os.environ.get("CP_API_BASE", "").strip()
 
 
 def _send_gateway_sync(
@@ -158,6 +158,8 @@ def _send_gateway_sync(
         payload["payload"]["html"] = 1
     data = json.dumps(payload).encode()
     base_url = _cp_api_base().rstrip("/")
+    if not base_url:
+        return PushoverResult(False, retired_message("overseer-gateway"))
     req = urllib.request.Request(
         f"{base_url}/api/overseer/gateway/enqueue",
         data=data,

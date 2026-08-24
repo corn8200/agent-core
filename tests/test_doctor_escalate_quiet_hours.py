@@ -100,7 +100,7 @@ class DoctorEscalateQuietHoursTest(unittest.TestCase):
                             redis_conn=None,
                             bypass_priority=None,
                             fingerprint="fp-night",
-                            target_host="vps",
+                            target_host="mac",
                         )
 
         pushover.assert_called_once()

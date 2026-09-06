@@ -23,14 +23,14 @@ from openai import OpenAI
 
 from core.vault import get_secret
 
-PG_DSN = os.environ.get(
-    "VEC_PG_DSN",
-    "postgresql://appuser:Axh3nce42muAkSGl7GGXsMtn2kUPqk6Mgob5ucRIERk@100.118.21.64:5432/appdb",
-)
+# No default: the old built-in DSN pointed at the Hetzner VPS deleted 2026-08-17.
+PG_DSN = os.environ.get("VEC_PG_DSN", "")
 EMBED_MODEL = "text-embedding-3-small"
 
 
 def _pg():
+    if not PG_DSN:
+        raise RuntimeError("VEC_PG_DSN is not set; the vector store no longer has a default host")
     return psycopg2.connect(PG_DSN)
 
 

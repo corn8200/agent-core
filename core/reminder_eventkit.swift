@@ -266,9 +266,21 @@ private func apply(_ value: ReminderValue, to reminder: EKReminder, calendar: EK
     reminder.calendar = calendar
     reminder.title = value.title
     reminder.notes = value.notes
-    reminder.dueDateComponents = try dueComponents(value.dueAt)
+    let due = try dueComponents(value.dueAt)
+    reminder.dueDateComponents = due
     reminder.priority = value.priority
     reminder.isCompleted = false
+    // EventKit fires a notification only for a reminder that carries an alarm.
+    // The Reminders UI adds one implicitly when a human types a date; a
+    // programmatic write does not, so a due date alone stays silent. Clear
+    // first because upsert re-applies to the same reminder and alarms would
+    // otherwise accumulate into duplicate notifications.
+    for existing in reminder.alarms ?? [] {
+        reminder.removeAlarm(existing)
+    }
+    if let fire = due?.date {
+        reminder.addAlarm(EKAlarm(absoluteDate: fire))
+    }
 }
 
 private func verified(

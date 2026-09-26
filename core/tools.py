@@ -1017,13 +1017,13 @@ async def create_calendar_event(args: dict[str, Any]) -> dict:
 # --- Apple Reminders ---
 # John's 6 owned lists (see CLAUDE.md "Apple Reminders — Canonical Lists").
 # J&A Reminders and Store are SHARED with wife — NEVER write to them.
-REMINDER_LISTS = {"Home", "Health", "Work", "Sentry AI", "AI", "Someday"}
+REMINDER_LISTS = {"Home", "Health", "Work", "Sentry AI", "Claude", "Someday"}
 REMINDER_LIST_GUIDE = (
     "Home=personal/domestic/family/chores; "
     "Health=medical only (appts, shots, Rx); "
     "Work=day job (TAMKO); "
     "Sentry AI=business/federal/tax/SAM.gov/client work; "
-    "AI=tech action items AI agents create for manual execution (Touch ID etc); "
+    "Claude=tech action items Claude creates for manual execution (Touch ID etc); "
     "Someday=no-date aspirational backlog"
 )
 

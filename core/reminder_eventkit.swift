@@ -2,12 +2,12 @@
 //
 // Reads require an existing Reminders Full Access grant. Mutations additionally
 // require REMINDER_UPSERT_LIVE=1. This helper never requests TCC access and may
-// write only to the unshared "Claude" canary list.
+// write only to the unshared "AI" canary list.
 
 import EventKit
 import Foundation
 
-private let allowedList = "Claude"
+private let allowedList = "AI"
 private let markerPrefix = "[reminder-upsert:"
 private let utc = TimeZone(secondsFromGMT: 0)!
 

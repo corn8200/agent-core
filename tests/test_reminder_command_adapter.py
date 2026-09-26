@@ -28,7 +28,7 @@ UNDO_ID = "decision:undo:00000001"
 
 def proposal(**payload_overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
-        "list": "Claude",
+        "list": "AI",
         "title": "Confirm the canary action",
         "notes": "Created from a verified Duffields decision.",
         "due_at": "2026-07-22T09:30:00-04:00",
@@ -162,7 +162,7 @@ def test_execute_readback_undo_and_undo_readback(tmp_path: Path) -> None:
     )
     assert readback["ok"] is True
     assert readback["observed"]["status"] == "present"
-    assert readback["observed"]["reminder"]["list"] == "Claude"
+    assert readback["observed"]["reminder"]["list"] == "AI"
 
     undone = subject.dispatch(
         "undo",

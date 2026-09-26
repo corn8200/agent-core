@@ -9,7 +9,7 @@ import EventKit
 import Foundation
 
 private let utc = TimeZone(secondsFromGMT: 0)!
-private let canaryList = "Claude"
+private let canaryList = "AI"
 private let canaryTitle = "Duffields reminder completion canary"
 private let canaryMarkerPrefix = "[warboard-reminder-complete-canary:"
 
@@ -393,7 +393,7 @@ private func canaryCalendar(_ store: EKEventStore) throws -> EKCalendar {
     guard matches.count == 1, let calendar = matches.first else {
         throw HelperError.rejected(
             "canary_list_ambiguous",
-            "expected exactly one Claude reminder list; found \(matches.count)"
+            "expected exactly one AI reminder list; found \(matches.count)"
         )
     }
     return calendar

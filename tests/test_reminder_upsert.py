@@ -28,7 +28,7 @@ def request_payload(**overrides: object) -> dict[str, object]:
     payload: dict[str, object] = {
         "schema": reminder_upsert.SCHEMA,
         "idempotency_key": "duffields:canary:decision-42",
-        "list": "Claude",
+        "list": "AI",
         "title": "Confirm the canary action",
         "notes": "Created from a verified Duffields decision.",
         "due_at": "2026-07-22T09:30:00-04:00",
@@ -363,7 +363,7 @@ def test_swift_helper_is_fail_closed_and_canary_scoped() -> None:
         encoding="utf-8"
     )
 
-    assert 'private let allowedList = "Claude"' in source
+    assert 'private let allowedList = "AI"' in source
     assert 'environment["REMINDER_UPSERT_LIVE"] == "1"' in source
     assert "requestAccess(" not in source
     assert "requestFullAccessToReminders(" not in source

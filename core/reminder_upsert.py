@@ -26,7 +26,7 @@ from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 SCHEMA = "reminder-upsert-request/v1"
 RECEIPT_SCHEMA = "reminder-upsert-receipt/v1"
 UNDO_RECEIPT_SCHEMA = "reminder-upsert-undo-receipt/v1"
-CANARY_LISTS = frozenset({"Claude"})
+CANARY_LISTS = frozenset({"AI"})
 LIVE_CONFIRMATION = "I_UNDERSTAND_THIS_WRITES_APPLE_REMINDERS"
 MARKER_PREFIX = "[reminder-upsert:"
 _KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")

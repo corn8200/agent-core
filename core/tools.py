@@ -11,6 +11,7 @@ import json
 import re
 import shlex
 import subprocess
+import tempfile
 import uuid
 from pathlib import Path
 from typing import Any
@@ -95,17 +96,11 @@ async def _kill_tmux_session(session: str) -> None:
 
 
 async def _tmux_relay_osascript(script: str, timeout: float = 30.0) -> tuple[bool, str]:
-    """Run osascript via a hidden one-shot tmux session to get GUI session access.
+    """Wait for an atomic exit receipt, never for output-file creation.
 
-    Returns (success, output). Falls back gracefully if no tmux session exists.
+    Only the private one-shot relay session is stopped during cleanup. Failure
+    or timeout is an unknown send outcome; callers must not retry a send.
     """
-    tag = uuid.uuid4().hex[:8]
-    script_file = Path(f"/tmp/imsg-{tag}.scpt")
-    result_file = Path(f"/tmp/imsg-{tag}.result")
-    script_file.write_text(script)
-
-    # Find a live tmux session. Use async subprocess with wait_for so a
-    # wedged tmux server (hung has-session call) cannot block the event loop.
     target = None
     for sess in _RELAY_SESSIONS:
         try:
@@ -125,43 +120,65 @@ async def _tmux_relay_osascript(script: str, timeout: float = 30.0) -> tuple[boo
                 break
         except Exception:
             continue
-
-    if not target:
-        script_file.unlink(missing_ok=True)
+    if target is None:
         return False, "no tmux session for relay"
 
-    # Run osascript in a private one-shot tmux session. This keeps Terminal.app
-    # FDA inheritance without inserting relay-* windows into the human claude session.
-    relay_session = f"imsg-relay-{tag}"
-    bash_cmd = (
-        f"osascript {script_file} > {result_file} 2>&1; "
-        f"rm -f {script_file}; exit 0"
-    )
-    proc = await asyncio.create_subprocess_exec(
-        _TMUX, "new-session", "-d", "-s", relay_session, "-n", "relay",
-        "-c", str(Path.home()),
-        f"/bin/bash -c {shlex.quote(bash_cmd)}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        result_file.unlink(missing_ok=True)
-        script_file.unlink(missing_ok=True)
-        return False, f"tmux new-session returned {proc.returncode}: {stderr.decode(errors='replace')[:200]}"
-
-    try:
-        for _ in range(int(timeout * 5)):
-            if result_file.exists():
-                output = result_file.read_text().strip()
-                result_file.unlink(missing_ok=True)
-                return True, output
-            await asyncio.sleep(0.2)
-        return False, "tmux relay timed out"
-    finally:
-        result_file.unlink(missing_ok=True)
-        script_file.unlink(missing_ok=True)
-        await _kill_tmux_session(relay_session)
+    relay_session = "imsg-relay-" + uuid.uuid4().hex
+    with tempfile.TemporaryDirectory(prefix="imsg-relay-") as directory:
+        root = Path(directory)
+        script_file, output_file, receipt_file = (root / n for n in ("script.scpt", "output", "complete"))
+        script_file.touch(mode=0o600)
+        script_file.write_text(script)
+        output_tmp, receipt_tmp = root / "output.tmp", root / "complete.tmp"
+        q = lambda path: shlex.quote(str(path))
+        # Redirection creates output.tmp before execution. Neither partial
+        # output nor process startup is success. Publish output first, then the
+        # exit status only after osascript has exited. Both renames are local.
+        bash_cmd = (
+            f"umask 077; /usr/bin/osascript {q(script_file)} > {q(output_tmp)} 2>&1; "
+            f"relay_exit=$?; /bin/mv {q(output_tmp)} {q(output_file)} && "
+            f"printf '%s\n' \"$relay_exit\" > {q(receipt_tmp)} && "
+            f"/bin/mv {q(receipt_tmp)} {q(receipt_file)}"
+        )
+        proc = None
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                _TMUX, "new-session", "-d", "-s", relay_session, "-n", "relay",
+                "-c", str(Path.home()), "/bin/bash -c " + shlex.quote(bash_cmd),
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                await asyncio.wait_for(proc.communicate(), timeout=2)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return False, "tmux session startup timed out"
+            if proc.returncode != 0:
+                return False, "tmux session startup failed"
+            deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+            while True:
+                if receipt_file.exists():
+                    try:
+                        status = receipt_file.read_text().strip()
+                        if not re.fullmatch(r"[0-9]{1,3}", status) or int(status) > 255:
+                            return False, "invalid relay completion receipt"
+                        if output_file.stat().st_size > 1024 * 1024:
+                            return False, "relay output exceeds limit"
+                        output = output_file.read_text().strip()
+                    except (OSError, UnicodeError):
+                        return False, "relay completion evidence unavailable"
+                    return int(status) == 0, output
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    return False, "tmux relay timed out without completion receipt"
+                await asyncio.sleep(min(0.05, remaining))
+        finally:
+            # Cancellation can interrupt startup before communicate returns.
+            # Reap that client before stopping the session it may be creating.
+            if proc is not None and proc.returncode is None:
+                proc.kill()
+                await proc.wait()
+            await _kill_tmux_session(relay_session)
 
 
 async def tmux_relay_shell(shell_cmd: str, timeout: float = 15.0) -> tuple[bool, str]:
@@ -611,7 +628,7 @@ async def _send_via_osascript_service(buddy: str, escaped_msg: str, service_type
 _IMESSAGE_ERROR_CODES = {1, 22, 102, 1032}
 
 
-async def send_imessage_reliable(buddy: str, message: str, _approved: bool = False, _require_approval: bool = False) -> tuple[bool, str]:
+async def send_imessage_reliable(buddy: str, message: str, _approved: bool = False, _require_approval: bool = False, *, imessage_only: bool = False) -> tuple[bool, str]:
     """Send iMessage or SMS via tmux relay, with chat.db delivery verification.
 
     Structurally incapable of returning (True, ...) unless chat.db confirms
@@ -678,7 +695,7 @@ async def send_imessage_reliable(buddy: str, message: str, _approved: bool = Fal
     # Layer 1 — pre-flight: check chat.db for prior send history on this handle.
     # If the most-recent successful service is SMS or RCS, skip iMessage entirely.
     prior_service = await _chatdb_service_for_handle(buddy)
-    if prior_service in ("SMS", "RCS"):
+    if not imessage_only and prior_service in ("SMS", "RCS"):
         first_service = "SMS"
     else:
         first_service = "iMessage"
@@ -687,6 +704,8 @@ async def send_imessage_reliable(buddy: str, message: str, _approved: bool = Fal
 
     ok, output = await _send_via_osascript_service(buddy, escaped_msg, first_service)
     if not ok:
+        if imessage_only:
+            return False, "iMessage relay failed; outcome unknown, no fallback"
         if first_service == "iMessage":
             ok2, output2 = await _send_via_osascript_service(buddy, escaped_msg, "SMS")
             if not ok2:
@@ -706,12 +725,15 @@ async def send_imessage_reliable(buddy: str, message: str, _approved: bool = Fal
 
     actual_service, error_code = row
 
+    if imessage_only and actual_service != "iMessage":
+        return False, "iMessage-only route returned another service; no fallback"
+
     if error_code == 0:
         svc_label = "iMessage" if actual_service == "iMessage" else "SMS"
         return True, f"Delivered via {svc_label} to {buddy}"
 
     # iMessage error — try SMS fallback if we haven't already
-    if actual_service == "iMessage" and error_code in _IMESSAGE_ERROR_CODES and attempted_service == "iMessage":
+    if not imessage_only and actual_service == "iMessage" and error_code in _IMESSAGE_ERROR_CODES and attempted_service == "iMessage":
         pre_ts2 = _mac_now_ns()
         ok3, output3 = await _send_via_osascript_service(buddy, escaped_msg, "SMS")
         if not ok3:

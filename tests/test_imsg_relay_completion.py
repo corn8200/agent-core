@@ -214,3 +214,43 @@ def test_legacy_default_preserves_existing_service_selection():
               _chatdb_verify_send=verify, _mac_now_ns=lambda:123)
     assert asyncio.run(ns['send_imessage_reliable']('+15555550101','fixture',_approved=True))[0]
     assert calls == ['SMS']
+
+
+@pytest.mark.parametrize('prior', ['iMessage', 'SMS', None])
+def test_legacy_unknown_relay_outcome_never_triggers_second_send(prior):
+    ns = functions(); calls = []
+    async def history(_): return prior
+    async def send(buddy, body, service):
+        calls.append(service); return False, 'fixture unknown relay outcome'
+    async def verify(*args, **kwargs): pytest.fail('failed relay must stop')
+    ns.update(_chatdb_service_for_handle=history, _send_via_osascript_service=send,
+              _chatdb_verify_send=verify, _mac_now_ns=lambda:123)
+    ok, result = asyncio.run(ns['send_imessage_reliable']('+15555550101','fixture',_approved=True))
+    assert not ok and 'no fallback' in result
+    assert calls == [('SMS' if prior == 'SMS' else 'iMessage')]
+
+
+def test_legacy_explicit_native_failure_policy_stays_unchanged():
+    ns = functions(); calls = []
+    async def history(_): return 'iMessage'
+    async def send(buddy, body, service): calls.append(service); return True, 'ok'
+    async def verify(*args, **kwargs):
+        return ('iMessage', 1) if len(calls) == 1 else ('SMS', 0)
+    ns.update(_chatdb_service_for_handle=history, _send_via_osascript_service=send,
+              _chatdb_verify_send=verify, _mac_now_ns=lambda:123)
+    assert asyncio.run(ns['send_imessage_reliable']('+15555550101','fixture',_approved=True))[0]
+    assert calls == ['iMessage', 'SMS']
+
+
+def test_approval_queue_preserves_imessage_only_restriction(monkeypatch):
+    import sys
+    ns = functions(); queued = []
+    async def queue_or_send(**kwargs): queued.append(kwargs); return {'status':'queued','uuid':'fixture'}
+    outbox = types.ModuleType('core.outbox')
+    outbox._is_self = lambda _:False
+    outbox.queue_or_send = queue_or_send
+    monkeypatch.setitem(sys.modules, 'core.outbox', outbox)
+    ns['_looks_like_imessage_handle'] = lambda _:True
+    assert not asyncio.run(ns['send_imessage_reliable']('+15555550101','fixture',
+        _require_approval=True, imessage_only=True))[0]
+    assert queued[0]['send_kwargs']['imessage_only'] is True

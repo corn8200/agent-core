@@ -679,7 +679,7 @@ async def send_imessage_reliable(buddy: str, message: str, _approved: bool = Fal
                 send_fn=send_imessage_reliable,
                 send_fn_module="core.tools",
                 send_fn_name="send_imessage_reliable",
-                send_kwargs={"buddy": buddy, "message": message},
+                send_kwargs={"buddy": buddy, "message": message, "imessage_only": imessage_only},
             )
             status = result.get("status")
             if status == "queued":
@@ -704,19 +704,12 @@ async def send_imessage_reliable(buddy: str, message: str, _approved: bool = Fal
 
     ok, output = await _send_via_osascript_service(buddy, escaped_msg, first_service)
     if not ok:
-        if imessage_only:
-            return False, "iMessage relay failed; outcome unknown, no fallback"
-        if first_service == "iMessage":
-            ok2, output2 = await _send_via_osascript_service(buddy, escaped_msg, "SMS")
-            if not ok2:
-                return False, f"iMessage relay failed ({output}); SMS relay also failed ({output2})"
-            attempted_service = "SMS"
-            osascript_ok = True
-        else:
-            return False, f"SMS relay failed: {output}"
-    else:
-        attempted_service = first_service
-        osascript_ok = True
+        # A completed failing script, startup failure or timeout may already
+        # have caused an effect. Do not turn that unknown outcome into a second
+        # SMS attempt, including for legacy callers of this corrected relay.
+        return False, f"{first_service} relay failed; outcome unknown, no fallback"
+    attempted_service = first_service
+    osascript_ok = True
 
     # Layer 2 — post-send verification: query chat.db for the outbound row.
     row = await _chatdb_verify_send(buddy, message, pre_ts, timeout=8.0)

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__Unified__memory_recall",
+      "mcp__Unified__stack_brief",
+      "mcp__claude-code-remote__read_documentation"
+    ]
+  }
+}

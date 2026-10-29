@@ -480,10 +480,13 @@ class ReminderUpsertAdapter:
             "detail": "plan only; EventKit backend was not opened",
         }
 
-    def upsert(self, request: ReminderUpsertRequest) -> dict[str, Any]:
+    def upsert(self, request: ReminderUpsertRequest, *,
+               expected_record: ReminderRecord | None = None,
+               create_only: bool = False, replay_only: bool = False) -> dict[str, Any]:
         self._validate_live(request)
         with _exclusive_lock(self.lock_path):
-            return self._upsert_locked(request)
+            return self._upsert_locked(request, expected_record=expected_record,
+                                       create_only=create_only, replay_only=replay_only)
 
     def create_unbound(
         self,
@@ -527,7 +530,9 @@ class ReminderUpsertAdapter:
                 persist_verified(receipt)
             return receipt
 
-    def _upsert_locked(self, request: ReminderUpsertRequest) -> dict[str, Any]:
+    def _upsert_locked(self, request: ReminderUpsertRequest, *,
+                       expected_record: ReminderRecord | None = None,
+                       create_only: bool = False, replay_only: bool = False) -> dict[str, Any]:
         desired = request.desired()
         matches = self.backend.find_by_marker(request.marker)
         if len(matches) > 1:
@@ -536,6 +541,18 @@ class ReminderUpsertAdapter:
             )
 
         before = matches[0] if matches else None
+        if create_only and before is not None:
+            raise ConflictError("unbound marker exists; reconciliation required")
+        if replay_only and expected_record is None:
+            raise ConflictError("replay requires a verified expected record")
+        if expected_record is not None:
+            if before is None or before.fingerprint() != expected_record.fingerprint():
+                raise ConflictError("saved state changed or missing; refusing mutation")
+            # Keep the caller's verified snapshot through the backend's atomic
+            # compare-before-write, rather than blessing a fresh observed record.
+            before = expected_record
+        if replay_only and not _same_value(before, desired):
+            raise ConflictError("replay would mutate the verified item")
         if before is not None and before.completed:
             return self._receipt(
                 request,
@@ -567,6 +584,8 @@ class ReminderUpsertAdapter:
 
         if _same_value(before, desired):
             readback = _verified_readback(self.backend, before.identifier, desired)
+            if expected_record is not None and readback.fingerprint() != expected_record.fingerprint():
+                raise ConflictError("saved state changed during replay readback")
             return self._receipt(
                 request,
                 status="unchanged",

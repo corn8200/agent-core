@@ -367,3 +367,57 @@ def test_swift_helper_is_fail_closed_and_canary_scoped() -> None:
     assert 'environment["REMINDER_UPSERT_LIVE"] == "1"' in source
     assert "requestAccess(" not in source
     assert "requestFullAccessToReminders(" not in source
+
+
+@pytest.mark.parametrize("operation", ["replay", "update"])
+@pytest.mark.parametrize("damage", ["title", "missing", "race"])
+def test_saved_state_guards_all_repeated_writes(tmp_path, operation, damage):
+    from dataclasses import replace
+    backend = FakeBackend()
+    service = ReminderUpsertAdapter(backend, lock_path=tmp_path / "guard.lock")
+    request = ReminderUpsertRequest.from_mapping(request_payload())
+    receipt = service.upsert(request, create_only=True)
+    saved = ReminderRecord.from_mapping(receipt["after"])
+    desired = request if operation == "replay" else ReminderUpsertRequest.from_mapping(request_payload(title="updated test"))
+    if damage == "missing":
+        del backend.records[saved.identifier]
+    elif damage == "title":
+        backend.records[saved.identifier] = replace(saved, title="human edit")
+    elif operation == "update":
+        original = backend.update
+        def racing_update(identifier, value, *, expected, marker):
+            assert expected == saved
+            backend.records[identifier] = replace(saved, title="human race edit")
+            if backend.records[identifier].fingerprint() != expected.fingerprint():
+                raise ConflictError("backend compare-before-write refused race")
+            return original(identifier, value, expected=expected, marker=marker)
+        backend.update = racing_update
+    else:
+        original = backend.get
+        def racing_get(identifier):
+            backend.records[identifier] = replace(saved, title="human race edit")
+            return original(identifier)
+        backend.get = racing_get
+    with pytest.raises((ConflictError, VerificationError)):
+        service.upsert(desired, expected_record=saved, replay_only=operation == "replay")
+    if damage == "missing":
+        assert backend.records == {}
+    else:
+        assert backend.records[saved.identifier].title.startswith("human")
+
+
+def test_guarded_replay_is_read_only_and_unbound_collision_is_refused(tmp_path):
+    backend = FakeBackend()
+    service = ReminderUpsertAdapter(backend, lock_path=tmp_path / "guard.lock")
+    request = ReminderUpsertRequest.from_mapping(request_payload())
+    receipt = service.upsert(request, create_only=True)
+    saved = ReminderRecord.from_mapping(receipt["after"])
+    def forbid(*args, **kwargs):
+        raise AssertionError("replay must not write")
+    backend.create = backend.update = forbid
+    assert service.upsert(request, expected_record=saved, replay_only=True)["status"] == "unchanged"
+    with pytest.raises(ConflictError, match="unbound marker"):
+        service.upsert(request, create_only=True)
+    changed = ReminderUpsertRequest.from_mapping(request_payload(title="different request"))
+    with pytest.raises(ConflictError, match="would mutate"):
+        service.upsert(changed, expected_record=saved, replay_only=True)

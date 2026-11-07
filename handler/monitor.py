@@ -74,7 +74,7 @@ def save_state(state: dict):
 def anomaly_fingerprint(anomalies: list[dict]) -> str:
     """Stable hash of anomaly set (ignores ordering)."""
     key = sorted(f"{a['severity']}|{a['source']}|{a['message']}" for a in anomalies)
-    return hashlib.sha1("\n".join(key).encode()).hexdigest()[:12]
+    return hashlib.sha1("\n".join(key).encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 def load_diagnosis_cache() -> dict:
@@ -94,7 +94,7 @@ def save_diagnosis_cache(cache: dict):
 def diagnosis_fingerprint(anomalies: list[dict]) -> str:
     """Per-anomaly fingerprint keyed on source (host) + message (service+type)."""
     key = sorted(f"{a['source']}|{a['message']}" for a in anomalies)
-    return hashlib.sha1("\n".join(key).encode()).hexdigest()[:12]
+    return hashlib.sha1("\n".join(key).encode(), usedforsecurity=False).hexdigest()[:12]
 
 
 def prune_diagnosis_cache(cache: dict, now: datetime) -> dict:
